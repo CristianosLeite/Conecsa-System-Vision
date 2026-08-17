@@ -10,6 +10,9 @@
 #   training-service  (Python)  gRPC :50071
 #   api-gateway     (Python)    HTTP API :5000 (the only HTTP surface)
 #   system-vision   (WASM)      Tailwind watch + trunk serve on :18080
+#   tls terminator  (Docker)    nginx :443 — enroll/mTLS gate the hub talks to
+#                               (dev twin of the system-vision container)
+#   flow            (Docker)    Node-RED :1880 (production image, /flow proxy)
 #
 # All services start by default; use flags to skip the GPU-heavy ones on a
 # machine without the TensorRT/PyCUDA stack:
@@ -30,6 +33,7 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 # ---------------------------------------------------------------------------
@@ -39,6 +43,8 @@ RUN_WEBCAM=1
 RUN_INFERENCE=1
 RUN_TRAINING=1
 RUN_APP=1
+RUN_TLS=1
+RUN_FLOW=1
 
 usage() {
     cat <<'EOF'
@@ -48,8 +54,11 @@ Usage: ./scripts/dev.sh [options]
   --no-inference   Don't start inference-service (GPU stack).
   --no-training    Don't start training-service (GPU stack).
   --no-app         Don't start the web frontend (Tailwind + trunk).
+  --no-tls         Don't start the :443 mTLS terminator (nginx in Docker).
+                   Without it the hub cannot discover/pair this machine.
+  --no-flow        Don't start Node-RED (the production flow image, in Docker).
   --gateway-only   Only api-gateway + frontend (implies --no-webcam
-                   --no-inference --no-training).
+                   --no-inference --no-training --no-flow).
   --help           Show this help.
 
 The api-gateway always starts (it is the core HTTP surface).
@@ -62,7 +71,9 @@ while [ $# -gt 0 ]; do
         --no-inference) RUN_INFERENCE=0 ;;
         --no-training)  RUN_TRAINING=0 ;;
         --no-app)       RUN_APP=0 ;;
-        --gateway-only) RUN_WEBCAM=0; RUN_INFERENCE=0; RUN_TRAINING=0 ;;
+        --no-tls)       RUN_TLS=0 ;;
+        --no-flow)      RUN_FLOW=0 ;;
+        --gateway-only) RUN_WEBCAM=0; RUN_INFERENCE=0; RUN_TRAINING=0; RUN_FLOW=0 ;;
         --help|-h)      usage; exit 0 ;;
         *) echo -e "${RED}Unknown argument: $1${NC}" >&2; usage; exit 1 ;;
     esac
@@ -86,6 +97,24 @@ fi
 # which the images copy into dist-packages. Locally, put os-base/ on the path so the
 # gateway/inference/training imports resolve regardless of the .pth init.sh adds.
 export PYTHONPATH="$PROJECT_ROOT/os-base${PYTHONPATH:+:$PYTHONPATH}"
+
+# In production the services get Docker volumes mounted at /data/{models,
+# training,detections}. Locally /data isn't writable, so mirror that layout
+# under .dev-data/ and point the services' env overrides at it.
+DEV_DATA_DIR="${DEV_DATA_DIR:-$PROJECT_ROOT/.dev-data}"
+mkdir -p "$DEV_DATA_DIR/models" "$DEV_DATA_DIR/training" "$DEV_DATA_DIR/detections"
+export MODELS_DIR="${MODELS_DIR:-$DEV_DATA_DIR/models}"
+export TRAINING_DATA_DIR="${TRAINING_DATA_DIR:-$DEV_DATA_DIR/training}"
+export DETECTIONS_DIR="${DETECTIONS_DIR:-$DEV_DATA_DIR/detections}"
+
+# Enrollment/mTLS state: in production a Docker volume shared by the gateway
+# (writes device key + hub-signed certs) and the nginx terminator (reads them).
+# Locally the same dir backs both the gateway and the dev :443 container.
+export CONECSA_CERT_DIR="${CONECSA_CERT_DIR:-$DEV_DATA_DIR/certs}"
+mkdir -p "$CONECSA_CERT_DIR"
+# The dev terminator runs with host networking, so hub calls it relays reach
+# the gateway from loopback — trust it as the terminator peer.
+export TRUSTED_PROXY_HOST="${TRUSTED_PROXY_HOST:-localhost}"
 
 # The service configs default to Docker service hostnames (inference-service:50061,
 # …). For local dev point the peers at localhost (override-able from the env).
@@ -116,6 +145,8 @@ cleanup() {
     trap - INT TERM EXIT
     echo -e "\n${YELLOW}Shutting down...${NC}"
     for pid in "${PIDS[@]}"; do kill_tree "$pid" TERM; done
+    [ "$RUN_TLS" -eq 1 ] && docker rm -f conecsa-dev-tls >/dev/null 2>&1
+    [ "$RUN_FLOW" -eq 1 ] && docker rm -f conecsa-dev-flow >/dev/null 2>&1
     sleep 2
     for pid in "${PIDS[@]}"; do kill_tree "$pid" KILL; done
 }
@@ -178,6 +209,51 @@ fi
 run_svc "gateway" "$BLUE" \
     python3 "$PROJECT_ROOT/api-gateway/main.py"
 
+# :443 mTLS terminator — dev twin of the system-vision nginx container. The hub
+# only ever talks to a device through this port (enroll bootstrap, then mTLS),
+# so without it the machine is undiscoverable/unpairable from the hub.
+if [ "$RUN_TLS" -eq 1 ]; then
+    if ! docker info >/dev/null 2>&1; then
+        echo -e "${RED}Docker unavailable — skipping the :443 terminator (hub pairing disabled).${NC}"
+        RUN_TLS=0
+    fi
+fi
+if [ "$RUN_TLS" -eq 1 ]; then
+    # Snakeoil cert for the enrollment block, generated host-side (the nginx
+    # image may not ship the openssl CLI). Same command as the prod entrypoint.
+    if [ ! -f "$CONECSA_CERT_DIR/snakeoil.crt" ] || [ ! -f "$CONECSA_CERT_DIR/snakeoil.key" ]; then
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+            -keyout "$CONECSA_CERT_DIR/snakeoil.key" -out "$CONECSA_CERT_DIR/snakeoil.crt" \
+            -days 3650 -nodes -subj "/CN=conecsa-enroll" >/dev/null 2>&1
+    fi
+    docker rm -f conecsa-dev-tls >/dev/null 2>&1
+    run_svc "tls" "$MAGENTA" \
+        docker run --rm --name conecsa-dev-tls --network host \
+            -v "$CONECSA_CERT_DIR":/etc/conecsa/certs \
+            -v "$PROJECT_ROOT/scripts/dev-nginx":/etc/nginx/conecsa:ro \
+            -v "$PROJECT_ROOT/scripts/dev-nginx/maps.conf":/etc/nginx/conf.d/maps.conf:ro \
+            --entrypoint sh nginx:alpine /etc/nginx/conecsa/entrypoint.sh
+fi
+
+# Node-RED (flow) — the production image (flow/Dockerfile) with host networking:
+# listens on :1880, reached through the mTLS gate at /flow/ like on the device.
+# Data persists in .dev-data/flow (the flow-data volume equivalent).
+if [ "$RUN_FLOW" -eq 1 ] && ! docker info >/dev/null 2>&1; then
+    echo -e "${RED}Docker unavailable — skipping Node-RED (flow).${NC}"
+    RUN_FLOW=0
+fi
+if [ "$RUN_FLOW" -eq 1 ]; then
+    mkdir -p "$DEV_DATA_DIR/flow"
+    docker rm -f conecsa-dev-flow >/dev/null 2>&1
+    run_svc "flow" "$MAGENTA" bash -c "\
+        docker build -q -t conecsa-dev-flow '$PROJECT_ROOT/flow' && \
+        exec docker run --rm --name conecsa-dev-flow --network host \
+            -v '$DEV_DATA_DIR/flow':/data \
+            -e TZ='${TZ:-America/Sao_Paulo}' \
+            -e INFERENCE_URL='http://localhost:5000' \
+            conecsa-dev-flow"
+fi
+
 if [ "$RUN_APP" -eq 1 ]; then
     # Tailwind watch: shared input styles/input.css → system-vision/styles.css
     # (the file index.html loads). Trunk serve proxies /api to the gateway :5000.
@@ -198,6 +274,8 @@ echo "  api-gateway   http://localhost:5000   (HTTP API)"
 [ "$RUN_INFERENCE" -eq 1 ] && echo "  inference     grpc://localhost:50061"
 [ "$RUN_TRAINING" -eq 1 ]  && echo "  training      grpc://localhost:50071"
 [ "$RUN_WEBCAM" -eq 1 ]    && echo "  webcam-server SHM producer (conecsa_frame_shm)"
+[ "$RUN_TLS" -eq 1 ]       && echo "  mTLS gate     https://localhost:443  (hub pairing/API)"
+[ "$RUN_FLOW" -eq 1 ]      && echo "  flow          http://localhost:1880/flow  (Node-RED)"
 echo -e "${YELLOW}Press Ctrl+C to stop everything.${NC}"
 echo ""
 

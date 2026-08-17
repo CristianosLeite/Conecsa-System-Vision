@@ -20,12 +20,16 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 PROTO_DIR="proto"
-# Local-dev output: the api-gateway is the HTTP service you run off-device
-# (`python api-gateway/main.py`), and it imports every proto (inference /
-# hardware / training / detection). Its gateway/proto dir is gitignored — these
-# stubs are regenerated here locally and inside Dockerfile.api-gateway at build.
-# (inference-service generates its own stubs in its Dockerfile.)
-PYTHON_OUT="api-gateway/gateway/proto"
+# Local-dev outputs: each Python service imports its own gitignored stub dir,
+# matching where its Dockerfile generates them at image build:
+#   api-gateway        → gateway/proto        (Dockerfile.api-gateway)
+#   inference-service  → api/proto            (Dockerfile.inference-service)
+#   training-service   → service/proto        (Dockerfile.training-service)
+PYTHON_OUTS=(
+    "api-gateway/gateway/proto"
+    "inference-service/api/proto"
+    "training-service/service/proto"
+)
 
 # Check if proto directory exists
 if [ ! -d "$PROTO_DIR" ]; then
@@ -50,29 +54,29 @@ if ! python3 -c "import grpc_tools.protoc" &> /dev/null; then
     exit 1
 fi
 
-mkdir -p "$PYTHON_OUT"
-
 # Compile all .proto files for Python (message + gRPC service stubs).
 # `--pyi_out` emits a sibling .pyi stub so static analyzers (Pyright,
 # PyCharm) can resolve the dynamically-built message classes that the
 # runtime .py adds via `_builder.BuildTopDescriptorsAndMessages`.
-# `--grpc_python_out` emits the *_pb2_grpc.py service stubs the gateway imports
+# `--grpc_python_out` emits the *_pb2_grpc.py service stubs the services import
 # (inference_pb2_grpc, hardware_pb2_grpc, training_pb2_grpc).
-for proto_file in "$PROTO_DIR"/*.proto; do
-    echo -e "${BLUE}  Compiling $(basename "$proto_file")...${NC}"
-    python3 -m grpc_tools.protoc \
-        -I"$PROTO_DIR" \
-        --python_out="$PYTHON_OUT" \
-        --pyi_out="$PYTHON_OUT" \
-        --grpc_python_out="$PYTHON_OUT" \
-        "$proto_file"
+for python_out in "${PYTHON_OUTS[@]}"; do
+    echo -e "${BLUE}  → $python_out${NC}"
+    mkdir -p "$python_out"
+    for proto_file in "$PROTO_DIR"/*.proto; do
+        python3 -m grpc_tools.protoc \
+            -I"$PROTO_DIR" \
+            --python_out="$python_out" \
+            --pyi_out="$python_out" \
+            --grpc_python_out="$python_out" \
+            "$proto_file"
+    done
+    # Ensure __init__.py exists
+    touch "$python_out/__init__.py"
 done
 
-# Ensure __init__.py exists
-touch "$PYTHON_OUT/__init__.py"
-
 echo -e "${GREEN}✓ Python protobuf compiled successfully${NC}"
-echo "  Generated files in: $PYTHON_OUT/"
+echo "  Generated files in: ${PYTHON_OUTS[*]}"
 
 # ===========================
 # Compile for Rust
@@ -103,6 +107,6 @@ echo "Protobuf compilation completed!"
 echo "===================================${NC}"
 echo ""
 echo "Proto source:    $PROTO_DIR/"
-echo "Python output:   $PYTHON_OUT/"
+echo "Python outputs:  ${PYTHON_OUTS[*]}"
 echo "Rust output:     handled by build.rs (prost)"
 echo ""
