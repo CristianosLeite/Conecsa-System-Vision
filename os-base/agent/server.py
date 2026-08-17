@@ -24,6 +24,7 @@ from .clocks_agent import pin_performance_clocks  # noqa: E402
 from .gpio_agent import GpioAgent  # noqa: E402
 from .network_agent import NetworkAgent  # noqa: E402
 from .system_agent import SystemAgent  # noqa: E402
+from .time_agent import TimeAgent  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,9 @@ class HardwareServicer(pb_grpc.HardwareServiceServicer):
     """gRPC HardwareService implementation.
 
     Each RPC is a thin adapter that delegates to the backing agent
-    (:class:`NetworkAgent`, :class:`GpioAgent`, :class:`SystemAgent`) and maps
-    the result to/from the ``hardware.proto`` messages.
+    (:class:`NetworkAgent`, :class:`GpioAgent`, :class:`SystemAgent`,
+    :class:`TimeAgent`) and maps the result to/from the ``hardware.proto``
+    messages.
     """
 
     def __init__(self, gpio: GpioAgent):
@@ -158,6 +160,16 @@ class HardwareServicer(pb_grpc.HardwareServiceServicer):
         """RPC: perform a host power action (e.g. shutdown/reboot)."""
         result = SystemAgent.system_power(request.action)
         return pb.SystemPowerResult(
+            success=bool(result.get("success", False)),
+            message=str(result.get("message", "")),
+        )
+
+    # ── System clock ─────────────────────────────────────────────────────────
+
+    def SetSystemTime(self, request, context):
+        """RPC: set the host clock to the hub's wall time (see TimeAgent)."""
+        result = TimeAgent.set_system_time(request.epoch_millis, request.source)
+        return pb.Result(
             success=bool(result.get("success", False)),
             message=str(result.get("message", "")),
         )

@@ -21,6 +21,10 @@ services:
       - /etc/wpa_supplicant:/etc/wpa_supplicant       # persisted network blocks (PSKs)
       - /etc/systemd/network:/etc/systemd/network      # static/DHCP .network files
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket  # systemd-networkd D-Bus
+      # Clock floor shared with the host's conecsa-fake-hwclock units: the agent
+      # rewrites it whenever it accepts a time from the hub, so the acquired
+      # time survives a power cut (this board has no RTC battery).
+      - /var/lib/conecsa:/var/lib/conecsa
       # GPIO: the agent owns the hardware. The shared-memory hot-path channel
       # with inference-service + the host Jetson.GPIO library.
       - gpio-shm:/run/conecsa-gpio

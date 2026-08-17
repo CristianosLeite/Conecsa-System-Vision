@@ -3,7 +3,7 @@
 # test.sh — run every host-side unit-test suite in the repo.
 #
 # Suites:
-#   1. Python (pytest)   — inference-service, training-service, api-gateway
+#   1. Python (pytest)   — inference-service, training-service, api-gateway, os-base
 #   2. Python (pyright)  — static types across every Python service; baseline is 0
 #   3. Rust native       — webcam-server, hub-vision (`cargo test`)
 #   4. Rust wasm         — system-vision (`wasm-pack test`, headless browser)
@@ -54,7 +54,7 @@ if [[ "${SKIP_PYTHON:-0}" != "1" ]]; then
     scripts/compile-proto.sh
   fi
 
-  for svc in inference-service training-service api-gateway; do
+  for svc in inference-service training-service api-gateway os-base; do
     echo "==> pytest: $svc"
     ( cd "$svc" && "$PYTHON" -m pytest -q )
   done

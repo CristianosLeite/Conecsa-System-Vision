@@ -1,0 +1,25 @@
+[Unit]
+Description=Restore the system clock saved before the last shutdown
+Documentation=file:/usr/sbin/conecsa-fake-hwclock
+# This board has no RTC battery, so without this the clock comes back at the
+# epoch on every power cut — and a clock older than the hub CA's not_before
+# makes nginx reject the hub's certificate, leaving the device offline right
+# after a successful pairing. Must run before anything that timestamps or
+# validates certificates (docker, and therefore the whole compose stack, starts
+# far later than sysinit.target).
+DefaultDependencies=no
+RequiresMountsFor=/var/lib
+Before=sysinit.target time-set.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/conecsa-fake-hwclock restore
+# Stopping the unit is what happens at shutdown: save the time we are leaving
+# with, so the next boot restores it.
+ExecStop=/usr/sbin/conecsa-fake-hwclock save
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically save the clock floor (this board has no RTC battery)
+Documentation=file:/usr/sbin/conecsa-fake-hwclock
+
+[Timer]
+# First tick soon after boot: the save service re-runs restore (see its unit),
+# so a boot where the early restore lost is healed within ~30s. After that, a
+# power cut loses at most 15min — which only costs precision, never
+# correctness: the floor just has to stay above the hub CA's not_before until
+# the hub supplies the real time.
+OnBootSec=30s
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

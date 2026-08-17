@@ -12,7 +12,7 @@ device enrollment in `enroll`; shared response/event helpers are in `helpers`.
 """
 import logging
 
-from flask import Flask
+from flask import Flask, request
 
 from .helpers import _json
 
@@ -38,6 +38,21 @@ app.register_blueprint(training_bp)
 # server certificate. Kept outside /api so it stays reachable during bootstrap.
 from .enroll import enroll_bp  # noqa: E402
 app.register_blueprint(enroll_bp)
+
+# Clock correction from the hub (imported after the blueprints so the gRPC
+# clients module is already loaded).
+from . import clock  # noqa: E402
+
+
+@app.before_request
+def sync_hub_clock():
+    """Honour the hub's clock stamp on any verified mTLS request.
+
+    Central rather than per-route so every hub call keeps the device's clock
+    right — which is what keeps the mTLS channel itself working on a host with
+    no RTC battery. See gateway/clock.py.
+    """
+    clock.sync_from_request_headers(request.headers)
 
 
 @app.errorhandler(Exception)

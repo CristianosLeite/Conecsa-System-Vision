@@ -1,8 +1,11 @@
 """Unit tests for device enrollment identity + crypto helpers."""
 import os
+from datetime import datetime, timezone
 
 import pytest
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from gateway import enroll
@@ -92,6 +95,106 @@ class TestTokenRequired:
     def test_token_required_when_set(self, monkeypatch):
         monkeypatch.setenv("DEVICE_PAIR_TOKEN", "secret")
         assert enroll.token_required() is True
+
+
+class TestCompleteAdoptsTheHubClock:
+    """Pairing is the one channel that works while the device clock is wrong
+    (nothing is validated on it), so `/enroll/complete` must take the hub's time
+    BEFORE the certificates land — installing them flips nginx into enforcing
+    mode, and from then on a clock older than the CA's not_before rejects every
+    hub call."""
+
+    @pytest.fixture
+    def client(self, cert_dir, monkeypatch):
+        from flask import Flask
+        monkeypatch.setenv("DEVICE_ID", "cam-42")
+        monkeypatch.delenv("DEVICE_PAIR_TOKEN", raising=False)
+        app = Flask(__name__)
+        app.register_blueprint(enroll.enroll_bp)
+        return app.test_client()
+
+    @staticmethod
+    def _hub_signed_cert() -> tuple:
+        """(device_cert, ca_cert) PEMs for the device's own CSR, as the hub sends."""
+        csr = x509.load_pem_x509_csr(enroll._build_csr())
+        ca_key = ec.generate_private_key(ec.SECP256R1())
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-hub")])
+        span = {
+            "not_valid_before": datetime(2020, 1, 1, tzinfo=timezone.utc),
+            "not_valid_after": datetime(2050, 1, 1, tzinfo=timezone.utc),
+        }
+        ca_cert = (
+            x509.CertificateBuilder()
+            .subject_name(ca_name).issuer_name(ca_name)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(span["not_valid_before"])
+            .not_valid_after(span["not_valid_after"])
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(ca_key, hashes.SHA256())
+        )
+        leaf = (
+            x509.CertificateBuilder()
+            .subject_name(csr.subject).issuer_name(ca_name)
+            .public_key(csr.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(span["not_valid_before"])
+            .not_valid_after(span["not_valid_after"])
+            .add_extension(
+                csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value,
+                critical=False)
+            .sign(ca_key, hashes.SHA256())
+        )
+        pem = serialization.Encoding.PEM
+        return (leaf.public_bytes(pem).decode(), ca_cert.public_bytes(pem).decode())
+
+    def _post(self, client, monkeypatch, apply_result=True):
+        """Run a full pairing, recording the order of the two side effects."""
+        device_cert, ca_cert = self._hub_signed_cert()
+        order = []
+
+        def fake_apply(raw, source, force=False):
+            order.append(("clock", raw, source, force))
+            return apply_result
+
+        real_install = enroll._install_certs
+        monkeypatch.setattr(enroll.clock, "apply_hub_time", fake_apply)
+        monkeypatch.setattr(enroll, "_install_certs",
+                            lambda c, a: (order.append(("install",)), real_install(c, a)))
+        resp = client.post("/enroll/complete", json={
+            "device_cert": device_cert,
+            "ca_cert": ca_cert,
+            "hub_time": "2026-08-03T10:00:00.000Z",
+        })
+        return resp, order
+
+    def test_clock_is_set_before_the_certificates_are_installed(
+            self, client, monkeypatch):
+        resp, order = self._post(client, monkeypatch)
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "enrolled"
+        assert [step[0] for step in order] == ["clock", "install"]
+        # Forced: the bootstrap step bypasses the poll-path threshold and rate
+        # limit, so pairing always leaves a clock floor behind.
+        assert order[0][1:] == ("2026-08-03T10:00:00.000Z", "pairing", True)
+        assert enroll.is_enrolled() is True
+
+    def test_pairing_still_completes_when_the_clock_cannot_be_set(
+            self, client, monkeypatch):
+        resp, order = self._post(client, monkeypatch, apply_result=False)
+        assert resp.status_code == 200
+        assert [step[0] for step in order] == ["clock", "install"]
+        assert enroll.is_enrolled() is True
+
+    def test_an_older_hub_omitting_hub_time_still_pairs(self, client, monkeypatch):
+        device_cert, ca_cert = self._hub_signed_cert()
+        seen = []
+        monkeypatch.setattr(enroll.clock, "apply_hub_time",
+                            lambda raw, source, force=False: seen.append(raw))
+        resp = client.post("/enroll/complete", json={
+            "device_cert": device_cert, "ca_cert": ca_cert})
+        assert resp.status_code == 200
+        assert seen == [None]
 
 
 class TestResetAuthorized:

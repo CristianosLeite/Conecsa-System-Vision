@@ -72,6 +72,12 @@ over **gRPC**.
   polls each paired device's `/api/v1/detections/snapshot`); the device exposes
   only its `:443` mTLS endpoint. This is a LAN mTLS/mDNS path, separate from the
   intra-device gRPC + SHM transports above.
+- The same LAN path carries the **time**: the board has no RTC battery and the
+  sites have no reachable NTP server, so the hub relays its clock (at pairing and
+  on every status poll) and the api-gateway hands it to the hardware agent's
+  `SetSystemTime`. Without it, a clock behind the CA's validity window makes the
+  device reject the hub's own certificate — see
+  [Clock synchronization](services/hub-vision.md#clock-synchronization).
 
 See the [Protocol Buffers reference](reference/proto.md) for the full message
 and service catalogue.

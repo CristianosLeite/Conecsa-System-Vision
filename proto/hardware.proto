@@ -146,6 +146,16 @@ message SystemPowerResult {
   string message = 2;
 }
 
+// ── System clock ──────────────────────────────────────────────────────────
+
+// The hub's wall clock, relayed by the api-gateway so a device whose RTC lost
+// time (the Jetson has no RTC battery) can be corrected without NTP. Setting
+// the clock is a host operation, so it belongs to the privileged agent.
+message SystemTimeRequest {
+  int64 epoch_millis = 1;  // UTC milliseconds since the epoch
+  string source = 2;       // "pairing" | "hub-poll" — for the log line only
+}
+
 // ── Service ─────────────────────────────────────────────────────────────────
 
 service HardwareService {
@@ -170,4 +180,7 @@ service HardwareService {
 
   // System power (shutdown / restart the host)
   rpc SystemPower(SystemPowerRequest) returns (SystemPowerResult);
+
+  // System clock (hub-driven, for hosts with no RTC battery and no NTP)
+  rpc SetSystemTime(SystemTimeRequest) returns (Result);
 }

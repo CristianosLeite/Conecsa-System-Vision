@@ -1,0 +1,14 @@
+[Unit]
+Description=Save the current time as the clock floor for the next boot
+Documentation=file:/usr/sbin/conecsa-fake-hwclock
+RequiresMountsFor=/var/lib
+
+[Service]
+Type=oneshot
+# Heal before saving. The kernel config has no RTC_HCTOSYS, so every boot
+# starts at the epoch and the restore unit is the only thing that moves the
+# clock forward — if it was skipped or beaten by something that stepped the
+# clock, this re-restore (forward-only, no-op when the clock is already at or
+# past the floor) repairs it within one timer tick.
+ExecStart=/usr/sbin/conecsa-fake-hwclock restore
+ExecStart=/usr/sbin/conecsa-fake-hwclock save

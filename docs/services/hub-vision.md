@@ -60,6 +60,34 @@ its certificate does not carry, so it would read as *unpaired* forever while eve
 mTLS call failed the SAN check — and the pairing UI would report it as paired to
 another hub, with no way out from the hub side.
 
+### Clock synchronization
+
+The hub is also the fleet's **time source**. The Jetson has no RTC battery, and
+the image deliberately ignores the DHCP NTP option while pinning public servers —
+so on a site with no internet a device boots with a clock at the epoch. Since
+certificates carry a validity window (the hub CA starts at 2020-01-01), such a
+device rejects the hub's client certificate as *not yet valid*: nginx answers
+400, the poller reads that as offline, and the device goes dark **immediately
+after a pairing that appeared to succeed** — pairing runs on the TOFU channel,
+where nothing is validated, so a wrong clock does not show up there.
+
+The hub therefore relays its own wall clock on the two paths that work:
+
+- **at pairing**, in the `/enroll/complete` body — the one moment a hub can reach
+  a device whose clock is wrong. The device adopts it *before* installing the
+  certificates, so the flip into enforcing mode already has a valid clock;
+- **afterwards**, in the `X-Conecsa-Hub-Time` header on every status poll. The
+  device only honours it on a request the nginx terminator verified, so no other
+  container on its compose network can move the clock.
+
+The device applies the time through its privileged `os` agent
+(`SetSystemTime`), which refuses anything older than the floor persisted by the
+host's `conecsa-fake-hwclock` units — a hub that lost its own time (the kiosk
+runs on a Jetson too) can never drag a device backwards. Those same units
+restore the floor at boot and save it every 15 minutes and at shutdown, so a
+power cut no longer returns the device to 1970. Where there *is* internet,
+timesyncd still refines everything on top.
+
 ## Detection pull
 
 The hub **pulls** detections; there is no inbound ingestion server. For each

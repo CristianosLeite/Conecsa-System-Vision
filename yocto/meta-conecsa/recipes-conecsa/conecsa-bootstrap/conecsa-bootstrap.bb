@@ -20,6 +20,10 @@ SRC_URI = " \
     file://conecsa-set-hostname.sh \
     file://conecsa-hostname.service \
     file://10-conecsa-wait-online.conf \
+    file://conecsa-fake-hwclock.sh \
+    file://conecsa-fake-hwclock.service \
+    file://conecsa-fake-hwclock-save.service \
+    file://conecsa-fake-hwclock-save.timer \
     "
 
 S = "${WORKDIR}"
@@ -125,6 +129,22 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/conecsa-hostname.service \
         ${D}${systemd_system_unitdir}/conecsa-hostname.service
+
+    # Clock persistence. The board has no RTC battery and the sites have no
+    # reachable NTP server, so without a saved floor the clock returns to the
+    # epoch on every power cut — and a clock older than the hub CA's not_before
+    # makes the device reject every hub call over mTLS. The `os` agent writes
+    # the same state file when it accepts a time from the hub
+    # (os-base/agent/time_agent.py).
+    install -m 0755 ${WORKDIR}/conecsa-fake-hwclock.sh \
+        ${D}${sbindir}/conecsa-fake-hwclock
+    install -m 0644 ${WORKDIR}/conecsa-fake-hwclock.service \
+        ${D}${systemd_system_unitdir}/conecsa-fake-hwclock.service
+    install -m 0644 ${WORKDIR}/conecsa-fake-hwclock-save.service \
+        ${D}${systemd_system_unitdir}/conecsa-fake-hwclock-save.service
+    install -m 0644 ${WORKDIR}/conecsa-fake-hwclock-save.timer \
+        ${D}${systemd_system_unitdir}/conecsa-fake-hwclock-save.timer
+    install -d ${D}${localstatedir}/lib/conecsa
 }
 
 FILES:${PN} = " \
@@ -142,6 +162,11 @@ FILES:${PN} = " \
     ${sysconfdir}/avahi/services/conecsa-hub.service \
     ${sbindir}/conecsa-set-hostname \
     ${systemd_system_unitdir}/conecsa-hostname.service \
+    ${sbindir}/conecsa-fake-hwclock \
+    ${systemd_system_unitdir}/conecsa-fake-hwclock.service \
+    ${systemd_system_unitdir}/conecsa-fake-hwclock-save.service \
+    ${systemd_system_unitdir}/conecsa-fake-hwclock-save.timer \
+    ${localstatedir}/lib/conecsa \
     /root/.ssh \
     "
 
@@ -173,6 +198,10 @@ pkg_postinst:${PN}() {
         systemctl $OPTS enable avahi-daemon.service
         # Assign a unique hostname on first boot (before networking/avahi).
         systemctl $OPTS enable conecsa-hostname.service
+        # Restore the saved clock before anything validates a certificate, and
+        # keep saving it while the system runs (no RTC battery on this board).
+        systemctl $OPTS enable conecsa-fake-hwclock.service
+        systemctl $OPTS enable conecsa-fake-hwclock-save.timer
     fi
 }
 

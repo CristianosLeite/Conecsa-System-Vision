@@ -10,9 +10,10 @@ hub:
                                  whether a pairing token is required.
   2. ``POST /enroll/csr``      → returns a CSR whose SAN is the logical identity
                                  ``device-<id>.conecsa.local``.
-  3. ``POST /enroll/complete`` → ``{device_cert, ca_cert}`` → installs the
-                                 hub-signed server cert and the hub CA (used by
-                                 nginx to require the hub's client cert / mTLS).
+  3. ``POST /enroll/complete`` → ``{device_cert, ca_cert, hub_time}`` → adopts
+                                 the hub's clock (see gateway/clock.py) and
+                                 installs the hub-signed server cert and the hub
+                                 CA (used by nginx to require mTLS).
 
 By default pairing needs no secret: while the device is unenrolled, the first hub
 on the (trusted) LAN to pair wins, so the operator just clicks "Pair" in the hub.
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 
+from . import clock
 from .helpers import _hub_verified
 
 if TYPE_CHECKING:
@@ -257,6 +259,15 @@ def complete():
 
         if spki(cert.public_key()) != spki(key.public_key()):
             return jsonify({"error": "device certificate does not match device key"}), 400
+
+        # Adopt the hub's clock BEFORE the certificates land: installing them
+        # flips nginx into mTLS-enforcing mode, and from that moment the device
+        # validates the hub's client certificate. With a dead RTC and no NTP the
+        # local clock can predate the CA's not_before, which would reject every
+        # hub call as "certificate is not yet valid" — pairing would appear to
+        # succeed and the device would go offline for good. This is also the
+        # only channel that works while the clock is wrong (no validation here).
+        clock.apply_hub_time(body.get("hub_time"), "pairing", force=True)
 
         _install_certs(device_cert, ca_cert)
     except Exception as ex:  # noqa: BLE001

@@ -56,6 +56,8 @@ the code (what applies when the variable is unset); where the production
 | `CONECSA_CERT_DIR` | `/etc/conecsa/certs` | — | Device key/CSR + hub-signed cert/CA (volume shared with the nginx TLS terminator) |
 | `DEVICE_PAIR_TOKEN` | _(unset)_ | `${DEVICE_PAIR_TOKEN:-}` | Optional shared pairing secret; unset = first hub on the trusted LAN to pair wins |
 | `HUB_MDNS_ENABLED` | `1` | `0` | In-container mDNS advertiser; disabled in production (the host avahi-daemon advertises instead) |
+| `CLOCK_SYNC_THRESHOLD_SEC` | `30` | — | Drift from the hub's clock that triggers a step (the board has no RTC battery; see [Clock synchronization](services/hub-vision.md#clock-synchronization)) |
+| `CLOCK_SYNC_MIN_INTERVAL_SEC` | `60` | — | Minimum spacing between clock-step attempts, so a failing step is not retried on every 2s hub poll |
 
 ## `training-service`
 

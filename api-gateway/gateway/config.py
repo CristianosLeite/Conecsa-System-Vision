@@ -53,5 +53,14 @@ class Settings:
     TRAINING_ORPHAN_TIMEOUT_SEC = float(
         os.environ.get("TRAINING_ORPHAN_TIMEOUT_SEC", "120"))
 
+    # Hub-driven clock correction (gateway/clock.py). The host has no RTC
+    # battery, so the hub's wall clock is the only time source on an isolated
+    # LAN. Only step when the drift is worth a syscall, and — since the hub
+    # polls every 2s — never attempt more often than the interval below (which
+    # bounds the retries when the `os` agent is down, not the healthy path,
+    # where a corrected clock stops matching the threshold).
+    CLOCK_SYNC_THRESHOLD_SEC = _env_float("CLOCK_SYNC_THRESHOLD_SEC", 30.0)
+    CLOCK_SYNC_MIN_INTERVAL_SEC = _env_float("CLOCK_SYNC_MIN_INTERVAL_SEC", 60.0)
+
 
 settings = Settings()
