@@ -114,7 +114,9 @@ export CONECSA_CERT_DIR="${CONECSA_CERT_DIR:-$DEV_DATA_DIR/certs}"
 mkdir -p "$CONECSA_CERT_DIR"
 # The dev terminator runs with host networking, so hub calls it relays reach
 # the gateway from loopback — trust it as the terminator peer.
-export TRUSTED_PROXY_HOST="${TRUSTED_PROXY_HOST:-localhost}"
+if [ "$RUN_TLS" -eq 1 ]; then
+    export TRUSTED_PROXY_HOST="${TRUSTED_PROXY_HOST:-localhost}"
+fi
 
 # The service configs default to Docker service hostnames (inference-service:50061,
 # …). For local dev point the peers at localhost (override-able from the env).

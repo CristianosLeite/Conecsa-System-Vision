@@ -2,8 +2,13 @@
 
 # Script to compile Protocol Buffers for both Rust and Python
 # All .proto files live in the root proto/ directory.
+#
+#   --python-only   Skip the Rust half (used by CI jobs with no cargo).
 
 set -e
+
+PYTHON_ONLY=0
+[ "${1:-}" = "--python-only" ] && PYTHON_ONLY=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -81,6 +86,12 @@ echo "  Generated files in: ${PYTHON_OUTS[*]}"
 # ===========================
 # Compile for Rust
 # ===========================
+if [ "$PYTHON_ONLY" -eq 1 ]; then
+    echo ""
+    echo -e "${GREEN}--python-only: skipping the Rust build.${NC}"
+    exit 0
+fi
+
 echo ""
 echo -e "${GREEN}[2/2] Compiling protobuf for Rust...${NC}"
 
