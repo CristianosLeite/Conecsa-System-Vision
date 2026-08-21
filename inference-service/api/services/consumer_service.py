@@ -18,7 +18,6 @@ from typing import Optional, Tuple
 
 # noinspection PyPackageRequirements
 import numpy as np  # Package is included on os build.
-
 from conecsa_shm.camera_ring import CameraRingReader
 
 # api/proto is created by Dockerfile.inference-service (and shimmed onto sys.path by

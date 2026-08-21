@@ -1,5 +1,10 @@
 """Shared helpers for the training routes: JSON responses, gRPC error mapping
-and message↔dict serializers."""
+and message↔dict serializers.
+
+The response/error primitives live in ``gateway.helpers`` (they used to be
+byte-identical copies here); this module keeps only the training-specific
+serializers and a service-tagged error wrapper.
+"""
 import json
 import logging
 
@@ -7,34 +12,15 @@ import grpc
 from flask import Response
 
 from ..grpc_clients import clients, inf, trn
+from ..helpers import _grpc_error as _shared_grpc_error
+from ..helpers import _json, _json_error  # noqa: F401  (re-exported for routes)
 
 logger = logging.getLogger(__name__)
 
 
-def _json(data, status=200) -> Response:
-    """Build a JSON Response with the given body and status."""
-    return Response(json.dumps(data), status=status, mimetype="application/json")
-
-
-def _json_error(message, status=400) -> Response:
-    """Build a JSON ``{"error": message}`` Response (default 400)."""
-    return _json({"error": message}, status)
-
-
 def _grpc_error(exc: grpc.RpcError) -> Response:
     """Map a training-service gRPC error to a JSON Response."""
-    detail = exc.details() if hasattr(exc, "details") else str(exc)
-    code = exc.code() if hasattr(exc, "code") else None
-    if code == grpc.StatusCode.NOT_FOUND:
-        return _json_error(detail, 404)
-    if code == grpc.StatusCode.FAILED_PRECONDITION:
-        return _json_error(detail, 409)
-    if code == grpc.StatusCode.INVALID_ARGUMENT:
-        return _json_error(detail, 400)
-    status = 503 if code in (grpc.StatusCode.UNAVAILABLE,
-                             grpc.StatusCode.DEADLINE_EXCEEDED) else 500
-    logger.error("training RPC failed: %s", detail)
-    return _json_error(f"Training service error: {detail}", status)
+    return _shared_grpc_error(exc, service="training")
 
 
 def _result(r, ok_status=200) -> Response:
@@ -90,7 +76,7 @@ def _parse_named_boxes(raw: str) -> list:
     try:
         data = json.loads(raw or "[]")
     except ValueError:
-        raise ValueError("'boxes' must be valid JSON")
+        raise ValueError("'boxes' must be valid JSON") from None
     if not isinstance(data, list):
         raise ValueError("'boxes' must be a JSON list")
     if not all(isinstance(b, dict) for b in data):
@@ -103,7 +89,7 @@ def _parse_named_boxes(raw: str) -> list:
             for b in data
         ]
     except (TypeError, ValueError):
-        raise ValueError("Malformed box entry")
+        raise ValueError("Malformed box entry") from None
 
 
 def _release_runtime() -> "inf.Result":

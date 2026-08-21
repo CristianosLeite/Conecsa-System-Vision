@@ -11,12 +11,22 @@ import os
 import threading
 
 from api.config import Config
+from api.model_paths import ENGINE_FILE_EXTENSIONS
 from api.services import (
-    DetectionBufferService, DetectionService, ModelService, VideoService,
-    StatsService, ConversionService,
-    GPIOService, DetectionAreaService, ModelSettingsService,
-    ConsumerService, FrameCodecService, ProcessingPipelineService, EventService,
     ConfigService,
+    ConsumerService,
+    ConversionService,
+    DetectionAreaService,
+    DetectionBufferService,
+    DetectionService,
+    EventService,
+    FrameCodecService,
+    GPIOService,
+    ModelService,
+    ModelSettingsService,
+    ProcessingPipelineService,
+    StatsService,
+    VideoService,
 )
 from api.views import OverlayRenderer
 
@@ -121,7 +131,7 @@ def _bootstrap_tensorrt_worker() -> None:
                 # engine so the first conversion/build is fast.
                 engines = sorted(
                     f for f in os.listdir(models_dir)
-                    if f.endswith((".engine", ".plan"))
+                    if f.endswith(ENGINE_FILE_EXTENSIONS)
                 )
                 if engines:
                     engine_path = os.path.join(models_dir, engines[0])

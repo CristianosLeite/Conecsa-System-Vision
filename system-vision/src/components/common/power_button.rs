@@ -63,13 +63,22 @@ pub fn PowerButton() -> impl IntoView {
     let state = RwSignal::new(ButtonState::Idle);
 
     // Close the menu/confirm if the user clicks elsewhere in the document.
+    // try_*: the listener is on the window, so a click that unmounts this
+    // component (e.g. a view switch) still reaches it in the same dispatch,
+    // after `state` was disposed — a plain get/set there panics the app.
     let on_global_click = move |_: web_sys::MouseEvent| {
-        let s = state.get_untracked();
-        if matches!(s, ButtonState::Menu | ButtonState::Confirm(_)) {
-            state.set(ButtonState::Idle);
+        if matches!(
+            state.try_get_untracked(),
+            Some(ButtonState::Menu | ButtonState::Confirm(_))
+        ) {
+            let _ = state.try_set(ButtonState::Idle);
         }
     };
-    let _ = window_event_listener(leptos::ev::click, on_global_click);
+    // Window listeners are NOT tied to the component: without this cleanup the
+    // leaked listener outlives the header and the very click that swaps the
+    // view panics on the disposed signal, killing the whole WASM app.
+    let click_handle = window_event_listener(leptos::ev::click, on_global_click);
+    on_cleanup(move || click_handle.remove());
 
     let on_power_click = move |ev: web_sys::MouseEvent| {
         ev.stop_propagation();

@@ -3,7 +3,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from api.services.model_settings_service import ModelSettingsService
 
 

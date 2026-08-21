@@ -13,9 +13,12 @@ import os
 import sys
 import threading
 import time
+import uuid
 from concurrent import futures
 
 import grpc
+
+from .model_paths import validate_model_filename
 
 # Generated *_pb2 / *_pb2_grpc modules do a flat `import inference_pb2`, so their
 # directory must be importable. In the image the stubs are generated next to
@@ -30,7 +33,7 @@ if not os.path.isdir(_PROTO_DIR):
 if _PROTO_DIR not in sys.path:
     sys.path.insert(0, _PROTO_DIR)
 
-import inference_pb2 as pb          # noqa: E402
+import inference_pb2 as pb  # noqa: E402
 import inference_pb2_grpc as pb_grpc  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -281,32 +284,73 @@ class ModelControlServicer(pb_grpc.ModelControlServicer):
         return _conversion_pb(job)
 
     def UploadModel(self, request_iterator, context):
-        """RPC (client stream): assemble an uploaded model and save/convert it.
+        """RPC (client stream): stream an uploaded model to disk and save/convert it.
 
-        The first message carries the metadata, the rest are file chunks.
+        The first message carries the metadata, the rest are file chunks. The
+        chunks are written straight to an exclusive staging file inside the
+        model directory with a running byte cap — never accumulated in memory,
+        which on the 8 GB device used to peak at over twice the file size.
         ModelService owns the save/convert/activate decision; its result and the
         intended HTTP status are carried back as a JSON blob for the gateway.
         """
-        # Thin: assemble the client-streamed chunks, then ModelService owns the
-        # save/convert/activate decision. Carry its result as a JSON blob the
-        # gateway relays verbatim, plus the intended HTTP status.
+        def error(status: int, message: str) -> "pb.UploadResult":
+            return pb.UploadResult(ok=False, http_status=int(status),
+                                   json=json.dumps({"error": message}))
+
+        model_dir = self._models.model_directory
+        limit = int(self._app.config.MAX_MODEL_UPLOAD_BYTES)
         meta = None
-        buf = bytearray()
-        for msg in request_iterator:
-            which = msg.WhichOneof("data")
-            if which == "meta":
-                meta = msg.meta
-            elif which == "chunk":
-                buf.extend(msg.chunk)
-        if meta is None or not meta.filename:
-            return pb.UploadResult(
-                ok=False, http_status=400,
-                json=json.dumps({"error": "Missing upload metadata"}),
-            )
-        imgsz = int(meta.imgsz) or 640
-        body, status = self._models.process_upload(meta.filename, _BytesFile(bytes(buf)), imgsz)
-        return pb.UploadResult(ok=(200 <= status < 300), http_status=int(status),
-                               json=json.dumps(body))
+        fd = None
+        staged_path = None
+        received = 0
+        try:
+            for msg in request_iterator:
+                which = msg.WhichOneof("data")
+                if which == "meta":
+                    if fd is not None:
+                        return error(400, "Duplicate upload metadata")
+                    meta = msg.meta
+                    if not meta.filename:
+                        return error(400, "Missing upload metadata")
+                    # Reject a bad name before any byte lands on disk.
+                    _, invalid = validate_model_filename(meta.filename, model_dir)
+                    if invalid:
+                        return error(400, invalid)
+                    staged_path = os.path.join(
+                        model_dir, f".upload-{uuid.uuid4().hex}.part")
+                    fd = os.open(staged_path,
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                elif which == "chunk":
+                    if fd is None:
+                        return error(400, "Upload chunks arrived before metadata")
+                    received += len(msg.chunk)
+                    if received > limit:
+                        return error(
+                            413,
+                            f"Model upload exceeds the {limit} byte limit")
+                    os.write(fd, msg.chunk)
+            if meta is None or staged_path is None:
+                return error(400, "Missing upload metadata")
+            if fd is not None:
+                os.fsync(fd)
+                os.close(fd)
+                fd = None
+            imgsz = int(meta.imgsz) or 640
+            body, status = self._models.process_upload(
+                meta.filename, _StagedFile(staged_path), imgsz)
+            return pb.UploadResult(ok=(200 <= status < 300),
+                                   http_status=int(status),
+                                   json=json.dumps(body))
+        finally:
+            # Cancellation, over-cap, or a failed save: never leave a
+            # half-written .part behind (a successful save renamed it away).
+            if fd is not None:
+                os.close(fd)
+            if staged_path is not None and os.path.exists(staged_path):
+                try:
+                    os.unlink(staged_path)
+                except OSError:
+                    logger.warning("could not remove staged upload %s", staged_path)
 
     def DownloadModel(self, request, context):
         """RPC (server stream): stream a model file's bytes in ~1 MiB chunks."""
@@ -484,18 +528,18 @@ class ManagementControlServicer(pb_grpc.ManagementControlServicer):
             return pb.Result(success=False, message=str(exc))
 
 
-class _BytesFile:
-    """Adapts in-memory bytes to the ``.save(path)`` interface
-    ModelService.save_model expects (Flask FileStorage over HTTP). Lets the
-    gRPC client-streamed upload reuse the exact same service path."""
+class _StagedFile:
+    """Adapts an upload already staged on disk to the ``.save(path)``
+    interface ModelService.save_model expects (Flask FileStorage over HTTP).
+    ``save`` is an atomic rename — the staging file lives in the model
+    directory, so the final name appears only complete, never half-written."""
 
-    def __init__(self, data: bytes):
-        self._data = data
+    def __init__(self, staged_path: str):
+        self._staged_path = staged_path
 
     def save(self, path: str) -> None:
-        """Write the buffered bytes to *path*."""
-        with open(path, "wb") as f:
-            f.write(self._data)
+        """Atomically move the staged upload to *path*."""
+        os.replace(self._staged_path, path)
 
 
 def _conversion_pb(job) -> "pb.ConversionJob":
@@ -510,6 +554,7 @@ def _conversion_pb(job) -> "pb.ConversionJob":
         error=str(getattr(job, "error", "") or ""),
         engine_filename=str(getattr(job, "engine_filename", "") or ""),
         started_at=float(getattr(job, "started_at", 0.0) or 0.0),
+        elapsed_secs=float(getattr(job, "elapsed_secs", 0.0) or 0.0),
     )
 
 
@@ -539,7 +584,12 @@ def serve_grpc(application) -> None:
     """Start the DetectionControl gRPC server in a daemon thread (non-blocking)."""
     def _run() -> None:
         """Thread body: build, register, start the server and block on it."""
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
+        # Explicit receive cap: upload chunks are ~1 MiB, so 8 MiB is ample
+        # headroom while still bounding what one message can buffer.
+        server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=16),
+            options=[("grpc.max_receive_message_length", 8 * 1024 * 1024)],
+        )
         pb_grpc.add_DetectionControlServicer_to_server(
             DetectionControlServicer(application), server
         )

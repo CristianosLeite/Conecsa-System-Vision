@@ -5,18 +5,17 @@
  */
 module.exports = function (RED) {
   "use strict";
-  const { inferenceBaseUrl, request, subscribeSSE } = require("../../lib/http-client");
+  const { request, subscribeSSE } = require("../../lib/http-client");
+  const { initNode } = require("../../lib/node-base");
 
   function ThresholdNode(config) {
-    RED.nodes.createNode(this, config);
     const node = this;
+    initNode(RED, node, config);
 
-    node.inferenceUrl = inferenceBaseUrl(config);
     node.thresholdType = config.thresholdType || "confidence";
     node.value = parseFloat(config.value) || 0.5;
     const nodeSource = `node-red:${node.id}`;
 
-    node.status({ fill: "grey", shape: "ring", text: "idle" });
 
     function readCurrentThresholdFromStatus(emit, event) {
       request(node.inferenceUrl, "GET", "/api/v1/status", null, (err, status) => {

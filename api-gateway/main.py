@@ -52,7 +52,7 @@ if __name__ == "__main__":
     # Dockerfile. waitress is thread-per-connection — long-lived MJPEG/SSE
     # streams each pin a thread, so size the pool above the worst-case stream
     # count (WAITRESS_THREADS) and cap channel_timeout so dropped tabs free fast.
-    from waitress import serve
     from gateway.config import settings
+    from waitress import serve
     threads = int(os.environ.get("WAITRESS_THREADS", str(settings.WAITRESS_THREADS)))
     serve(app, host="0.0.0.0", port=settings.PORT, threads=threads, channel_timeout=30)

@@ -3,6 +3,7 @@ retrieval, deletion, replication and the YOLO label editor."""
 import grpc
 from flask import Response, request
 
+from ..config import settings
 from ..grpc_clients import clients, trn
 from . import training_bp
 from .helpers import _grpc_error, _json, _json_error, _parse_named_boxes, _result
@@ -33,10 +34,17 @@ def training_image_add(dataset_id):
         boxes = _parse_named_boxes(request.form.get("boxes", "[]"))
     except ValueError as exc:
         return _json_error(str(exc))
+    # Bounded read: the image travels as one gRPC message, so an oversized
+    # body must be refused here rather than buffered whole and rejected later.
+    cap = settings.MAX_IMAGE_UPLOAD_BYTES
+    jpeg = request.files["file"].stream.read(cap + 1)
+    if len(jpeg) > cap:
+        return _json_error(
+            f"Image exceeds the {cap} byte limit", 413)
     try:
         info = clients.training.AddDatasetImage(trn.LabeledImageUpload(
             dataset_id=dataset_id,
-            jpeg=request.files["file"].read(),
+            jpeg=jpeg,
             boxes=boxes,
         ))
     except grpc.RpcError as exc:

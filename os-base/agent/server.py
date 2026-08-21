@@ -17,7 +17,7 @@ _PROTO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proto")
 if _PROTO_DIR not in sys.path:
     sys.path.insert(0, _PROTO_DIR)
 
-import hardware_pb2 as pb          # noqa: E402
+import hardware_pb2 as pb  # noqa: E402
 import hardware_pb2_grpc as pb_grpc  # noqa: E402
 
 from .clocks_agent import pin_performance_clocks  # noqa: E402

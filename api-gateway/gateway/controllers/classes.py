@@ -1,5 +1,9 @@
 """Class-labels controller: get/upload/clear, with JSON↔protobuf content
 negotiation."""
+# Compiled detection schemas (protobuf content-negotiation). Sits next to the
+# other stubs in gateway/proto, which `..grpc_clients` (imported above) puts on
+# sys.path.
+import detection_pb2 as det_pb  # noqa: E402
 import grpc
 from flask import request
 
@@ -12,11 +16,6 @@ from ..helpers import (
     _should_use_json,
 )
 from . import api_bp
-
-# Compiled detection schemas (protobuf content-negotiation). Sits next to the
-# other stubs in gateway/proto, which `..grpc_clients` (imported above) puts on
-# sys.path.
-import detection_pb2 as det_pb  # noqa: E402
 
 
 def _classes_response(success, message, classes, status_code, content_type_check=False):

@@ -43,11 +43,10 @@ impl WebcamServer {
                         if let Ok(intervals) = dev.enum_frameintervals(desc.fourcc, d.width, d.height)
                         {
                             for iv in intervals {
-                                if let FrameIntervalEnum::Discrete(fr) = iv.interval {
-                                    if fr.numerator > 0 {
+                                if let FrameIntervalEnum::Discrete(fr) = iv.interval
+                                    && fr.numerator > 0 {
                                         fps.push(fr.denominator / fr.numerator);
                                     }
-                                }
                             }
                         }
                         fps.sort_unstable_by(|a, b| b.cmp(a));

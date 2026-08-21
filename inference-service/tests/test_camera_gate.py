@@ -7,7 +7,6 @@ refuse to start unless the SHM health says "capturing".
 from types import SimpleNamespace
 
 import pytest
-
 from api.services.detection_service import DetectionService
 from api.services.video_service import VideoService
 

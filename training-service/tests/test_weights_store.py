@@ -3,7 +3,6 @@ import os
 import time
 
 import pytest
-
 from service.config import Config
 from service.dataset_service import DatasetError
 from service.weights_store import WeightsStore

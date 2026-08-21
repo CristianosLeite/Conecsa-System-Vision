@@ -16,6 +16,7 @@ from ..helpers import (
     _publish_event,
     _publish_if_success,
     _response_json,
+    _status_from_message,
 )
 from . import api_bp
 
@@ -89,7 +90,7 @@ def select_model():
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     if not r.success:
-        return _json_error(r.message, 404 if "not found" in r.message else 500)
+        return _json_error(r.message, _status_from_message(r.message))
     resp = _json_success(message="Model selected and loaded successfully",
                          model=model_name, path=r.message, was_running=was_running)
     return _publish_if_success(
@@ -134,6 +135,10 @@ def _conversion_dict(job) -> dict:
         "error": job.error,
         "engine_filename": job.engine_filename,
         "started_at": job.started_at,
+        # Age from the device's monotonic clock. Clients must use this rather
+        # than `now - started_at`: the browser and the device do not share a
+        # wall clock, and the hub can step the device's mid-conversion.
+        "elapsed_secs": job.elapsed_secs,
     }
 
 
@@ -147,7 +152,7 @@ def delete_model(model_name):
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     if not r.success:
-        return _json_error(r.message, 404 if "not found" in r.message.lower() else 500)
+        return _json_error(r.message, _status_from_message(r.message))
     resp = _json_success(message=f"Model '{model_name}' deleted successfully")
     return _publish_if_success(resp, "models_changed", ["models"], data={"model": model_name})
 

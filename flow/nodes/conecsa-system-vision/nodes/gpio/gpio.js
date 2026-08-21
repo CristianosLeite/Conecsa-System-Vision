@@ -7,18 +7,17 @@
  */
 module.exports = function (RED) {
   "use strict";
-  const { inferenceBaseUrl, request, subscribeSSE } = require("../../lib/http-client");
+  const { request, subscribeSSE } = require("../../lib/http-client");
+  const { initNode } = require("../../lib/node-base");
 
   function GpioNode(config) {
-    RED.nodes.createNode(this, config);
     const node = this;
+    initNode(RED, node, config);
 
-    node.inferenceUrl = inferenceBaseUrl(config);
     node.pin = parseInt(config.pin, 10);
     node.action = config.action || "high";
     const nodeSource = `node-red:${node.id}`;
 
-    node.status({ fill: "grey", shape: "ring", text: "idle" });
 
     // Cached level for this pin, kept fresh from status reads and the SSE
     // stream. `null` until the first read; used by the toggle action so it does

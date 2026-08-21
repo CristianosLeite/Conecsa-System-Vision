@@ -7,6 +7,9 @@ mod loading_state;
 mod resolution_controls;
 mod stereo_toggle;
 
+#[cfg(test)]
+mod tests;
+
 pub use component::CameraSettings;
 
 /// Preset resolutions shown in the UI.
@@ -26,3 +29,16 @@ struct Resolution {
 }
 
 type CameraFormat = (u32, u32, Vec<u32>);
+
+/// V4L2 name marker for a side-by-side 3D camera ("3D USB Camera" & friends).
+const STEREO_NAME_MARKER: &str = "3d";
+
+/// Whether a V4L2 device name identifies a 3D (side-by-side stereo) camera.
+///
+/// The overlay blends the left|right halves of one frame into a single image,
+/// so offering it for an ordinary camera would split a normal picture in two.
+/// The camera model is the only reliable signal: resolution alone cannot tell a
+/// side-by-side frame from a wide one.
+fn is_stereo_camera(name: &str) -> bool {
+    name.to_ascii_lowercase().contains(STEREO_NAME_MARKER)
+}

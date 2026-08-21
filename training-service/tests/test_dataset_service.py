@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-
 from service.dataset_service import (
     Box,
     DatasetError,
@@ -222,3 +221,24 @@ class TestAddLabeledImage:
         assert entry.labeled is False
         assert entry.box_count == 0
         assert ds.get_labels(entry.image_id) == []
+
+
+class TestMetaCorruptionIsReported:
+    def test_corrupt_meta_is_quarantined_not_silently_empty(self, tmp_path,
+                                                            caplog):
+        import logging as _logging
+
+        from service.config import Config
+        from service.dataset_service import DatasetService
+
+        root = tmp_path / "ds"
+        ds = DatasetService("11111111-1111-1111-1111-111111111111",
+                            str(root), Config())
+        ds.write_meta("D1")
+        meta_file = root / "meta.json"
+        meta_file.write_text('{"trunc')
+
+        with caplog.at_level(_logging.ERROR):
+            ds.meta()
+        assert (root / "meta.json.corrupt").exists(), "evidence must survive"
+        assert any("corrupt" in r.message for r in caplog.records)

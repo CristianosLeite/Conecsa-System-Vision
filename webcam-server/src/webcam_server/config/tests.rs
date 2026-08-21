@@ -12,31 +12,30 @@ fn default_has_neutral_rgb_levels() {
 
 #[test]
 fn any_off_neutral_channel_is_detected() {
-    let mut cfg = CameraConfig::default();
-    cfg.rgb_red = 200;
+    let cfg = CameraConfig { rgb_red: 200, ..Default::default() };
     assert!(cfg.has_non_neutral_rgb_levels());
 
-    let mut cfg = CameraConfig::default();
-    cfg.rgb_green = 0;
+    let cfg = CameraConfig { rgb_green: 0, ..Default::default() };
     assert!(cfg.has_non_neutral_rgb_levels());
 
-    let mut cfg = CameraConfig::default();
-    cfg.rgb_blue = RGB_LEVEL_DEFAULT + 1;
+    let cfg = CameraConfig { rgb_blue: RGB_LEVEL_DEFAULT + 1, ..Default::default() };
     assert!(cfg.has_non_neutral_rgb_levels());
 }
 
 #[test]
 fn serde_round_trip_preserves_fields() {
-    let mut cfg = CameraConfig::default();
-    cfg.camera_index = 2;
-    cfg.width = 1280;
-    cfg.height = 480;
-    cfg.framerate = 30;
-    cfg.auto_exposure = true;
-    cfg.exposure_time = 500;
-    cfg.rgb_red = 140;
-    cfg.gamma = 120;
-    cfg.gain = 64;
+    let cfg = CameraConfig {
+        camera_index: 2,
+        width: 1280,
+        height: 480,
+        framerate: 30,
+        auto_exposure: true,
+        exposure_time: 500,
+        rgb_red: 140,
+        gamma: 120,
+        gain: 64,
+        ..Default::default()
+    };
 
     let json = serde_json::to_string(&cfg).unwrap();
     let back: CameraConfig = serde_json::from_str(&json).unwrap();

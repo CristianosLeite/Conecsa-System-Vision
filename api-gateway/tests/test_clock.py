@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 from flask import Flask
-
 from gateway import clock
 
 
@@ -121,15 +120,11 @@ class TestApplyHubTime:
 class TestSyncFromRequestHeaders:
     """The header only counts on a request the nginx terminator verified."""
 
-    TERMINATOR_IP = "10.66.0.9"
+    from conftest import TERMINATOR_IP
 
     @pytest.fixture(autouse=True)
-    def _pin_terminator(self, monkeypatch):
-        from gateway import helpers
-        monkeypatch.setattr(helpers, "_resolve_proxy_ips",
-                            lambda: frozenset({self.TERMINATOR_IP}))
-        monkeypatch.setattr(helpers, "_proxy_cache",
-                            {"ips": frozenset(), "at": float("-inf")})
+    def _pin_terminator(self, trusted_proxy):
+        """Delegates to the shared conftest fixture."""
 
     def _ctx(self, remote_addr, headers):
         return Flask(__name__).test_request_context(

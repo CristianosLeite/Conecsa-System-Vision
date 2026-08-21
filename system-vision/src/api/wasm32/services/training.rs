@@ -153,27 +153,36 @@ pub struct SimpleResult {
 
 /// URL for an `<img>` tag showing one dataset image.
 pub fn training_image_url(dataset_id: &str, image_id: &str) -> String {
-    format!(
+    crate::components::access::with_cap(&format!(
         "{}/api/v1/training/datasets/{}/images/{}",
         get_api_base_url(),
         dataset_id,
         image_id
-    )
+    ))
 }
 
 /// URL that downloads a dataset as a YOLO-format ZIP (gateway sets the
 /// Content-Disposition filename).
 pub fn training_dataset_export_url(dataset_id: &str) -> String {
-    format!(
+    crate::components::access::with_cap(&format!(
         "{}/api/v1/training/datasets/{}/export",
         get_api_base_url(),
         dataset_id
-    )
+    ))
 }
 
 /// URL for the live combined-camera MJPEG preview on the training page.
-pub fn training_preview_url() -> String {
-    format!("{}/api/v1/training/preview", get_api_base_url())
+///
+/// `reload` is the cache-busting retry counter; it goes into the URL *before*
+/// the hub-proxy capability so `with_cap` stays the last thing appended —
+/// anything added after it would corrupt the `cap` value and the hub proxy
+/// would reject the stream.
+pub fn training_preview_url(reload: u32) -> String {
+    crate::components::access::with_cap(&format!(
+        "{}/api/v1/training/preview?r={}",
+        get_api_base_url(),
+        reload
+    ))
 }
 
 /// Training enter.
@@ -271,6 +280,7 @@ pub async fn upload_dataset_zip(
         .headers()
         .set("X-Conecsa-Source", "frontend")
         .map_err(|e| format!("Failed to set X-Conecsa-Source: {:?}", e))?;
+    crate::api::wasm32::http::set_proxy_cap(&request)?;
 
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await

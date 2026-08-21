@@ -16,7 +16,11 @@ drive the devices directly. Instead it:
 - **pairs** with each device — acting as a private CA — and then reaches it **only
   over mutual TLS** (no plaintext; no root certificate installed on the hub),
 - **pulls** their detection records by polling each device over mTLS and **stores**
-  them (SQLite by default; PostgreSQL or SQL Server configurable), and
+  them (SQLite by default; PostgreSQL or SQL Server configurable),
+- **records** every action operators take — on the hub and on its devices — in
+  an [audit trail](#audit-trail),
+- applies **recipes** — a saved model + thresholds state for the whole fleet, in
+  one action, and
 - lets you **open each device's main page** inside the hub (an embedded iframe
   pane — no external browser, the same way the device UI embeds the Flow editor).
 
@@ -135,6 +139,70 @@ resolved or created on the dataset), so in the device's label editor the
 operator only fixes the class — no re-drawing. Legacy records (annotated
 frame, no coordinates) cannot be exported.
 
+## Audit trail
+
+The **Audit** page lists every action a user took, on the hub and on its
+devices, in one table: **device**, **event**, **source IP**, **date and time**.
+It is **owner/admin only** — hidden from the sidebar and refused by the command
+itself, since the trail exists partly to hold operators accountable and the
+accounts it audits must not be able to read it.
+
+Filters narrow by device, by period and by free text (username, event key or
+target). **Export CSV** writes the current selection — filters applied,
+pagination ignored — into the Downloads folder and offers to reveal it.
+
+### Where the actor comes from
+
+The device authenticates nobody: it has no login, no session and no token, and
+behind nginx it cannot even see who connected. Its trail is therefore only as
+truthful as what the hub puts on the wire. When the hub forwards a request to a
+device (see [Opening a device](#opening-a-device)) it stamps the operator's
+identity, and the gateway keeps it only when the mTLS terminator verified the
+caller. An action nobody could be attributed to is recorded as such rather than
+pinned on whoever happened to be signed in.
+
+Hub actions are recorded by the hub itself, against the session it
+authenticated. Several hub commands reach a device directly over mTLS rather
+than through the UI proxy — applying a recipe, deleting a dataset, pairing — and
+those are recorded once, by the hub; the device leaves them alone.
+
+!!! warning "Known limitation"
+    Someone talking to a device directly with a valid client certificate would
+    produce events with no operator on them. The event is still recorded; the
+    actor is anonymous. Closing that would require sessions in the gateway.
+
+### Collection
+
+Devices buffer their own events (see
+[api-gateway](api-gateway.md)) and the hub drains them every 5s over mTLS,
+paging through `/api/v1/audit/backlog` and acking only after the insert
+committed — the same persist-then-ack contract as the
+[detection backlog](#offline-coverage-backlog-drain), and the same
+device-clock correction, since the hardware has no RTC battery. Delivery is
+at-least-once: duplicates are tolerated, losing a record is not.
+
+### Events and language
+
+A row stores a stable event key (`detection.start`, `dataset.deleted`), never a
+phrase, so the trail stays language-independent and a hub whose language
+changes does not end up with a log written in two of them. The sentence is
+composed at render time from the active locale, and the row's target — a
+dataset name, an SSID, a model file — is appended after it. A key this hub does
+not recognize still renders: a device on a newer build can emit events it has
+never heard of, and a blank cell would hide that something happened.
+
+A refused action stays in the table, marked and muted. A rejected sign-in is
+often the row that matters.
+
+### Retention
+
+**Settings → Audit retention** sets how many days of history to keep (default
+**90**; `0` keeps everything), persisted in `hub-settings.json`. A row expires
+on age alone, whether or not it ever reached the operator's reporting database
+— a retention promise that silently depended on a remote server having been
+reachable would not be one. Changing it is owner/admin only and is itself
+audited.
+
 ## Datasets
 
 The **Datasets** page (owner/admin only) lists every dataset on every paired,
@@ -161,6 +229,68 @@ actions are:
   after the import is confirmed; if that removal fails, the transfer still
   succeeds and reports a warning.
 
+## Recipes
+
+A **recipe** names a fleet-wide state: for **every paired device**, which model
+to load and which confidence and overlap (IoU/NMS) thresholds to apply. Loading
+one puts the whole fleet into that state in a single action, instead of
+configuring each device from its own UI.
+
+The **Recipes** page (owner/admin only — loading a recipe reconfigures every
+device) lists the stored recipes with a validity badge, and creates or edits
+them with one row per paired device: a model picker (populated from that
+device's own model list) and the two thresholds, edited to two decimal places.
+A new recipe comes **pre-filled with each device's current values**, so saving
+one straight away captures the fleet as it is today.
+
+### Validity
+
+Every time the page loads it snapshots the fleet (`/api/v1/status` and
+`/api/v1/models` on each paired device, in parallel) and re-checks each recipe
+against it. A recipe is marked **INVALID** — with the reason in the badge's
+tooltip, and its **Load** action disabled until it is edited — when:
+
+- a device that is **online** no longer has the recipe's model,
+- **no model was chosen** for a device — a device that was offline when the
+  recipe was saved has no model list to pick from, so the recipe is stored
+  without one rather than refusing the save (otherwise a single unreachable
+  device would block every recipe from being created),
+- the recipe names a device this hub is **no longer paired** with, or
+- a device was **paired after** the recipe was saved, so the recipe does not
+  cover it. Opening **Edit** pre-fills the new device's row with its current
+  values, so saving fixes it.
+
+A device that is merely **offline** does not, by itself, invalidate a recipe:
+its model list is *unknown*, not empty, so a *missing* model cannot be
+asserted. It shows up instead as a failed device when the recipe is loaded.
+
+### Loading
+
+**Load** confirms first, then applies to all of the recipe's devices in
+parallel and reports **one outcome per device** — a device that is offline or
+refuses never aborts the others. The backend re-validates against a fresh
+snapshot before applying (the UI gate is not the only one) and re-checks the
+model on the device immediately before selecting it.
+
+Per device the order is fixed:
+
+1. `POST /api/v1/model/select` — **skipped when the model is already active**,
+   since re-selecting it would deserialize the TensorRT engine again for no
+   change.
+2. `POST /api/v1/overlay_threshold`.
+3. `PUT /api/v1/config` with `confidence_threshold`.
+
+The model comes first because selecting it repoints the device at that model's
+`<model>.settings.json` and applies the thresholds stored there — thresholds
+written before the switch would be overwritten. Confidence goes through
+`/api/v1/config` rather than `/api/v1/threshold` because the latter only
+mutates the device's memory and is lost on restart, while the config route
+persists (see
+[inference-service](inference-service.md)).
+
+Recipes live in `recipes.json` in the app config directory, next to
+`hub-settings.json`.
+
 ## Opening a device
 
 **Open** embeds a device's main page — its UI, REST/MJPEG/SSE API and the Flow
@@ -171,6 +301,13 @@ through a plain-localhost origin with no certificate prompt while the device sta
 reachable only by the hub. The hub also appends `?lang=<locale>` to the iframe
 URL, so the embedded device UI opens in the hub's language (see
 [Localization](#localization)).
+
+Every forwarded request carries the signed-in operator's identity —
+`X-Conecsa-User`, `X-Conecsa-Role` and `X-Conecsa-Origin-Ip` — which is how
+device-side actions get an actor at all (see [Audit trail](#audit-trail)). The
+headers are cleared before being written, so a page being proxied cannot claim
+to be someone else: an unauthenticated request arrives with no identity rather
+than a forged one.
 
 ## Federated training
 
@@ -221,13 +358,23 @@ The hub browses passively and lists discovered devices under **Devices**.
 
 SQLite is the default (a file under the app data directory). External backends
 are configured in **Settings**, each with **Test connection** (health check) and
-**Generate schema** (DDL):
+**Generate schema** (DDL, which creates `devices`, `detections` and
+`audit_events`):
 
 | Backend | Notes |
 |---|---|
 | SQLite | Default; no configuration needed. |
 | PostgreSQL | Built in by default. |
 | SQL Server | Requires building with the `mssql` feature (tiberius) — see below. |
+
+Two stores sit beside that one under the app data directory and are never
+reconfigurable: `auth.db` (operator accounts) and `audit.db` (the
+[audit trail](#audit-trail)). The trail is deliberately local: the configured
+database can be repointed from Settings, be unreachable, or not be set up yet,
+and none of that may cost an audit record. Rows are mirrored into the
+configured database for reporting, best-effort and write-only — the UI always
+reads `audit.db`, and a mirror failure leaves rows pending rather than losing
+them.
 
 ## Localization
 

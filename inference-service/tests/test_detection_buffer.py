@@ -2,9 +2,8 @@
 import base64
 import sqlite3
 
-import pytest
-
 import api.services.detection_buffer as buffer_mod
+import pytest
 
 THRESHOLD = 5.0
 
@@ -199,7 +198,8 @@ class TestBacklogProtocol:
         # a single record so trimming returns exactly one record per page.
         buf = self._filled(tmp_path, clock, n=3)
         one_record = buf.list_backlog(limit=1)["records"][0]
-        monkeypatch.setattr(buffer_mod, "PAGE_SOFT_BYTES", 1)
+        monkeypatch.setattr(buffer_mod.DetectionBufferService,
+                            "PAGE_SOFT_BYTES", 1)
         page = buf.list_backlog(limit=25)
         # The first record always ships (a page must make progress), the rest
         # wait for the drain's next page request.

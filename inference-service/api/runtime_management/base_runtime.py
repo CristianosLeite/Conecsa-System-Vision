@@ -2,7 +2,8 @@
 Base runtime interface for model execution.
 """
 from abc import ABC, abstractmethod
-from typing import List, Optional, Any, Dict, Protocol
+from typing import Any, Dict, List, Optional, Protocol
+
 import numpy as np
 
 

@@ -3,16 +3,16 @@ Client for the TensorRT runtime worker subprocess.
 """
 import logging
 import os
+import subprocess
 import sys
 import time
-import subprocess
-from subprocess import TimeoutExpired
 from multiprocessing.connection import Client
+from subprocess import TimeoutExpired
 from threading import RLock
 from typing import Any, Dict, List, Optional
 
 # noinspection PyPackageRequirements
-import numpy as np # Package is included on os build.
+import numpy as np  # Package is included on os build.
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ class WorkerClient:
         Raises:
             RuntimeError: If connection fails after max_attempts
         """
-        for attempt in range(max_attempts):
+        for _attempt in range(max_attempts):
             # Check if process died
             if self._process is not None and self._process.poll() is not None:
                 # Process has exited, read log file for error details

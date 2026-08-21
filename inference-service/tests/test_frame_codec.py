@@ -2,7 +2,6 @@
 import cv2
 import numpy as np
 import pytest
-
 from api.services.frame_codec import (
     FrameCodecService,
     decode_frame_scaled,

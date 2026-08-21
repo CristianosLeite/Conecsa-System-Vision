@@ -35,11 +35,25 @@ pub fn Configuration(
     /// trained model). When set, the standard overlay + poll attach to it —
     /// same UX as a manual .pt upload.
     external_conversion: ReadSignal<Option<model_conversion::PendingConversion>>,
+    /// Latest `conversion_changed` payload seen on the app event stream (owned
+    /// by MainView, which survives the training view replacing the dashboard).
+    /// This is the overlay's primary driver: it carries the backend's own step
+    /// message and progress, so the overlay works even when the poll does not.
+    conversion_event: ReadSignal<Option<api::ConversionStatusResponse>>,
     /// Mirrors "a conversion is in progress" up to the control panel so it can
     /// disable Start Detection while the engine is being built.
     set_converting: WriteSignal<bool>,
 ) -> impl IntoView {
     let i18n = use_i18n();
+    // Role gating: the detection thresholds are admin-only; sliders stay visible.
+    let privileged = crate::components::access::privileged();
+    let restricted_title = move || {
+        if privileged {
+            ""
+        } else {
+            t_string!(i18n, common::restricted_to_admins)
+        }
+    };
     // State for loading / conversion overlay — owned here so the overlay covers the full panel
     let (active_job_id, set_active_job_id) = signal(Option::<String>::None);
     let (overlay_message, set_overlay_message) = signal(String::new());
@@ -48,6 +62,83 @@ pub fn Configuration(
     // A job id is set for the whole duration of any conversion (manual upload
     // or training handoff) and cleared when it finishes.
     Effect::new(move |_| set_converting.set(active_job_id.get().is_some()));
+
+    // Primary driver: every `conversion_changed` event the device publishes.
+    // Adopting a job here means the overlay appears for conversions this tab
+    // never started (training handoff, another operator, a page opened
+    // mid-conversion) and its step text tracks the backend directly.
+    Effect::new(move |_| {
+        let Some(status) = conversion_event.get() else {
+            return;
+        };
+        let locale = i18n.get_locale_untracked();
+        let active = active_job_id.get_untracked();
+
+        if model_conversion::is_terminal(&status.status) {
+            // Only the job we are showing may close the overlay, and only once
+            // — the fallback poll is watching the same job.
+            if !model_conversion::claim_finished(
+                &status.job_id,
+                active_job_id,
+                set_active_job_id,
+            ) {
+                return;
+            }
+            spawn_local(async move {
+                let filename = status.original_filename.clone();
+                model_conversion::apply_terminal_status(
+                    &status,
+                    &filename,
+                    locale,
+                    set_success_msg,
+                    set_error_msg,
+                    set_models,
+                    set_model_refresh,
+                )
+                .await;
+            });
+            return;
+        }
+
+        set_overlay_message.set(model_conversion::overlay_message(
+            &status.message,
+            &status.original_filename,
+            locale,
+        ));
+        set_overlay_progress.set(model_conversion::ramp_progress(
+            status.elapsed_secs.unwrap_or(0.0),
+            status.progress,
+            95.0,
+        ));
+        if active.as_deref() == Some(status.job_id.as_str()) {
+            return; // already attached; the update above is all that was needed
+        }
+
+        set_active_job_id.set(Some(status.job_id.clone()));
+        // The poll is only a fallback for a dead event stream, so it starts
+        // from the age the device just reported rather than from zero.
+        spawn_local(async move {
+            model_conversion::poll_conversion_job(
+                model_conversion::ConversionPollConfig {
+                    job_id: status.job_id,
+                    initial_elapsed_secs: status.elapsed_secs.unwrap_or(0.0),
+                    original_filename: status.original_filename,
+                    timeout_secs: 660.0,
+                    progress_cap: 95.0,
+                    locale,
+                },
+                active_job_id,
+                set_active_job_id,
+                set_overlay_message,
+                set_overlay_progress,
+                set_success_msg,
+                set_error_msg,
+                set_models,
+                set_model_refresh,
+            )
+            .await;
+        });
+    });
 
     Effect::new(move |_| {
         let Some(pc) = external_conversion.get() else {
@@ -68,12 +159,13 @@ pub fn Configuration(
             model_conversion::poll_conversion_job(
                 model_conversion::ConversionPollConfig {
                     job_id: pc.job_id,
-                    started_at_secs: pc.started_at_secs,
+                    initial_elapsed_secs: pc.elapsed_secs,
                     original_filename: pc.filename,
                     timeout_secs: 660.0,
                     progress_cap: 95.0,
                     locale,
                 },
+                active_job_id,
                 set_active_job_id,
                 set_overlay_message,
                 set_overlay_progress,
@@ -180,6 +272,8 @@ pub fn Configuration(
                 value=threshold
                 set_value=set_threshold
                 on_change=update_threshold
+                disabled=!privileged
+                title=restricted_title
             />
 
             // ===== Overlay Threshold Section =====
@@ -189,6 +283,8 @@ pub fn Configuration(
                 value=overlay_threshold
                 set_value=set_overlay_threshold
                 on_change=update_overlay_threshold
+                disabled=!privileged
+                title=restricted_title
             />
 
             // ===== Class Names Section =====
@@ -203,6 +299,7 @@ pub fn Configuration(
                 models=models
                 set_models=set_models
                 set_model_refresh=set_model_refresh
+                active_job_id=active_job_id
                 set_active_job_id=set_active_job_id
                 set_overlay_message=set_overlay_message
                 set_overlay_progress=set_overlay_progress

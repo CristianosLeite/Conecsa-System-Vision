@@ -7,17 +7,16 @@
  */
 module.exports = function (RED) {
   "use strict";
-  const { inferenceBaseUrl, request, subscribeSSE } = require("../../lib/http-client");
+  const { request, subscribeSSE } = require("../../lib/http-client");
+  const { initNode } = require("../../lib/node-base");
 
   function StartStopNode(config) {
-    RED.nodes.createNode(this, config);
     const node = this;
+    initNode(RED, node, config, "connecting");
 
-    node.inferenceUrl = inferenceBaseUrl(config);
     node.action = config.action || "toggle";
     const nodeSource = `node-red:${node.id}`;
 
-    node.status({ fill: "grey", shape: "ring", text: "connecting" });
 
     // Authoritative state cached from the SSE stream. `null` until the
     // first event arrives; used by the toggle action so it does not

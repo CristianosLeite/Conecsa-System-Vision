@@ -39,7 +39,9 @@ The table above lists the per-device **compose** services. A separate native
 entry point to a fleet of these devices. It is **not** in the compose stack and
 runs on its own host on the LAN: it discovers devices over mDNS (`_conecsa._tcp`),
 pairs with each (acting as a private CA), and reaches them **only over mutual
-TLS** — pulling their detection records, not receiving pushed ones. See
+TLS** — pulling their detection records and their audit trails, not receiving
+pushed ones. It is also the only place operators are authenticated, so it is
+the only place a user action can be attributed to a person. See
 [Fleet hub](services/hub-vision.md).
 
 ## Communication between services
@@ -72,6 +74,13 @@ over **gRPC**.
   polls each paired device's `/api/v1/detections/snapshot`); the device exposes
   only its `:443` mTLS endpoint. This is a LAN mTLS/mDNS path, separate from the
   intra-device gRPC + SHM transports above.
+- The same path carries the **audit trail**: the hub drains each device's record
+  of user actions (`/api/v1/audit/backlog`, persist-then-ack) and, in the other
+  direction, stamps the signed-in operator onto every request it proxies into a
+  device (`X-Conecsa-User`, `X-Conecsa-Role`, `X-Conecsa-Origin-Ip`) — the
+  device has no authentication of its own, so that is the only identity it ever
+  sees. nginx adds `X-Forwarded-For`, and both are trusted only when it relayed
+  the request. See [Audit trail](services/hub-vision.md#audit-trail).
 - The same LAN path carries the **time**: the board has no RTC battery and the
   sites have no reachable NTP server, so the hub relays its clock (at pairing and
   on every status poll) and the api-gateway hands it to the hardware agent's

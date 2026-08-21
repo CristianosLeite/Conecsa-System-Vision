@@ -1,7 +1,6 @@
 """Unit tests for the pure YOLO box-decoding helpers."""
 import numpy as np
 import pytest
-
 from api.views import detection_boxes as db
 
 

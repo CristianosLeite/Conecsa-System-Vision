@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
 from service import _sam_worker
 from service._sam_worker import (
     _INIT_FNS,

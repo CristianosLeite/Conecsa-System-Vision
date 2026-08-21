@@ -13,7 +13,6 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 import requests
-
 from conecsa_shm.camera_ring import CameraRingReader
 from conecsa_shm.stereo import combine_stereo
 

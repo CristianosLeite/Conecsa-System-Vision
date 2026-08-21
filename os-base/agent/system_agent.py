@@ -9,10 +9,11 @@ import logging
 import os
 from typing import List, Optional
 
+import psutil  # in conecsa-os:base
+
 # noinspection PyPackageRequirements
 from jeepney import DBusAddress, new_method_call
 from jeepney.io.blocking import open_dbus_connection
-import psutil  # in conecsa-os:base
 
 logger = logging.getLogger(__name__)
 

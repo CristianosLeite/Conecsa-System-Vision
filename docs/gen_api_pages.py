@@ -21,6 +21,7 @@ from pathlib import Path
 
 import mkdocs_gen_files
 
+
 # griffe emits a WARNING for every parameter/return that a docstring documents
 # without a type annotation. Many signatures here are intentionally untyped, so
 # these are noise. Drop just those records (via a filter on mkdocs' log

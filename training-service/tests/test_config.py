@@ -43,3 +43,15 @@ class TestPathProperties:
         assert 0.0 <= Config.STEREO_BLEND_ALPHA <= 1.0
         assert -0.5 <= Config.STEREO_OFFSET <= 0.5
         assert -0.5 <= Config.STEREO_OFFSET_Y <= 0.5
+
+    def test_stereo_combine_is_off_by_default(self, monkeypatch):
+        # Blending halves the frame, which wrecks an ordinary camera's image,
+        # so the seed must be off — only a 3D camera turns it on, from the UI.
+        # Re-imported with the env cleared: the value is read at class creation.
+        monkeypatch.delenv("STEREO_COMBINE", raising=False)
+        import importlib
+
+        import service.config as config_module
+
+        reloaded = importlib.reload(config_module)
+        assert reloaded.Config.STEREO_COMBINE == "none"

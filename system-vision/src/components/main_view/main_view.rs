@@ -38,6 +38,11 @@ pub fn MainView() -> impl IntoView {
     // completion the resulting conversion job is handed to Configuration.
     let (show_training_confirm, set_show_training_confirm) = signal(false);
     let (pending_conversion, set_pending_conversion) = signal(None::<PendingConversion>);
+    // Latest `conversion_changed` payload from the app event stream. Lives here
+    // rather than in Configuration because the training view replaces the whole
+    // dashboard: events that arrive while training is on screen must still be
+    // waiting for Configuration when it remounts.
+    let (conversion_event, set_conversion_event) = signal(None::<api::ConversionStatusResponse>);
     // Set by Configuration while any model conversion runs; disables Start
     // Detection so the GPU stays free for the TensorRT engine build.
     let (converting, set_converting) = signal(false);
@@ -87,6 +92,21 @@ pub fn MainView() -> impl IntoView {
 
             let is_snapshot = event.event_type == "state_snapshot";
             let has_key = |key: &str| event.keys.iter().any(|k| k == key);
+
+            // Model-conversion progress. The device publishes the whole job on
+            // every status change, so the overlay can render the real steps
+            // instead of guessing from a poll it may not be able to make.
+            // Matched on the type, not the `conversion` key: the gateway's
+            // `conversion_started` carries that key too, but its payload is the
+            // upload response rather than a job.
+            if event.event_type == "conversion_changed" {
+                match serde_json::from_value::<api::ConversionStatusResponse>(event.data.clone()) {
+                    Ok(job) => set_conversion_event.set(Some(job)),
+                    Err(e) => {
+                        leptos::logging::error!("Failed to parse conversion event: {}", e)
+                    }
+                }
+            }
 
             if is_snapshot || has_key("models") {
                 let locale = i18n.get_locale_untracked();
@@ -216,6 +236,7 @@ pub fn MainView() -> impl IntoView {
                     gpio_refresh=gpio_refresh
                     on_training_request=on_training_request
                     external_conversion=pending_conversion
+                    conversion_event=conversion_event
                     converting=converting
                     set_converting=set_converting
                 />

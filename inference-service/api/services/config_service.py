@@ -5,7 +5,7 @@ Holds the business logic that used to live in ConfigController so both the REST
 controller and the gRPC servicer stay thin adapters that delegate here.
 """
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
 

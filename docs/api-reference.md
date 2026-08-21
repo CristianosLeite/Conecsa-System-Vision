@@ -5,6 +5,12 @@ paths the monolith used, so clients are unchanged). The gateway relays each to
 the headless inference-service, the training-service or the `os-base` hardware agent
 over gRPC, or fans the MJPEG feeds out of shared memory.
 
+Every mutating request is recorded in the device's
+[audit trail](services/hub-vision.md#audit-trail) before the response leaves —
+including the legacy aliases, which are separate view functions. Reads are not
+recorded. The routes marked **hub-only** below answer to the paired hub alone
+(mTLS, verified by the nginx terminator) and return `403` to anyone else.
+
 ## Detection
 
 | Method | Endpoint | Description |
@@ -163,6 +169,33 @@ to require a shared secret.
 | `POST` | `/enroll/csr` | Return a CSR for the hub to sign (authorized per the pairing policy) |
 | `POST` | `/enroll/complete` | Install the hub-signed `device_cert` + `ca_cert`; nginx reloads into mTLS-enforcing mode |
 | `POST` | `/enroll/reset` | Unpair: clear the cert + CA and return to enrollment mode. Requires the owning hub (mTLS) or the pairing token |
+
+## Audit trail (hub-only)
+
+The device keeps its own record of what users did to it, in a SQLite ring
+buffer the hub drains and then clears. Delivery is at-least-once: the hub
+persists a page before acknowledging it, so an unacknowledged page is simply
+re-delivered — duplicates are tolerated, losing a record of what someone did is
+not. See [Audit trail](services/hub-vision.md#audit-trail).
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/v1/audit/backlog` | One page of recorded actions, oldest first (`?limit=N`, default 25, max 200). Each record carries `id`, `captured_at`, `username`, `role`, `event`, `detail`, `source_ip` and `outcome`; the envelope adds `device_now` (the device clock, so the hub can offset-correct timestamps) and `pending` |
+| `POST` | `/api/v1/audit/backlog/ack` | Delete recorded actions the hub confirmed persisting — body `{"ids": [..]}`, idempotent, returns `{"success": true, "deleted": N}` |
+
+`event` is a stable machine-readable key (`detection.start`, `dataset.deleted`),
+never a phrase — the hub composes the sentence in the operator's language. A
+mutating route with no key of its own is still recorded, under `device.request`
+with its method and path, so a new endpoint appears in the trail as soon as it
+exists. `detail` names the target and nothing else: request bodies, uploaded
+files and Wi-Fi pre-shared keys never reach the buffer.
+
+The device authenticates nobody, so `username`/`role` are whatever the hub
+stamped on the request (`X-Conecsa-User`, `X-Conecsa-Role`) and are kept only
+when the mTLS terminator verified the caller. `source_ip` comes from
+`X-Conecsa-Origin-Ip` or `X-Forwarded-For`, both read only when nginx relayed
+the request; a caller reaching the gateway directly is recorded by its actual
+peer address.
 
 ## Legacy aliases
 

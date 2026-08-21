@@ -3,8 +3,9 @@ TensorRT runtime implementation using native Python API.
 """
 import logging
 
-from .base_runtime import BaseRuntime
 from api.runtime_management._trt_engine_builder import ensure_cudla_compat
+
+from .base_runtime import BaseRuntime
 from .tensorrt_interpreter import TensorRTInterpreter
 
 logger = logging.getLogger(__name__)
@@ -25,11 +26,12 @@ class TensorRTRuntime(BaseRuntime):
             # The following packages are included on os build.
 
             # noinspection PyPackageRequirements
-            import tensorrt as trt  # type: ignore
-            # noinspection PyPackageRequirements
-            import pycuda.driver as cuda  # type: ignore
             # noinspection PyPackageRequirements
             import pycuda.autoinit as _  # type: ignore # noqa: F401 Initializes CUDA context for this process
+
+            # noinspection PyPackageRequirements
+            import pycuda.driver as cuda  # type: ignore
+            import tensorrt as trt  # type: ignore
 
             self._runtime_module = trt  # type: ignore
             self._available = True

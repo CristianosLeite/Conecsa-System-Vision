@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import grpc
 import pytest
-
 from gateway.training import session
 
 

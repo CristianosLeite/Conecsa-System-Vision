@@ -5,17 +5,16 @@
  */
 module.exports = function (RED) {
   "use strict";
-  const { inferenceBaseUrl, request } = require("../../lib/http-client");
+  const { request } = require("../../lib/http-client");
+  const { initNode } = require("../../lib/node-base");
 
   function SystemStatusNode(config) {
-    RED.nodes.createNode(this, config);
     const node = this;
+    initNode(RED, node, config);
 
-    node.inferenceUrl = inferenceBaseUrl(config);
     node.mode = config.mode || "on-demand";
     node.interval = (parseFloat(config.interval) || 10) * 1000;
 
-    node.status({ fill: "grey", shape: "ring", text: "idle" });
 
     let timer = null;
 

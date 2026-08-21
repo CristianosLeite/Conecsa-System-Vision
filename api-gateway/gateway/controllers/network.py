@@ -13,10 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 def _network_agent_error(exc: grpc.RpcError) -> Response:
-    """Map a hardware-agent gRPC error to a 503 JSON Response."""
+    """Map a hardware-agent gRPC error to a 503 JSON Response.
+
+    The detail goes to the log only — on a connection failure it embeds the
+    agent's internal address.
+    """
     detail = exc.details() if hasattr(exc, "details") else str(exc)
     logger.error("hardware agent RPC failed: %s", detail)
-    return _json({"error": f"Hardware agent unavailable: {detail}"}, 503)
+    return _json({"error": "Hardware agent unavailable"}, 503)
 
 
 @api_bp.route('/api/v1/network/config', methods=['GET'])

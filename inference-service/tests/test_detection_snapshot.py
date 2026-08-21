@@ -1,6 +1,5 @@
 """Unit tests for the pure snapshot helpers of the detection service."""
 import pytest
-
 from api.services.detection_service import normalized_bbox
 
 

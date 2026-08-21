@@ -16,7 +16,6 @@ impl WebcamServer {
         dev_path: &str,
         cfg: &CameraConfig,
         shm: &Arc<ShmProducer>,
-        shm_poll: &Arc<ShmProducer>,
         config_arc: &std::sync::Arc<std::sync::Mutex<CameraConfig>>,
         restart_flag: &AtomicBool,
         rgb_hardware_supported: &AtomicBool,
@@ -47,21 +46,18 @@ impl WebcamServer {
         let rgb_hw = Self::apply_exposure(cfg.camera_index, cfg);
         rgb_hardware_supported.store(rgb_hw, Ordering::Relaxed);
 
-        Self::publish_health(&shm, cfg, "capturing");
+        Self::publish_health(shm, cfg, "capturing");
 
         loop {
             if restart_flag.load(Ordering::Relaxed) {
                 break;
             }
             // Poll for config changes from consumer.
-            let shm_mut = unsafe {
-                &mut *(Arc::as_ptr(shm_poll) as *mut ShmProducer)
-            };
-            if let Some(proto_cfg) = shm_mut.poll_config() {
+            if let Some(proto_cfg) = shm.poll_config() {
                 Self::apply_shm_config(
                     &proto_cfg,
                     config_arc,
-                    &shm,
+                    shm,
                     restart_flag,
                     rgb_hardware_supported,
                 );
@@ -131,7 +127,6 @@ impl WebcamServer {
         dev_path: &str,
         cfg: &CameraConfig,
         shm: &Arc<ShmProducer>,
-        shm_poll: &Arc<ShmProducer>,
         config_arc: &std::sync::Arc<std::sync::Mutex<CameraConfig>>,
         restart_flag: &AtomicBool,
         rgb_hardware_supported: &AtomicBool,
@@ -180,9 +175,7 @@ impl WebcamServer {
                 break;
             }
             // Poll for config changes from consumer.
-            // SAFETY: single writer thread, poll_config uses atomics.
-            let shm_mut = unsafe { &mut *(Arc::as_ptr(shm_poll) as *mut ShmProducer) };
-            if let Some(proto_cfg) = shm_mut.poll_config() {
+            if let Some(proto_cfg) = shm.poll_config() {
                 Self::apply_shm_config(
                     &proto_cfg,
                     config_arc,

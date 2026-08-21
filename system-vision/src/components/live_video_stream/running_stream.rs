@@ -30,11 +30,13 @@ pub(super) fn RunningStream(
     let i18n = use_i18n();
     let base_url = get_api_base_url();
     let video_url = move || {
-        format!(
+        // <img> cannot set headers, so the hub-proxy capability (when present)
+        // travels as ?cap= instead.
+        crate::components::access::with_cap(&format!(
             "{}/api/v1/video_feed_processed?r={}",
             base_url,
             reload_key.get()
-        )
+        ))
     };
 
     view! {

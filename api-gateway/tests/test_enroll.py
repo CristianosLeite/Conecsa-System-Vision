@@ -7,7 +7,6 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-
 from gateway import enroll
 
 
@@ -179,14 +178,19 @@ class TestCompleteAdoptsTheHubClock:
         assert order[0][1:] == ("2026-08-03T10:00:00.000Z", "pairing", True)
         assert enroll.is_enrolled() is True
 
-    def test_pairing_still_completes_when_the_clock_cannot_be_set(
-            self, client, monkeypatch):
+    def test_a_failed_clock_step_aborts_the_pairing(self, client, monkeypatch):
+        # Enrolling with a wrong clock strands the device (every later hub
+        # call fails "certificate is not yet valid"), so a rejected time step
+        # must install nothing and let the hub retry — the exact failure mode
+        # gateway/clock.py's docstring calls fatal.
         resp, order = self._post(client, monkeypatch, apply_result=False)
-        assert resp.status_code == 200
-        assert [step[0] for step in order] == ["clock", "install"]
-        assert enroll.is_enrolled() is True
+        assert resp.status_code == 500
+        assert [step[0] for step in order] == ["clock"], "no install on failure"
+        assert enroll.is_enrolled() is False
 
     def test_an_older_hub_omitting_hub_time_still_pairs(self, client, monkeypatch):
+        # A hub too old to send hub_time cannot be asked to retry with data it
+        # does not have: skip the sync (logged) instead of failing the pairing.
         device_cert, ca_cert = self._hub_signed_cert()
         seen = []
         monkeypatch.setattr(enroll.clock, "apply_hub_time",
@@ -194,7 +198,7 @@ class TestCompleteAdoptsTheHubClock:
         resp = client.post("/enroll/complete", json={
             "device_cert": device_cert, "ca_cert": ca_cert})
         assert resp.status_code == 200
-        assert seen == [None]
+        assert seen == [], "no sync attempt without hub_time"
 
 
 class TestResetAuthorized:
@@ -234,3 +238,164 @@ class TestResetAuthorized:
                 "/enroll/reset", method="POST", json={"token": "secret"},
                 environ_base={"REMOTE_ADDR": "172.20.0.5"}):
             assert enroll._reset_authorized() is True
+
+
+class TestKeyCreationRace:
+    def test_concurrent_first_requests_share_one_key(self, cert_dir,
+                                                     monkeypatch):
+        # Waitress is thread-per-connection and the hub calls /enroll/info and
+        # /enroll/csr back to back: two first requests must converge on ONE
+        # key, or a CSR issued from the loser no longer matches the stored key.
+        # Several rounds because the interesting interleavings (including the
+        # loser loading while the winner is still writing, which CI caught
+        # against an earlier O_EXCL-only fix) are timing-dependent.
+        import os as _os
+        import threading
+
+        for round_no in range(10):
+            monkeypatch.setattr(
+                enroll, "KEY_PATH", str(cert_dir / f"device-{round_no}.key"))
+            barrier = threading.Barrier(2)
+            keys = []
+
+            def create(barrier=barrier, keys=keys):
+                barrier.wait()
+                keys.append(enroll._load_or_create_key())
+
+            threads = [threading.Thread(target=create) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+
+            assert len(keys) == 2, f"round {round_no}: a racer crashed"
+            nums = {k.private_numbers().private_value for k in keys}
+            assert len(nums) == 1, "both requests must hold the same key"
+            # The key on disk is that same one, and no staging litter remains.
+            assert enroll._load_or_create_key().private_numbers() \
+                .private_value in nums
+            litter = [f for f in _os.listdir(cert_dir) if ".tmp-" in f]
+            assert litter == []
+
+    def test_an_existing_key_is_never_truncated(self, cert_dir):
+        first = enroll._load_or_create_key()
+        again = enroll._load_or_create_key()
+        assert first.private_numbers().private_value == \
+            again.private_numbers().private_value
+
+    def test_the_key_file_is_private(self, cert_dir):
+        import os as _os
+        enroll._load_or_create_key()
+        mode = _os.stat(cert_dir / "device.key").st_mode & 0o777
+        assert mode == 0o600
+
+
+class TestCompleteValidatesTheChain:
+    """A parsable certificate pair is not enough: installing a CA that never
+    signed the leaf flips nginx into enforcing mode against a dead channel."""
+
+    @pytest.fixture
+    def client(self, cert_dir, monkeypatch):
+        from flask import Flask
+        monkeypatch.setenv("DEVICE_ID", "cam-42")
+        monkeypatch.delenv("DEVICE_PAIR_TOKEN", raising=False)
+        monkeypatch.setattr(enroll.clock, "apply_hub_time",
+                            lambda raw, source, force=False: True)
+        app = Flask(__name__)
+        app.register_blueprint(enroll.enroll_bp)
+        return app.test_client()
+
+    @staticmethod
+    def _make_ca(ca=True, key_cert_sign=True):
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-hub")])
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime(2020, 1, 1, tzinfo=timezone.utc))
+            .not_valid_after(datetime(2050, 1, 1, tzinfo=timezone.utc))
+            .add_extension(x509.BasicConstraints(ca=ca, path_length=None),
+                           critical=True)
+        )
+        if not key_cert_sign:
+            builder = builder.add_extension(
+                x509.KeyUsage(digital_signature=True, content_commitment=False,
+                              key_encipherment=False, data_encipherment=False,
+                              key_agreement=False, key_cert_sign=False,
+                              crl_sign=False, encipher_only=False,
+                              decipher_only=False),
+                critical=True)
+        return key, builder.sign(key, hashes.SHA256()), name
+
+    @classmethod
+    def _make_leaf(cls, ca_key, ca_name, eku=None):
+        csr = x509.load_pem_x509_csr(enroll._build_csr())
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(csr.subject).issuer_name(ca_name)
+            .public_key(csr.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime(2020, 1, 1, tzinfo=timezone.utc))
+            .not_valid_after(datetime(2050, 1, 1, tzinfo=timezone.utc))
+            .add_extension(
+                csr.extensions.get_extension_for_class(
+                    x509.SubjectAlternativeName).value, critical=False)
+        )
+        if eku is not None:
+            builder = builder.add_extension(x509.ExtendedKeyUsage(eku),
+                                            critical=False)
+        return builder.sign(ca_key, hashes.SHA256())
+
+    @staticmethod
+    def _pem(cert):
+        return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+    def _complete(self, client, leaf, ca):
+        return client.post("/enroll/complete", json={
+            "device_cert": self._pem(leaf), "ca_cert": self._pem(ca),
+            "hub_time": "2026-08-03T10:00:00.000Z"})
+
+    def test_a_non_ca_certificate_is_rejected(self, client):
+        ca_key, _, ca_name = self._make_ca()
+        _, non_ca, _ = self._make_ca(ca=False)
+        leaf = self._make_leaf(ca_key, ca_name)
+        resp = self._complete(client, leaf, non_ca)
+        assert resp.status_code == 400
+        assert "not a CA" in resp.get_json()["error"]
+        assert enroll.is_enrolled() is False
+
+    def test_a_ca_that_did_not_sign_the_leaf_is_rejected(self, client):
+        ca_key, _, ca_name = self._make_ca()
+        _, other_ca, _ = self._make_ca()
+        leaf = self._make_leaf(ca_key, ca_name)
+        resp = self._complete(client, leaf, other_ca)
+        assert resp.status_code == 400
+        assert "not issued by" in resp.get_json()["error"]
+        assert enroll.is_enrolled() is False
+
+    def test_a_ca_that_cannot_sign_certs_is_rejected(self, client):
+        ca_key, ca_cert, ca_name = self._make_ca(key_cert_sign=False)
+        leaf = self._make_leaf(ca_key, ca_name)
+        resp = self._complete(client, leaf, ca_cert)
+        assert resp.status_code == 400
+        assert "cannot sign" in resp.get_json()["error"]
+
+    def test_an_eku_without_server_auth_is_rejected(self, client):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        ca_key, ca_cert, ca_name = self._make_ca()
+        leaf = self._make_leaf(ca_key, ca_name,
+                               eku=[ExtendedKeyUsageOID.CLIENT_AUTH])
+        resp = self._complete(client, leaf, ca_cert)
+        assert resp.status_code == 400
+        assert "serverAuth" in resp.get_json()["error"]
+
+    def test_a_correct_chain_enrolls(self, client):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        ca_key, ca_cert, ca_name = self._make_ca()
+        leaf = self._make_leaf(ca_key, ca_name,
+                               eku=[ExtendedKeyUsageOID.SERVER_AUTH])
+        resp = self._complete(client, leaf, ca_cert)
+        assert resp.status_code == 200
+        assert enroll.is_enrolled() is True

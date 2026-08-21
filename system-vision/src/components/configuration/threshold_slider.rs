@@ -15,6 +15,12 @@ pub fn ThresholdSlider(
     value: ReadSignal<f32>,
     set_value: WriteSignal<f32>,
     on_change: Callback<f32>,
+    /// Renders the slider greyed out and inert (used for role gating).
+    #[prop(optional)]
+    disabled: bool,
+    /// Tooltip shown while `disabled` (e.g. the restricted-to-admins reason).
+    #[prop(into, optional)]
+    title: TextProp,
 ) -> impl IntoView {
     let on_input = move |ev| {
         if let Ok(val) = event_target_value(&ev).parse::<f32>() {
@@ -40,6 +46,8 @@ pub fn ThresholdSlider(
                     prop:value={move || value.get().to_string()}
                     on:input=on_input
                     on:change=on_commit
+                    disabled=disabled
+                    title=move || title.get()
                     class="ui-range"
                 />
                 <span class="ui-value min-w-12 text-center text-sm">

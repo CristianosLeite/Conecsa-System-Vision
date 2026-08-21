@@ -5,15 +5,20 @@ The inference pipeline produces ONE encoded JPEG per processed camera frame
 fans it out to MJPEG clients without the frames crossing gRPC. Single producer
 (the encode stage), many readers (the gateway's processed feed), latest-wins.
 
-Mirrors the camera ring's flip protocol: write the inactive slot, flip
-``active_slot``, then bump ``write_seq`` (release). Both ends are Python, so the
-header is our own (little-endian). The segment lives in ``/dev/shm`` and is
-shared across containers via the same ``ipc:`` namespace as the camera ring.
+Mirrors the camera ring's seqlock protocol (header version 2): ``write_seq``
+is an odd/even generation counter — the writer bumps it odd, writes the
+inactive slot and its metadata, then bumps it even; readers copy under an
+even seq and accept only when a re-read shows it unchanged, retrying a torn
+copy. Both ends are Python, so the header is our own (little-endian); the
+memory-order contract is aligned accesses plus the double-read validation —
+never remove the re-check. The segment lives in ``/dev/shm`` and is shared
+across containers via the same ``ipc:`` namespace as the camera ring.
 """
 import logging
 import mmap
 import os
 import struct
+import time
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -31,8 +36,14 @@ def _default_slot_bytes() -> int:
 
 SLOTS = 2
 MAGIC = 0xC04E5A02
-VERSION = 1
+# Version 2 = the seqlock publication protocol (see the module docstring).
+VERSION = 2
 HEADER_SIZE = 64
+
+# Torn reads are rare (the writer's window is one slice assignment); a few
+# retries with a short pause outlasts it without spinning.
+_READ_RETRIES = 4
+_RETRY_PAUSE_S = 0.0005
 
 _OFF_MAGIC = 0          # u32
 _OFF_VERSION = 4        # u32
@@ -79,13 +90,15 @@ class ProcessedFrameWriter:
                                    n, self._slot_bytes)
                     self._warned = True
                 return
+            # Seqlock write: odd = publication open, even = published.
+            struct.pack_into("<Q", self._mm, _OFF_WRITE_SEQ, self._seq + 1)
             active = struct.unpack_from("<I", self._mm, _OFF_ACTIVE_SLOT)[0]
             write_slot = 1 - active
             base = HEADER_SIZE + write_slot * self._slot_bytes
             self._mm[base:base + n] = jpg
             struct.pack_into("<I", self._mm, _OFF_FRAME_SIZE, n)
             struct.pack_into("<I", self._mm, _OFF_ACTIVE_SLOT, write_slot)
-            self._seq += 1
+            self._seq += 2
             struct.pack_into("<Q", self._mm, _OFF_WRITE_SEQ, self._seq)
         except Exception as exc:  # noqa: BLE001 - never break the pipeline
             logger.debug("[ProcessedSHM] publish failed: %s", exc)
@@ -142,13 +155,27 @@ class ProcessedFrameReader:
             if self._mm is None:
                 return None
         try:
-            seq = struct.unpack_from("<Q", self._mm, _OFF_WRITE_SEQ)[0]
-            if seq <= last_seq:
-                return None
-            active = struct.unpack_from("<I", self._mm, _OFF_ACTIVE_SLOT)[0]
-            size = struct.unpack_from("<I", self._mm, _OFF_FRAME_SIZE)[0]
-            base = HEADER_SIZE + active * self._slot_bytes
-            return bytes(self._mm[base:base + size]), seq
+            for _ in range(_READ_RETRIES):
+                seq = struct.unpack_from("<Q", self._mm, _OFF_WRITE_SEQ)[0]
+                if seq & 1:
+                    # Publication in flight.
+                    time.sleep(_RETRY_PAUSE_S)
+                    continue
+                if seq <= last_seq:
+                    return None
+                active = struct.unpack_from("<I", self._mm, _OFF_ACTIVE_SLOT)[0]
+                size = struct.unpack_from("<I", self._mm, _OFF_FRAME_SIZE)[0]
+                if active >= SLOTS or size == 0 or size > self._slot_bytes:
+                    time.sleep(_RETRY_PAUSE_S)
+                    continue
+                base = HEADER_SIZE + active * self._slot_bytes
+                jpg = bytes(self._mm[base:base + size])
+                seq_after = struct.unpack_from("<Q", self._mm, _OFF_WRITE_SEQ)[0]
+                if seq_after != seq:
+                    # Torn: the writer lapped us while we copied.
+                    continue
+                return jpg, seq
+            return None
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ProcessedSHM] read failed: %s", exc)
             return None

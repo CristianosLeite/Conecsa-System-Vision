@@ -4,9 +4,8 @@
 gateway, older inference-service that never sets the field) does not fail
 closed and refuse every Start with a 409.
 """
-from gateway.controllers.detection import _camera_connected
-
 import inference_pb2 as inf_pb
+from gateway.controllers.detection import _camera_connected
 
 
 def test_camera_connected_true_when_producer_reports_a_camera():

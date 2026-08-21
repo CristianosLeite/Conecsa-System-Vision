@@ -29,7 +29,7 @@ class Config:
 
     # Stereo combine — same defaults as the inference-service so captured
     # dataset images match the geometry the live detector sees.
-    STEREO_COMBINE = os.environ.get("STEREO_COMBINE", "blend").strip().lower()
+    STEREO_COMBINE = os.environ.get("STEREO_COMBINE", "none").strip().lower()
     STEREO_BLEND_ALPHA = min(max(_env_float("STEREO_BLEND_ALPHA", 0.5), 0.0), 1.0)
     STEREO_OFFSET = min(max(_env_float("STEREO_OFFSET", 0.0), -0.5), 0.5)
     STEREO_OFFSET_Y = min(max(_env_float("STEREO_OFFSET_Y", 0.0), -0.5), 0.5)

@@ -5,16 +5,15 @@
  */
 module.exports = function (RED) {
   "use strict";
-  const { inferenceBaseUrl, request } = require("../../lib/http-client");
+  const { request } = require("../../lib/http-client");
+  const { initNode } = require("../../lib/node-base");
 
   function ResetStatsNode(config) {
-    RED.nodes.createNode(this, config);
     const node = this;
+    initNode(RED, node, config);
 
-    node.inferenceUrl = inferenceBaseUrl(config);
     node.scope = config.scope || "all";
 
-    node.status({ fill: "grey", shape: "ring", text: "idle" });
 
     function resetCounter(cb) {
       request(node.inferenceUrl, "POST", "/api/v1/counter/reset", null, cb);

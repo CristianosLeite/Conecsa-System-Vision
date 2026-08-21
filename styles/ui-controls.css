@@ -250,6 +250,19 @@
     box-shadow: var(--shadow-control);
   }
 
+  .ui-range:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .ui-range:disabled::-webkit-slider-thumb {
+    cursor: not-allowed;
+  }
+
+  .ui-range:disabled::-moz-range-thumb {
+    cursor: not-allowed;
+  }
+
   .ui-radio-label {
     display: flex;
     min-width: 0;

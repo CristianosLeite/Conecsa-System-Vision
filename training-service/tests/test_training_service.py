@@ -7,7 +7,6 @@ lock, dataset freezing).
 from types import SimpleNamespace
 
 import pytest
-
 from service.dataset_service import DatasetError
 from service.training_service import TrainingService
 
@@ -27,6 +26,16 @@ class FakeRegistry:
 
     def get(self, dataset_id):
         return self._dataset
+
+    def freeze(self, dataset_id):
+        from service.dataset_service import DatasetError
+        if self._dataset.frozen:
+            raise DatasetError("Dataset is locked while a training job is running")
+        self._dataset.frozen = True
+        return self._dataset
+
+    def release(self, ds):
+        ds.frozen = False
 
 
 @pytest.fixture

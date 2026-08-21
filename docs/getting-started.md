@@ -526,9 +526,10 @@ HUB_FEATURES=mssql bash scripts/build-hub.sh     # also include SQL Server
 cd hub-vision && cargo tauri dev
 ```
 
-The hub discovers devices over mDNS and **pulls** their detections over mutual
-TLS — there is no inbound ingestion port. See [Fleet hub](services/hub-vision.md)
-for authentication, pairing, discovery and storage details.
+The hub discovers devices over mDNS and **pulls** their detections and their
+audit trails over mutual TLS — there is no inbound ingestion port. See
+[Fleet hub](services/hub-vision.md) for authentication, pairing, discovery,
+storage and the [audit trail](services/hub-vision.md#audit-trail).
 
 ## Building the documentation
 

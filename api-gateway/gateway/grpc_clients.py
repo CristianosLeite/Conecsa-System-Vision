@@ -22,12 +22,12 @@ _PROTO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proto")
 if _PROTO_DIR not in sys.path:
     sys.path.insert(0, _PROTO_DIR)
 
-import inference_pb2 as inf_pb            # noqa: E402
-import inference_pb2_grpc as inf_grpc     # noqa: E402
-import hardware_pb2 as hw_pb              # noqa: E402
-import hardware_pb2_grpc as hw_grpc       # noqa: E402
-import training_pb2 as trn_pb             # noqa: E402
-import training_pb2_grpc as trn_grpc      # noqa: E402
+import hardware_pb2 as hw_pb  # noqa: E402
+import hardware_pb2_grpc as hw_grpc  # noqa: E402
+import inference_pb2 as inf_pb  # noqa: E402
+import inference_pb2_grpc as inf_grpc  # noqa: E402
+import training_pb2 as trn_pb  # noqa: E402
+import training_pb2_grpc as trn_grpc  # noqa: E402
 
 from .config import settings  # noqa: E402
 

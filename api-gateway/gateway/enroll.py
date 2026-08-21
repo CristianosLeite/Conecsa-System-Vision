@@ -89,17 +89,32 @@ def _ensure_dir() -> None:
 
 
 def _load_or_create_key() -> "ec.EllipticCurvePrivateKey":
-    """Load the device private key, generating it on first use."""
+    """Load the device private key, generating it exactly once on first use.
+
+    Concurrency-safe by construction: waitress serves requests on many
+    threads, and the hub calls /enroll/info and /enroll/csr back to back, so
+    two first requests race here. The key is staged fully (written + fsynced)
+    under a unique temp name and then hard-linked into place — os.link fails
+    atomically when another request already won, and KEY_PATH can never be
+    observed half-written (an O_EXCL write directly to KEY_PATH could: the
+    loser would load the winner's file mid-write). Whoever loses the race
+    loads the winner's key instead.
+    """
+    import secrets
+
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
 
-    _ensure_dir()
-    if os.path.exists(KEY_PATH):
+    def _load() -> "ec.EllipticCurvePrivateKey":
         with open(KEY_PATH, "rb") as fh:
             key = serialization.load_pem_private_key(fh.read(), password=None)
         if not isinstance(key, ec.EllipticCurvePrivateKey):
             raise TypeError(f"{KEY_PATH} is not an EC private key; delete it to regenerate")
         return key
+
+    _ensure_dir()
+    if os.path.exists(KEY_PATH):
+        return _load()
 
     key = ec.generate_private_key(ec.SECP256R1())
     pem = key.private_bytes(
@@ -108,11 +123,36 @@ def _load_or_create_key() -> "ec.EllipticCurvePrivateKey":
         serialization.NoEncryption(),
     )
     # Restrictive permissions: the private key must never leave the device.
-    fd = os.open(KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    staged = f"{KEY_PATH}.tmp-{secrets.token_hex(8)}"
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(pem)
+        fh.flush()
+        os.fsync(fh.fileno())
+    try:
+        os.link(staged, KEY_PATH)
+    except FileExistsError:
+        # A concurrent request published its key first — that one is the truth.
+        return _load()
+    finally:
+        os.unlink(staged)
+    _fsync_dir(CERT_DIR)
     logger.info("generated device enrollment key at %s", KEY_PATH)
     return key
+
+
+def _fsync_dir(directory: str) -> None:
+    """Make a directory entry durable (best-effort)."""
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
 
 
 def public_fingerprint() -> str:
@@ -183,13 +223,26 @@ def _pairing_allowed():
 
 
 def _install_certs(device_cert: str, ca_cert: str) -> None:
-    """Persist the hub-signed server cert and the hub CA atomically."""
+    """Persist the hub-signed server cert and the hub CA (near-atomic pair).
+
+    Both temp files are written and fsynced before either rename, so the
+    window where nginx could observe a new leaf with the old CA shrinks to
+    the two back-to-back renames (microseconds; nginx only re-reads on its
+    entrypoint-triggered reload). Accepted residual — a full versioned-dir
+    switch is not worth the moving parts here.
+    """
     _ensure_dir()
+    staged = []
     for path, data in ((CERT_PATH, device_cert), (CA_PATH, ca_cert)):
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        staged.append((tmp, path))
+    for tmp, path in staged:
         os.replace(tmp, path)
+    _fsync_dir(CERT_DIR)
 
 
 @enroll_bp.route("/info", methods=["GET"])
@@ -245,7 +298,33 @@ def complete():
         key = _load_or_create_key()
         cert = x509.load_pem_x509_certificate(device_cert.encode("utf-8"))
         ca = x509.load_pem_x509_certificate(ca_cert.encode("utf-8"))
-        _ = ca.subject  # ensure CA cert parses
+
+        # The supplied CA must actually be a CA, and it must be the direct
+        # issuer of the leaf — otherwise any parsable certificate pair could
+        # flip nginx into "enforcing" mode against a CA that never signed
+        # anything, silently bricking the mTLS channel.
+        try:
+            basic = ca.extensions.get_extension_for_class(x509.BasicConstraints).value
+        except x509.ExtensionNotFound:
+            return jsonify({"error": "CA certificate has no BasicConstraints"}), 400
+        if not basic.ca:
+            return jsonify({"error": "supplied CA certificate is not a CA"}), 400
+        try:
+            key_usage = ca.extensions.get_extension_for_class(x509.KeyUsage).value
+            if not key_usage.key_cert_sign:
+                return jsonify({"error": "CA certificate cannot sign certificates"}), 400
+        except x509.ExtensionNotFound:
+            pass  # KeyUsage is optional; BasicConstraints already gates
+        try:
+            cert.verify_directly_issued_by(ca)
+        except Exception:  # noqa: BLE001 - one answer for every mismatch
+            return jsonify({"error": "device certificate was not issued by the supplied CA"}), 400
+        try:
+            eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+            if x509.oid.ExtendedKeyUsageOID.SERVER_AUTH not in eku:
+                return jsonify({"error": "device certificate lacks the serverAuth usage"}), 400
+        except x509.ExtensionNotFound:
+            pass  # no EKU restricts nothing
 
         sans = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
         if logical_name() not in sans.get_values_for_type(x509.DNSName):
@@ -267,7 +346,18 @@ def complete():
         # hub call as "certificate is not yet valid" — pairing would appear to
         # succeed and the device would go offline for good. This is also the
         # only channel that works while the clock is wrong (no validation here).
-        clock.apply_hub_time(body.get("hub_time"), "pairing", force=True)
+        # A failed step is fatal for the same reason: enrolling with a wrong
+        # clock strands the device, so install nothing and let the hub retry.
+        # A hub too old to send hub_time at all is let through (it cannot be
+        # asked to retry with data it does not have).
+        hub_time = body.get("hub_time")
+        if hub_time is None:
+            logger.warning("pairing without hub_time (old hub?); "
+                           "clock not synchronized")
+        elif not clock.apply_hub_time(hub_time, "pairing", force=True):
+            logger.error("pairing aborted: could not adopt the hub's clock")
+            return jsonify({"error": "could not synchronize the device clock; "
+                                     "nothing was installed — retry pairing"}), 500
 
         _install_certs(device_cert, ca_cert)
     except Exception as ex:  # noqa: BLE001

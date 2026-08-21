@@ -14,9 +14,24 @@ byte-for-byte so the web app and Flow need no changes:
   `StreamEvents` / `StreamStats`.
 - Keeps Protocol Buffers content-negotiation for the endpoints the frontend
   uses it on (start/stop/threshold/overlay_threshold/runtime/status/classes).
+- **Audit trail**: every mutating request is appended to a SQLite ring buffer
+  under `AUDIT_DIR` (`audit.db`, volume `conecsa-audit-data` at `/data/audit`),
+  which the hub drains over mTLS via `/api/v1/audit/backlog` and clears with
+  `/api/v1/audit/backlog/ack`. See
+  [Audit trail](hub-vision.md#audit-trail).
 
 It ships no ML stack (no torch/tensorrt) — only the web layer and the compiled
 proto stubs on top of `conecsa-os-base:base`.
+
+!!! note "Auditing is per request, not per handler"
+    The trail is written from an `after_request` hook. Several control
+    endpoints are served by more than one view — the `/api/*` aliases are
+    separate view functions — so a decorator on the handler would silently miss
+    half of them. A mutating route with no event key of its own is still
+    recorded, under `device.request` with its method and path, so coverage does
+    not depend on remembering to register a new endpoint. `detail` is built by
+    explicit per-route extraction of one safe field: request bodies, uploads
+    and Wi-Fi pre-shared keys never reach the buffer.
 
 !!! note "SSE thread budget"
     Waitress is thread-per-connection; long-lived MJPEG/SSE streams pin one

@@ -6,10 +6,10 @@ import threading
 from typing import Any, Dict, List, Optional
 
 # noinspection PyPackageRequirements
-import numpy as np # Package is included on os build.
+import cv2  # Package is included on os build.
 
 # noinspection PyPackageRequirements
-import cv2 # Package is included on os build.
+import numpy as np  # Package is included on os build.
 
 from .runtime_management import RuntimeFactory
 from .runtime_management.base_runtime import Interpreter

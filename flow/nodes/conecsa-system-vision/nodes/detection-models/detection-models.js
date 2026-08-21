@@ -5,18 +5,17 @@
  */
 module.exports = function (RED) {
   "use strict";
-  const { inferenceBaseUrl, request, subscribeSSE } = require("../../lib/http-client");
+  const { request, subscribeSSE } = require("../../lib/http-client");
+  const { initNode } = require("../../lib/node-base");
 
   function DetectionModelsNode(config) {
-    RED.nodes.createNode(this, config);
     const node = this;
+    initNode(RED, node, config);
 
-    node.inferenceUrl = inferenceBaseUrl(config);
     node.action = config.action || "list";
     node.modelName = config.modelName || "";
     const nodeSource = `node-red:${node.id}`;
 
-    node.status({ fill: "grey", shape: "ring", text: "idle" });
 
     function fetchModels(msg, emit, event) {
       request(node.inferenceUrl, "GET", "/api/v1/models", null, (err, body) => {

@@ -3,6 +3,7 @@ Statistics service - Manages performance statistics.
 """
 import threading
 from typing import Optional
+
 from ..models.detection_models import SystemStats
 
 

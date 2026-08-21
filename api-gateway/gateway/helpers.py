@@ -144,10 +144,34 @@ def _publish_if_success(resp: Response, event_type, keys, data=None, source=None
     return resp
 
 
-def _grpc_error(exc: grpc.RpcError) -> Response:
-    """Map a gRPC error to a JSON Response (503 for unavailable/timeout, else 500)."""
+def _grpc_error(exc: grpc.RpcError, service: str = "inference") -> Response:
+    """Map a gRPC error to a JSON Response — one mapping for every backend.
+
+    Client-caused statuses relay the service-authored detail (it is the only
+    diagnostic the UI has); infrastructure failures return a generic message,
+    because their detail embeds internals (a connection failure carries the
+    backend host:port) that belong in the log, not in the response body.
+    """
     detail = exc.details() if hasattr(exc, "details") else str(exc)
     code = exc.code() if hasattr(exc, "code") else None
-    status = 503 if code in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED) else 500
-    logger.error("inference RPC failed: %s", detail)
-    return _json_error(f"Inference service error: {detail}", status)
+    if code == grpc.StatusCode.NOT_FOUND:
+        return _json_error(detail, 404)
+    if code == grpc.StatusCode.FAILED_PRECONDITION:
+        return _json_error(detail, 409)
+    if code == grpc.StatusCode.INVALID_ARGUMENT:
+        return _json_error(detail, 400)
+    if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
+        return _json_error(detail, 413)
+    logger.error("%s RPC failed (%s): %s", service, code, detail)
+    if code in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
+        return _json_error(f"{service.capitalize()} service unavailable", 503)
+    return _json_error(f"{service.capitalize()} service error", 502)
+
+
+def _status_from_message(message: str, default: int = 500) -> int:
+    """HTTP status for a service Result whose only signal is its message text.
+
+    Case-insensitive on purpose: two call sites used to disagree on casing,
+    so "Model Not Found" mapped to 404 on one route and 500 on another.
+    """
+    return 404 if "not found" in (message or "").lower() else default

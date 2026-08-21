@@ -2,13 +2,11 @@
 import json
 
 import grpc
+import inference_pb2 as inf_pb
 import pytest
 from flask import Flask
-
 from gateway import grpc_clients, helpers
 from gateway.controllers import api_bp
-
-import inference_pb2 as inf_pb
 
 
 class FakeRpcError(grpc.RpcError):
@@ -64,16 +62,8 @@ def client():
     return app.test_client()
 
 
-TERMINATOR_IP = "10.66.0.9"
-
-
-@pytest.fixture
-def trusted_proxy(monkeypatch):
-    """Pin the trusted-proxy DNS resolution to TERMINATOR_IP, cold cache."""
-    monkeypatch.setattr(helpers, "_resolve_proxy_ips",
-                        lambda: frozenset({TERMINATOR_IP}))
-    monkeypatch.setattr(helpers, "_proxy_cache",
-                        {"ips": frozenset(), "at": float("-inf")})
+# trusted_proxy fixture and TERMINATOR_IP are shared in conftest.py.
+from conftest import TERMINATOR_IP  # noqa: E402
 
 
 class TestSnapshotHubHeartbeat:

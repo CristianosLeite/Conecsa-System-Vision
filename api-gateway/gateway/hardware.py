@@ -6,7 +6,7 @@ per-frame GPIO hot path (trigger gate / count output) stays in inference-service
 over SHM — the gateway only does the config-style RPCs the UI needs.
 """
 import logging
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import grpc
 

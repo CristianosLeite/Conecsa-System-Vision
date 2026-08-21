@@ -127,7 +127,15 @@ class TrainingService:
         with self._lock:
             if self._job.status not in ("idle", *_TERMINAL):
                 raise DatasetError("A training job is already running")
-            dataset.validate_for_training()
+            # The registry owns the frozen transition: freeze() claims the
+            # dataset atomically against delete(), so it cannot vanish
+            # between validation and the job taking it.
+            dataset = self._registry.freeze(dataset_id)
+            try:
+                dataset.validate_for_training()
+            except Exception:
+                self._registry.release(dataset)
+                raise
             job_id = str(uuid.uuid4())
             self._job = TrainingJob(
                 job_id=job_id, status="preparing", progress=2,
@@ -139,7 +147,6 @@ class TrainingService:
             self._cancel_requested = False
             self._early_stop_requested = False
             self._job_dataset = dataset
-            dataset.frozen = True
 
         # SAM and training never share the GPU (8GB budget).
         if self._sam is not None:
@@ -315,7 +322,7 @@ class TrainingService:
             with self._lock:
                 self._process = None
                 self._job_dataset = None
-            dataset.frozen = False
+            self._registry.release(dataset)
 
     def _consume_stdout(self, proc: subprocess.Popen,
                         epochs: int) -> "tuple[Optional[str], Optional[str]]":

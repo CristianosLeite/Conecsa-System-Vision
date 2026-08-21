@@ -1,7 +1,6 @@
 """Unit tests for the pure letterbox helpers."""
 import numpy as np
 import pytest
-
 from service.capture_service import corners_to_letterbox, letterbox_square
 
 _PAD = 114

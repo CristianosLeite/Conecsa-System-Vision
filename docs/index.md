@@ -30,7 +30,7 @@ on the DisplayPort — see [Fleet hub](services/hub-vision.md).
 | [HTTP API reference](api-reference.md) | All REST/SSE/MJPEG endpoints on the api-gateway |
 | [Troubleshooting](troubleshooting.md) | Common failures + Yocto runtime notes |
 | **Services** | [inference-service](services/inference-service.md) · [api-gateway](services/api-gateway.md) · [webcam-server](services/webcam-server.md) · [os hardware agent](services/os-hardware-agent.md) · [training-service](services/training-service.md) · [Flow](services/flow.md) |
-| [Fleet hub](services/hub-vision.md) | The native `hub-vision` app: auth, mDNS discovery + mTLS detection pull across many devices |
+| [Fleet hub](services/hub-vision.md) | The native `hub-vision` app: auth, mDNS discovery, mTLS detection pull and the audit trail across many devices |
 | **Reference** | [Protocol Buffers](reference/proto.md) · [Python API](reference/python-api/index.md) · Rust API (`cargo doc`) |
 | [Yocto build](yocto-build.md) | Building the lean Yocto host image for the Jetson |
 
@@ -64,6 +64,10 @@ on the DisplayPort — see [Fleet hub](services/hub-vision.md).
   single authenticated gateway — it discovers devices over mDNS and pulls their
   detections over mutual TLS; it runs on a hub machine or as a **boot-time
   kiosk on the device's DisplayPort** (see [Fleet hub](services/hub-vision.md))
+- **Audit trail**: every action operators take — on the hub and on its devices —
+  is recorded with its actor, origin and outcome, kept for a configurable
+  window and exportable as CSV (see
+  [Audit trail](services/hub-vision.md#audit-trail))
 - **Efficient API**: REST with Protocol Buffers serialization (JSON fallback)
 
 ## Quick start

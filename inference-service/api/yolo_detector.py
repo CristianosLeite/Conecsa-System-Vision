@@ -6,17 +6,21 @@ import os
 from typing import Optional
 
 # noinspection PyPackageRequirements
-import numpy as np # Package is included on os build.
+import cv2  # Package is included on os build.
 
 # noinspection PyPackageRequirements
-import cv2 # Package is included on os build.
+import numpy as np  # Package is included on os build.
 
 from .models.detection_models import Detection
 from .utils import bgr_to_hex, generate_colors, resolve_class_colors
 from .views.area_overlay import draw_areas
 from .views.detection_boxes import (
-    apply_nms, calculate_box_from_center, corners_from_normalized,
-    corners_from_pixel, extract_class_info, sigmoid,
+    apply_nms,
+    calculate_box_from_center,
+    corners_from_normalized,
+    corners_from_pixel,
+    extract_class_info,
+    sigmoid,
 )
 
 logger = logging.getLogger(__name__)
@@ -370,7 +374,7 @@ class YOLODetector:
         boxes_for_nms = []
         confidences_for_nms = []
         class_ids_for_nms = []
-        for box, confidence, class_id in zip(boxes, confidences, class_ids):
+        for box, confidence, class_id in zip(boxes, confidences, class_ids, strict=False):
             x_min, y_min, x_max, y_max = box
             if not (x_min < x_max and y_min < y_max):
                 continue
@@ -475,7 +479,7 @@ class YOLODetector:
         confidences_for_nms = []
         class_ids_for_nms = []
 
-        for i, (box, confidence, class_id) in enumerate(zip(valid_boxes, valid_confidences, valid_class_ids)):
+        for i, (box, confidence, class_id) in enumerate(zip(valid_boxes, valid_confidences, valid_class_ids, strict=False)):
             x_center, y_center, width, height = box
 
             # Invalid width/height: try alternative interpretation (absolute
@@ -548,7 +552,7 @@ class YOLODetector:
         )
 
         detection_objects = []
-        for box, confidence, class_id in zip(filtered_boxes, filtered_confidences, filtered_class_ids):
+        for box, confidence, class_id in zip(filtered_boxes, filtered_confidences, filtered_class_ids, strict=False):
             x1, y1, x2, y2 = box
             class_name = self.class_labels[class_id] if class_id < len(self.class_labels) else f"Class-{class_id}"
             detection_objects.append(Detection(

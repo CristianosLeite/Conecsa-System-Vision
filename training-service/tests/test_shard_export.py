@@ -3,7 +3,6 @@ import json
 import zipfile
 
 import pytest
-
 from service.dataset_service import Box, DatasetService
 
 _DATASET_ID = "0123abcd-4567-89ab-cdef-000000000000"

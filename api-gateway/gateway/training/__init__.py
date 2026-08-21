@@ -17,10 +17,9 @@ from flask import Blueprint
 training_bp = Blueprint("training", __name__)
 
 # Re-exported for the unit tests (historic `gateway.training` import surface).
-from .helpers import _job_dict, _meta_dict, _parse_named_boxes  # noqa: E402,F401
-
 # Importing the submodules registers their routes on `training_bp`.
 from . import datasets, images, jobs, sam, session, weights  # noqa: E402,F401
+from .helpers import _job_dict, _meta_dict, _parse_named_boxes  # noqa: E402,F401
 
 # Every training-surface request counts as client activity for the orphaned-
 # training watchdog (the hub polls status every 2s while it is alive).

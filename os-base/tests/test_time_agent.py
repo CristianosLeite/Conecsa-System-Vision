@@ -2,9 +2,8 @@
 from datetime import datetime, timezone
 
 import pytest
-
-from agent.time_agent import TimeAgent
 from agent import time_agent
+from agent.time_agent import TimeAgent
 
 
 def _millis(text: str) -> int:

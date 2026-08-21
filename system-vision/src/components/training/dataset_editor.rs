@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use gloo_timers::future::TimeoutFuture;
-use js_sys::Date;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -219,7 +218,7 @@ pub(super) fn DatasetEditor(
                             (!j.conversion_job_id.is_empty()).then(|| PendingConversion {
                                 job_id: j.conversion_job_id.clone(),
                                 filename: format!("{}.pt", j.model_name),
-                                started_at_secs: Date::now() / 1000.0,
+                                elapsed_secs: 0.0,
                             });
                         let _ = set_job.try_set(Some(j));
                         // Claim the exit BEFORE the request, and never release

@@ -8,6 +8,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
 
 use crate::app::get_api_base_url;
+use crate::components::access;
 
 /// Set headers.
 fn set_headers(request: &Request, headers: &[(&str, &str)]) -> Result<(), String> {
@@ -16,6 +17,18 @@ fn set_headers(request: &Request, headers: &[(&str, &str)]) -> Result<(), String
             .headers()
             .set(name, value)
             .map_err(|e| format!("Failed to set {} header: {:?}", name, e))?;
+    }
+    Ok(())
+}
+
+/// Attach the hub-proxy capability header when this page load carries one.
+/// No-op on direct LAN access (no hub proxy, no token).
+pub fn set_proxy_cap(request: &Request) -> Result<(), String> {
+    if let Some(cap) = access::proxy_cap() {
+        request
+            .headers()
+            .set(access::PROXY_CAP_HEADER, &cap)
+            .map_err(|e| format!("Failed to set proxy capability header: {:?}", e))?;
     }
     Ok(())
 }
@@ -56,6 +69,7 @@ pub async fn fetch_api<T: for<'de> Deserialize<'de>>(
         .headers()
         .set("X-Conecsa-Source", "frontend")
         .map_err(|e| format!("Failed to set X-Conecsa-Source: {:?}", e))?;
+    set_proxy_cap(&request)?;
 
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -147,6 +161,7 @@ pub async fn fetch_protobuf<T: Message + Default>(
             ("X-Conecsa-Source", "frontend"),
         ],
     )?;
+    set_proxy_cap(&request)?;
 
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await

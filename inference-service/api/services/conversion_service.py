@@ -12,18 +12,29 @@ the Yocto host: zram/compressed swap may be configured, but fragmentation and
 allocator state are still best handled by subprocess isolation and process exit.
 """
 import json
+import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
-import logging
-import threading
-from enum import Enum
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _output_stem(original_filename: str) -> str:
+    """The stem conversion outputs are named after.
+
+    Reduced to a basename so a crafted upload name (e.g. ``../../x.pt``) can
+    never steer the .onnx/.engine outputs outside the model directory —
+    save_model validates the name first, but the output naming must not be
+    the one unguarded path.
+    """
+    return os.path.splitext(os.path.basename(original_filename))[0]
 
 # Timeout for the .pt -> .onnx subprocess. YOLO export on Orin Nano is
 # usually under 2 min; 10 min is a wide safety margin.
@@ -55,6 +66,15 @@ class ConversionJob:
     error: Optional[str] = None
     engine_filename: Optional[str] = None  # basename after conversion
     started_at: float = field(default_factory=time.time)  # UNIX timestamp (seconds)
+    # Age is reported from the monotonic clock, never from ``started_at``: the
+    # device has no RTC battery, so the hub steps CLOCK_REALTIME whenever it
+    # notices drift (api-gateway/gateway/clock.py) — mid-conversion included.
+    started_monotonic: float = field(default_factory=time.monotonic)
+
+    @property
+    def elapsed_secs(self) -> float:
+        """Seconds since the job started, immune to wall-clock steps."""
+        return max(0.0, time.monotonic() - self.started_monotonic)
 
 
 def _convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640) -> List[str]:
@@ -187,6 +207,7 @@ class ConversionService:
             "error": job.error,
             "engine_filename": job.engine_filename,
             "started_at": job.started_at,
+            "elapsed_secs": job.elapsed_secs,
         }
 
     def start_onnx_conversion(
@@ -201,7 +222,7 @@ class ConversionService:
         Returns the ConversionJob immediately (status=pending).
         """
         job_id = str(uuid.uuid4())
-        base = os.path.splitext(original_filename)[0]
+        base = _output_stem(original_filename)
         engine_path = os.path.join(model_directory, f"{base}.engine")
 
         job = ConversionJob(
@@ -214,6 +235,10 @@ class ConversionService:
 
         with self._lock:
             self._jobs[job_id] = job
+            pending = self.to_dict(job)
+        # Announce the job before the worker starts: the UI's overlay attaches
+        # on this event, and it should not depend on thread scheduling.
+        self._publish_event("conversion_changed", ["conversion"], data=pending)
 
         thread = threading.Thread(
             target=self._run_job,
@@ -238,7 +263,7 @@ class ConversionService:
         Returns the ConversionJob immediately (status=pending).
         """
         job_id = str(uuid.uuid4())
-        base = os.path.splitext(original_filename)[0]
+        base = _output_stem(original_filename)
         onnx_path = os.path.join(model_directory, f"{base}.onnx")
         engine_path = os.path.join(model_directory, f"{base}.engine")
 
@@ -252,6 +277,10 @@ class ConversionService:
 
         with self._lock:
             self._jobs[job_id] = job
+            pending = self.to_dict(job)
+        # Announce the job before the worker starts: the UI's overlay attaches
+        # on this event, and it should not depend on thread scheduling.
+        self._publish_event("conversion_changed", ["conversion"], data=pending)
 
         thread = threading.Thread(
             target=self._run_job,
@@ -390,3 +419,8 @@ class ConversionService:
             logger.exception(f"Job {job_id} failed: {exc}")
             self._set_status(job_id, ConversionStatus.FAILED, progress=0,
                              message="Conversion failed.", error=str(exc))
+            # A failed job must not leave intermediates behind: orphaned
+            # .pt/.onnx files reappear in list_models as phantom entries.
+            for path in (job.pt_path, job.onnx_path):
+                if path:
+                    _remove_file_safe(path)

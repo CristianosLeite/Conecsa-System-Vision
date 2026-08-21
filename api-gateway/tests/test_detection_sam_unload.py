@@ -6,12 +6,10 @@ an unreachable training-service must not block the start either.
 from types import SimpleNamespace
 
 import grpc
+import inference_pb2 as inf_pb
 import pytest
 from flask import Flask
-
 from gateway.controllers import detection
-
-import inference_pb2 as inf_pb
 
 
 class FakeRpcError(grpc.RpcError):

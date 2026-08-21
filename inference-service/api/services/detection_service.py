@@ -3,16 +3,16 @@ Detection service - Manages detection operations.
 """
 import logging
 from threading import Lock
-from typing import Optional, List
+from typing import List, Optional
 
 # noinspection PyPackageRequirements
-import numpy as np # Package is included on os build.
+import numpy as np  # Package is included on os build.
 
-from ..model_manager import ModelManager
-from ..yolo_detector import YOLODetector
 from ..config import Config
-from ..utils import load_class_labels
+from ..model_manager import ModelManager
 from ..models.detection_models import DetectionResult
+from ..utils import load_class_labels
+from ..yolo_detector import YOLODetector
 from .detection_area_service import DetectionAreaService
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ def normalized_bbox(bbox, width: int, height: int) -> List[float]:
 def _encode_frame_b64(image: np.ndarray) -> Optional[str]:
     """JPEG-encode a frame (quality 80) and return it base64-encoded."""
     import base64
+
     # noinspection PyPackageRequirements
     import cv2  # Package is included on os build
     ok, buf = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -97,7 +98,7 @@ class DetectionService:
             if not os.path.exists(self.config.MODEL_PATH):
                 logger.error(f"Model file not found: {self.config.MODEL_PATH}")
                 raise FileNotFoundError(
-                    f"No model loaded. Please upload and select a model before starting detection."
+                    "No model loaded. Please upload and select a model before starting detection."
                 )
             
             logger.info("Initializing model manager...")
@@ -116,7 +117,7 @@ class DetectionService:
             raise
         except Exception as ex:
             logger.error(f"Error initializing detection service: {ex}")
-            raise RuntimeError(f"Failed to initialize detection service: {str(ex)}")
+            raise RuntimeError(f"Failed to initialize detection service: {str(ex)}") from ex
 
     def start(self) -> bool:
         """

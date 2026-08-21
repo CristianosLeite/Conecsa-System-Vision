@@ -13,11 +13,16 @@ FROM base
 WORKDIR /app
 
 COPY training-service/requirements.txt /app/
-RUN pip install --no-cache-dir --root-user-action=ignore -r /app/requirements.txt
+# ${JETSON_PIP_INDEX} is inherited from the base image; passed explicitly
+# (the base no longer sets a global extra index).
+RUN pip install --no-cache-dir --root-user-action=ignore \
+        --extra-index-url "${JETSON_PIP_INDEX}" -r /app/requirements.txt
 
-# SAM3 (AI-assisted labeling). Best-effort on purpose (|| true keeps the
-# build green when the build host is offline — AI labeling then reports
-# unavailable at runtime while everything else works).
+# SAM3 (AI-assisted labeling). Pinned to a reviewed commit — the default-
+# branch HEAD would let an upstream push change what ships. A failed install
+# now fails the build (silent "|| echo" success hid broken images); building
+# deliberately without SAM (e.g. an offline build host) is an explicit
+# opt-out: --build-arg SAM3_INSTALL=0, and AI labeling reports unavailable.
 #
 # sam3 itself and timm are installed with --no-deps so pip can NEVER touch
 # the base image's pinned torch/torchvision/numpy stack; sam3's remaining
@@ -32,13 +37,19 @@ RUN pip install --no-cache-dir --root-user-action=ignore -r /app/requirements.tx
 # Python no longer ships — without it the worker dies with "No module named
 # 'pkg_resources'". Pinned <81 as setuptools' own deprecation notice advises,
 # so pkg_resources stays available.
-RUN (git clone --depth 1 https://github.com/facebookresearch/sam3 /opt/sam3 && \
-     pip install --no-cache-dir --root-user-action=ignore \
-         "setuptools<81" huggingface_hub safetensors pyyaml tqdm "ftfy==6.1.1" regex \
-         "iopath>=0.1.10" typing_extensions einops pycocotools && \
-     pip install --no-cache-dir --root-user-action=ignore --no-deps "timm>=1.0.17" && \
-     pip install --no-cache-dir --root-user-action=ignore --no-deps /opt/sam3) || \
-    echo "WARNING: sam3 install skipped (offline or incompatible); AI labeling will report unavailable"
+ARG SAM3_INSTALL=1
+ARG SAM3_COMMIT=8f0b7f4d4e7eda2ed606ebde6702c93359ad01da
+RUN if [ "$SAM3_INSTALL" = "1" ]; then \
+        git clone https://github.com/facebookresearch/sam3 /opt/sam3 && \
+        git -C /opt/sam3 checkout --detach "$SAM3_COMMIT" && \
+        pip install --no-cache-dir --root-user-action=ignore \
+            "setuptools<81" huggingface_hub safetensors pyyaml tqdm "ftfy==6.1.1" regex \
+            "iopath>=0.1.10" typing_extensions einops pycocotools && \
+        pip install --no-cache-dir --root-user-action=ignore --no-deps "timm>=1.0.17" && \
+        pip install --no-cache-dir --root-user-action=ignore --no-deps /opt/sam3; \
+    else \
+        echo "SAM3 install explicitly skipped (SAM3_INSTALL=0); AI labeling will report unavailable"; \
+    fi
 
 ENV PYTHONPATH=/app/training-service:/usr/lib/python3.10/dist-packages:/usr/local/lib/python3.10/dist-packages
 

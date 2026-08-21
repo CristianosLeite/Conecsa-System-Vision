@@ -8,10 +8,8 @@ use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
 
 use crate::components::configuration::model_conversion::{
-    poll_conversion_job, ConversionPollConfig,
+    overlay_message, poll_conversion_job, ramp_progress, ConversionPollConfig,
 };
-
-use js_sys::Date;
 
 use super::context_menu::ModelContextMenu;
 use super::model_list::ModelList;
@@ -26,6 +24,7 @@ pub fn DetectionModels(
     // (detection areas, thresholds, classes) is refreshed on screen.
     set_model_refresh: WriteSignal<u32>,
     // Overlay signals are owned by Configuration so the overlay can cover the full panel
+    active_job_id: ReadSignal<Option<String>>,
     set_active_job_id: WriteSignal<Option<String>>,
     set_overlay_message: WriteSignal<String>,
     set_overlay_progress: WriteSignal<u8>,
@@ -41,52 +40,58 @@ pub fn DetectionModels(
     let (context_menu_y, set_context_menu_y) = signal(0);
     let (selected_model_for_delete, set_selected_model_for_delete) = signal(String::new());
 
-    // On mount, recover any in-progress conversion that was running before a page refresh
+    // On mount, recover any in-progress conversion that was running before a page
+    // refresh. The app event stream normally gets here first; this covers the
+    // case where the conversion started before this tab opened.
     let mount_locale = i18n.get_locale_untracked();
     spawn_local(async move {
-        if let Ok(resp) = api::list_active_conversions().await {
-            if let Some(job) = resp.jobs.into_iter().next() {
-                let job_id = job.job_id.clone();
-                let orig_file = job.original_filename.clone();
-
-                let now_secs = Date::now() / 1000.0;
-                let started_at_secs = job.started_at.unwrap_or(now_secs);
-                let elapsed = now_secs - started_at_secs;
-
-                // Already timed-out - do not show overlay
-                if elapsed > 660.0 {
-                    set_error_msg.set(
-                        td_string!(mount_locale, models::previous_conversion_timed_out)
-                            .to_string(),
-                    );
-                    return;
-                }
-
-                let time_progress = ((elapsed / 420.0) * 100.0).min(95.0) as u8;
-                set_active_job_id.set(Some(job_id.clone()));
-                set_overlay_message.set(job.message.clone());
-                set_overlay_progress.set(time_progress);
-
-                poll_conversion_job(
-                    ConversionPollConfig {
-                        job_id,
-                        started_at_secs,
-                        original_filename: orig_file,
-                        timeout_secs: 660.0,
-                        progress_cap: 95.0,
-                        locale: mount_locale,
-                    },
-                    set_active_job_id,
-                    set_overlay_message,
-                    set_overlay_progress,
-                    set_success_msg,
-                    set_error_msg,
-                    set_models,
-                    set_model_refresh,
-                )
-                .await;
+        let jobs = match api::list_active_conversions().await {
+            Ok(resp) => resp.jobs,
+            // Never silent: a failure here used to look exactly like "there is
+            // no conversion running", which is indistinguishable from the bug
+            // this recovery exists to avoid.
+            Err(e) => {
+                leptos::logging::error!("Could not list active conversions: {}", e);
+                return;
             }
+        };
+        let Some(job) = jobs.into_iter().next() else {
+            return;
+        };
+        if active_job_id.get_untracked().is_some() {
+            return; // the event stream already attached this overlay
         }
+
+        // The device reports the job's own age; deriving it from `started_at`
+        // would subtract the device's clock from the browser's.
+        let elapsed = job.elapsed_secs.unwrap_or(0.0);
+        set_active_job_id.set(Some(job.job_id.clone()));
+        set_overlay_message.set(overlay_message(
+            &job.message,
+            &job.original_filename,
+            mount_locale,
+        ));
+        set_overlay_progress.set(ramp_progress(elapsed, job.progress, 95.0));
+
+        poll_conversion_job(
+            ConversionPollConfig {
+                job_id: job.job_id,
+                initial_elapsed_secs: elapsed,
+                original_filename: job.original_filename,
+                timeout_secs: 660.0,
+                progress_cap: 95.0,
+                locale: mount_locale,
+            },
+            active_job_id,
+            set_active_job_id,
+            set_overlay_message,
+            set_overlay_progress,
+            set_success_msg,
+            set_error_msg,
+            set_models,
+            set_model_refresh,
+        )
+        .await;
     });
 
     let upload_model = Callback::new(move |_| {
@@ -166,28 +171,39 @@ pub fn DetectionModels(
                         match api::upload_model_file(file).await {
                             Ok(resp) if resp.status == "converting" => {
                                 if let Some(job_id) = resp.job_id.clone() {
+                                    // The event stream usually adopts the job
+                                    // before this response lands; a second poll
+                                    // on the same job would be pure noise.
+                                    if active_job_id.get_untracked().as_deref()
+                                        == Some(job_id.as_str())
+                                    {
+                                        return;
+                                    }
                                     set_active_job_id.set(Some(job_id.clone()));
 
-                                    let started_at_secs: f64 = {
-                                        let sa = api::get_conversion_status(&job_id)
-                                            .await
-                                            .ok()
-                                            .and_then(|s| {
-                                                set_overlay_message.set(s.message.clone());
-                                                s.started_at
-                                            });
-                                        sa.unwrap_or_else(|| Date::now() / 1000.0)
-                                    };
+                                    let initial_elapsed_secs = api::get_conversion_status(&job_id)
+                                        .await
+                                        .ok()
+                                        .and_then(|s| {
+                                            set_overlay_message.set(overlay_message(
+                                                &s.message,
+                                                &s.original_filename,
+                                                locale,
+                                            ));
+                                            s.elapsed_secs
+                                        })
+                                        .unwrap_or(0.0);
 
                                     poll_conversion_job(
                                         ConversionPollConfig {
                                             job_id,
-                                            started_at_secs,
+                                            initial_elapsed_secs,
                                             original_filename: file_name,
                                             timeout_secs: 600.0,
                                             progress_cap: 90.0,
                                             locale,
                                         },
+                                        active_job_id,
                                         set_active_job_id,
                                         set_overlay_message,
                                         set_overlay_progress,

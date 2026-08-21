@@ -128,14 +128,50 @@ class DatasetRegistry:
         self._publish()
         return ds.meta()
 
+    def freeze(self, dataset_id: str) -> DatasetService:
+        """Atomically claim a dataset for a training job.
+
+        The frozen check, the claim, and delete()'s frozen check all run
+        under the registry lock — one owner for the transition, so a delete
+        can never interleave between a job validating a dataset and freezing
+        it (REFACTORING.md M4).
+        """
+        self._check_id(dataset_id)
+        with self._lock:
+            ds = self._datasets.get(dataset_id)
+            if ds is None:
+                raise DatasetError(f"Dataset '{dataset_id}' not found")
+            if ds.frozen:
+                raise DatasetError("Dataset is locked while a training job is running")
+            ds.frozen = True
+            return ds
+
+    def release(self, ds: DatasetService) -> None:
+        """Release a dataset claimed by :meth:`freeze`."""
+        with self._lock:
+            ds.frozen = False
+
     def delete(self, dataset_id: str) -> None:
         """Delete."""
-        ds = self.get(dataset_id)
-        if ds.frozen:
-            raise DatasetError("Dataset is locked while a training job is running")
+        self._check_id(dataset_id)
         with self._lock:
+            ds = self._datasets.get(dataset_id)
+            if ds is None:
+                raise DatasetError(f"Dataset '{dataset_id}' not found")
+            if ds.frozen:
+                raise DatasetError("Dataset is locked while a training job is running")
             self._datasets.pop(dataset_id, None)
-        shutil.rmtree(self._dataset_root(dataset_id), ignore_errors=True)
+        # The entry is unreachable now, so the filesystem work can run outside
+        # the lock — and failures are reported, not silently half-done.
+        try:
+            shutil.rmtree(self._dataset_root(dataset_id))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self._publish()
+            raise DatasetError(
+                f"Dataset removed, but some files could not be deleted: {exc}"
+            ) from exc
         self._publish()
 
     def import_zip(self, name: str, zip_path: str) -> dict:

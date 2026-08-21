@@ -83,22 +83,16 @@ services:
       - CAPTURE_AUTO_EXPOSURE=false
       - CAPTURE_EXPOSURE_TIME=166
       - PROCESSING_DECODE_SCALE=2
-      - STEREO_COMBINE=blend
+      - STEREO_COMBINE=none
       - STEREO_BLEND_ALPHA=0.5
       - CAPTURE_RGB_RED=128
       - CAPTURE_RGB_GREEN=128
       - CAPTURE_RGB_BLUE=128
       - CAPTURE_GAMMA=100
       - CAPTURE_GAIN=0
-      - PYTORCH_USE_FP16=1
-      - PYTORCH_DISABLE_CUDNN=0
-      - PYTORCH_PERF_MODE=1
-      - PYTORCH_SYNC_CUDA=0
-      - TENSORRT_RUNTIME=1
       - TENSORRT_AUTO_REBUILD_ENGINE=1
       - TENSORRT_WORKSPACE_MB=192
       - TENSORRT_CONTEXTS=2
-      - WAITRESS_THREADS=32
       - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8
     volumes:
       - models-data:/data/models
@@ -135,7 +129,7 @@ services:
       - INFERENCE_GRPC_ADDR=inference-service:50061
       - HARDWARE_AGENT_ADDR=os-base:50051
       - TRAINING_GRPC_ADDR=training-service:50071
-      - STEREO_COMBINE=blend
+      - STEREO_COMBINE=none
       - STEREO_BLEND_ALPHA=0.5
       - SHM_NAME=conecsa_frame_shm
       - PROCESSED_SHM_NAME=conecsa_processed_shm
@@ -147,10 +141,13 @@ services:
       - DEVICE_PAIR_TOKEN=${DEVICE_PAIR_TOKEN:-}
       # In-container mDNS works on the dev bridge for local hub testing.
       - HUB_MDNS_ENABLED=${HUB_MDNS_ENABLED:-1}
+      # Audit trail, drained by the hub over mTLS (same as production).
+      - AUDIT_DIR=/data/audit
     ports:
       - "5000:5000"
     volumes:
       - conecsa-certs:/etc/conecsa/certs
+      - audit-data:/data/audit
       # Same host hostname → device id unification as production (here the "host"
       # is the dev machine; the in-container mDNS advertises the same id).
       - /etc/hostname:/etc/conecsa/host_hostname:ro
@@ -183,7 +180,7 @@ services:
       - CUDA_MODULE_LOADING=LAZY
       - PYTHONUNBUFFERED=1
       - SHM_NAME=conecsa_frame_shm
-      - STEREO_COMBINE=blend
+      - STEREO_COMBINE=none
       - STEREO_BLEND_ALPHA=0.5
       - GATEWAY_ADDR=http://api-gateway:5000
       - TRAIN_BATCH=4
@@ -246,7 +243,10 @@ services:
     environment:
       - TZ=${TZ:-America/Sao_Paulo}
       - INFERENCE_URL=${INFERENCE_URL:-http://api-gateway:5000}
+      # Dev-only fixed secret (production requires a real per-deployment one).
+      - NODE_RED_CREDENTIAL_SECRET=${NODE_RED_CREDENTIAL_SECRET:-conecsa-dev-only-secret}
     ports:
+      # Dev convenience: publishes the (unauthenticated) editor on the host.
       - "${FLOW_PORT:-1880}:1880"
     volumes:
       - flow-data:/data
@@ -271,6 +271,8 @@ volumes:
     name: conecsa-models-data
   detections-data:
     name: conecsa-detections-data
+  audit-data:
+    name: conecsa-audit-data-dev
   runs-data:
     name: conecsa-runs-data
   training-data:

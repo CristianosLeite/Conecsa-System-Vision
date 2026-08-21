@@ -1,8 +1,10 @@
-# Custom Node-RED image with Conecsa nodes pre-installed
-FROM nodered/node-red:latest
+# Custom Node-RED image with Conecsa nodes pre-installed.
+# Pinned by digest (what :latest resolved to on 2026-08-19) so a registry-side
+# retag can never change what ships; bump deliberately by updating the digest.
+FROM nodered/node-red@sha256:10f40d0a83e7e5852b13d4d472b2006b05b1cca6d55e2f29a55a12c25a630cb6
 
-# Install theme collection
-RUN npm install --prefix /usr/src/node-red @node-red-contrib-themes/theme-collection
+# Install theme collection (pinned; no floating latest)
+RUN npm install --prefix /usr/src/node-red @node-red-contrib-themes/theme-collection@5.0.1
 
 # Copy custom node package
 COPY nodes/conecsa-system-vision /usr/src/node-red/node_modules/node-red-contrib-conecsa-system-vision

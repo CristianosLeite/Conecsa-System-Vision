@@ -15,6 +15,7 @@ api_bp = Blueprint("api", __name__)
 from . import (  # noqa: E402,F401
     aliases,
     areas,
+    audit,
     camera,
     classes,
     detection,

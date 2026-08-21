@@ -5,4 +5,4 @@ waitress==3.0.2
 # mDNS advertising so conecsa-hub-vision can discover this device on the LAN.
 zeroconf==0.150.0
 # Device enrollment: EC keypair + CSR generation for hub-signed TLS certs.
-cryptography==49.0.0
+cryptography==50.0.0

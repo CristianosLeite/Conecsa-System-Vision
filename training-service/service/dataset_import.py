@@ -23,9 +23,11 @@ import json
 import logging
 import os
 import shutil
+import stat
+import struct
 import uuid
 import zipfile
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import yaml
@@ -38,6 +40,19 @@ logger = logging.getLogger(__name__)
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 # Same character policy as class names in dataset_service.
 _NAME_SAFE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.")
+
+# Hard caps on what an uploaded archive may expand into. The total budget
+# counts bytes actually written (the ZIP's declared file_size is attacker-
+# controlled and used to be the only cap, so a header lying about its size
+# bypassed it entirely). Same import-time env pattern as service/config.py.
+_MAX_ZIP_ENTRIES = int(os.environ.get("TRAINING_MAX_ZIP_ENTRIES", "20000"))
+_MAX_ZIP_ENTRY_BYTES = int(
+    os.environ.get("TRAINING_MAX_ZIP_ENTRY_MB", "256")) * 1024 * 1024
+_MAX_ZIP_RATIO = int(os.environ.get("TRAINING_MAX_ZIP_RATIO", "100"))
+# cv2.imread allocates the full raster before any other check can run — a
+# 60k×60k PNG is ~10 GB — so dimensions are read from the file header first.
+_MAX_IMAGE_PIXELS = int(
+    os.environ.get("TRAINING_MAX_IMAGE_PIXELS", str(64_000_000)))
 
 
 class DatasetImportError(DatasetError):
@@ -71,14 +86,15 @@ def import_dataset_zip(zip_path: str, dest_dir: str, img_size: int = 640,
 # ── extraction ────────────────────────────────────────────────────────────────
 
 def _extract(zip_path: str, extract_dir: str, max_total_mb: int) -> None:
-    """Extract."""
+    """Extract, enforcing real (written-byte) limits — see the caps above."""
     os.makedirs(extract_dir, exist_ok=True)
     budget = max_total_mb * 1024 * 1024
     total = 0
+    entries = 0
     try:
         archive = zipfile.ZipFile(zip_path)
     except zipfile.BadZipFile:
-        raise DatasetImportError("The uploaded file is not a valid ZIP archive")
+        raise DatasetImportError("The uploaded file is not a valid ZIP archive") from None
     with archive:
         for info in archive.infolist():
             name = info.filename
@@ -86,18 +102,40 @@ def _extract(zip_path: str, extract_dir: str, max_total_mb: int) -> None:
                 continue
             if os.path.basename(name).startswith("."):
                 continue
+            entries += 1
+            if entries > _MAX_ZIP_ENTRIES:
+                raise DatasetImportError(
+                    f"Archive has more than {_MAX_ZIP_ENTRIES} entries")
+            if stat.S_ISLNK(info.external_attr >> 16):
+                raise DatasetImportError(f"ZIP entry '{name}' is a symlink")
             target = os.path.normpath(os.path.join(extract_dir, name))
             if not target.startswith(os.path.abspath(extract_dir) + os.sep) \
                     and target != os.path.abspath(extract_dir):
                 raise DatasetImportError(f"ZIP entry escapes the archive: '{name}'")
-            total += info.file_size
-            if total > budget:
-                raise DatasetImportError(
-                    f"Uncompressed dataset exceeds the {max_total_mb} MB limit"
-                )
             os.makedirs(os.path.dirname(target), exist_ok=True)
+            written = 0
             with archive.open(info) as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+                while True:
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > _MAX_ZIP_ENTRY_BYTES:
+                        raise DatasetImportError(
+                            f"ZIP entry '{name}' exceeds "
+                            f"{_MAX_ZIP_ENTRY_BYTES // (1024 * 1024)} MB")
+                    if total + written > budget:
+                        raise DatasetImportError(
+                            f"Uncompressed dataset exceeds the {max_total_mb} MB limit"
+                        )
+                    dst.write(chunk)
+            total += written
+            # A wildly implausible ratio is a decompression bomb even when it
+            # fits the budget.
+            compressed = max(info.compress_size, 1)
+            if written > (1 << 20) and written // compressed > _MAX_ZIP_RATIO:
+                raise DatasetImportError(
+                    f"ZIP entry '{name}' has an implausible compression ratio")
 
 
 # ── classes ───────────────────────────────────────────────────────────────────
@@ -137,7 +175,7 @@ def _classes_from_yaml(yaml_path: str) -> List[str]:
         with open(yaml_path, "r") as f:
             data = yaml.safe_load(f)
     except yaml.YAMLError as exc:
-        raise DatasetImportError(f"Could not parse data.yaml: {exc}")
+        raise DatasetImportError(f"Could not parse data.yaml: {exc}") from exc
     names = (data or {}).get("names")
     if isinstance(names, dict):
         # id->name mapping: order by integer id when possible, else by sorted
@@ -224,7 +262,7 @@ def _parse_label_file(path: str, n_classes: int) -> List[Tuple[int, float, float
                 raise DatasetImportError(
                     f"Invalid label file '{os.path.basename(path)}' line {lineno}: "
                     f"not numeric"
-                )
+                ) from None
             if not 0 <= cls < n_classes:
                 raise DatasetImportError(
                     f"Invalid label file '{os.path.basename(path)}' line {lineno}: "
@@ -250,11 +288,58 @@ def _parse_label_file(path: str, n_classes: int) -> List[Tuple[int, float, float
     return boxes
 
 
+def _image_dimensions(path: str) -> Optional[Tuple[int, int]]:
+    """(width, height) from a PNG/JPEG/BMP header, without decoding.
+
+    Returns None when the format is unrecognized or the header is malformed —
+    the decoder then decides. Stdlib-only on purpose.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32)
+            if head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) >= 24:
+                width, height = struct.unpack(">II", head[16:24])
+                return width, height
+            if head[:2] == b"BM" and len(head) >= 26:
+                width, height = struct.unpack("<ii", head[18:26])
+                return abs(width), abs(height)
+            if head[:2] == b"\xff\xd8":
+                f.seek(2)
+                while True:
+                    marker = f.read(2)
+                    if len(marker) < 2 or marker[0] != 0xFF:
+                        return None
+                    code = marker[1]
+                    if code == 0x01 or 0xD0 <= code <= 0xD8:
+                        continue
+                    length_raw = f.read(2)
+                    if len(length_raw) < 2:
+                        return None
+                    (seg_len,) = struct.unpack(">H", length_raw)
+                    if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+                        body = f.read(5)
+                        if len(body) < 5:
+                            return None
+                        height, width = struct.unpack(">HH", body[1:5])
+                        return width, height
+                    f.seek(seg_len - 2, 1)
+    except OSError:
+        return None
+    return None
+
+
 def _normalize(pairs, classes: List[str], dest_dir: str, img_size: int) -> int:
     """Normalize."""
     count = 0
     for image_path, label_path in pairs:
         boxes = _parse_label_file(label_path, len(classes)) if label_path else []
+        # Bound the decode before cv2.imread allocates the full raster.
+        dims = _image_dimensions(image_path)
+        if dims is not None and dims[0] * dims[1] > _MAX_IMAGE_PIXELS:
+            raise DatasetImportError(
+                f"Image '{os.path.basename(image_path)}' is too large "
+                f"({dims[0]}x{dims[1]}; limit {_MAX_IMAGE_PIXELS} pixels)"
+            )
         img = cv2.imread(image_path)
         if img is None:
             raise DatasetImportError(

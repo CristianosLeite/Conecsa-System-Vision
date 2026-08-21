@@ -11,7 +11,7 @@ use super::device_select::CaptureDeviceSelect;
 use super::loading_state::CameraSettingsLoadingState;
 use super::resolution_controls::ResolutionControls;
 use super::stereo_toggle::StereoOverlayToggle;
-use super::{CameraFormat, Resolution};
+use super::{is_stereo_camera, CameraFormat, Resolution};
 
 /// Push only the stereo combine settings. Applied immediately (no camera
 /// restart, since stereo lives in the inference-service, not the SHM config).
@@ -39,21 +39,31 @@ pub fn CameraSettings(
     let (formats, set_formats) = signal(Vec::<CameraFormat>::new());
     let (selected_framerate, set_selected_framerate) = signal(30u32);
     let (selected_stereo_enabled, set_selected_stereo_enabled) = signal(false);
+    // Indices of the enumerated devices that are 3D cameras, and whether the
+    // list has been read at all — an empty list before the first fetch means
+    // "unknown", not "no 3D camera".
+    let (stereo_devices, set_stereo_devices) = signal(Vec::<u32>::new());
+    let (devices_loaded, set_devices_loaded) = signal(false);
     let (loading, set_loading) = signal(true);
     let (saving, set_saving) = signal(false);
 
-    // A side-by-side stereo camera packs both eyes horizontally, so a stereo
-    // resolution is at least twice as wide as it is tall (w >= 2*h). Only then
-    // can each split half stay landscape; a narrower frame would produce a
-    // portrait per-eye image the detector's letterbox can't handle.
+    // The stereo overlay only makes sense on a 3D camera: it splits one frame
+    // into its left|right halves and blends them, which would tear an ordinary
+    // picture in two. Resolution cannot tell a side-by-side frame from a merely
+    // wide one, so the camera model decides. Follows the dropdown selection,
+    // like the other settings, rather than the applied device.
     let stereo_supported = Signal::derive(move || {
-        let r = selected_res.get();
-        r.h > 0 && r.w >= 2 * r.h
+        devices_loaded.get() && stereo_devices.get().contains(&selected_index.get())
     });
 
-    // Never leave the overlay enabled on a non-stereo resolution.
+    // Never leave the overlay enabled on a camera that is not a 3D camera.
+    // Gated on `devices_loaded` so a pending or failed fetch counts as unknown
+    // and cannot clobber a working 3D configuration.
     Effect::new(move |_| {
-        if !stereo_supported.get() && selected_stereo_enabled.get_untracked() {
+        if devices_loaded.get()
+            && !stereo_supported.get()
+            && selected_stereo_enabled.get_untracked()
+        {
             set_selected_stereo_enabled.set(false);
             push_stereo_enabled(false);
         }
@@ -78,7 +88,14 @@ pub fn CameraSettings(
                             (idx, label)
                         })
                         .collect();
+                    let stereo: Vec<u32> = resp
+                        .devices
+                        .iter()
+                        .filter(|d| d.index >= 0 && is_stereo_camera(&d.name))
+                        .map(|d| d.index as u32)
+                        .collect();
                     set_devices.set(list);
+                    set_stereo_devices.set(stereo);
                     set_selected_index.set(resp.current_index);
                     set_selected_res.set(Resolution {
                         w: resp.current_width,
@@ -121,6 +138,8 @@ pub fn CameraSettings(
                     set_selected_framerate.set(resp.current_framerate);
                     set_selected_stereo_enabled.set(resp.current_stereo_enabled);
 
+                    // Last: everything the stereo guard reads is now in place.
+                    set_devices_loaded.set(true);
                     set_loading.set(false);
                 }
                 Err(e) => {

@@ -155,7 +155,8 @@ message ConversionJob {
   string message = 5;
   string error = 6;
   string engine_filename = 7;   // basename after conversion (when done)
-  double started_at = 8;
+  double started_at = 8;        // device wall clock; informational only
+  double elapsed_secs = 9;      // age from the device's monotonic clock — what clients must use
 }
 message ConversionList { repeated ConversionJob jobs = 1; }
 message ConversionId { string job_id = 1; }

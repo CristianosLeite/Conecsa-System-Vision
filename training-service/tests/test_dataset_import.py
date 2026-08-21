@@ -5,7 +5,6 @@ import zipfile
 import cv2
 import numpy as np
 import pytest
-
 from service.dataset_import import (
     DatasetImportError,
     _classes_from_yaml,
@@ -163,3 +162,108 @@ class TestImportDatasetZip:
             z.writestr("images/img1.jpg", _jpeg())
         with pytest.raises(DatasetImportError):
             import_dataset_zip(str(zip_path), str(tmp_path / "out"))
+
+
+class TestExtractionLimits:
+    """REFACTORING.md M5: real (written-byte) limits, not ZIP-header claims."""
+
+    def _zip_with(self, tmp_path, entries):
+        zip_path = tmp_path / "ds.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("data.yaml", "names: [cap]\n")
+            for name, data in entries:
+                z.writestr(name, data)
+        return str(zip_path)
+
+    def test_the_budget_counts_written_bytes_not_header_claims(self, tmp_path):
+        # The old cap summed the ZIP's declared file_size — attacker-
+        # controlled, so a header claiming 0 bytes bypassed it. The budget is
+        # now a counter on the bytes actually written, which no header field
+        # can influence.
+        zip_path = self._zip_with(tmp_path,
+                                  [("images/big.bin", b"x" * (4 << 20))])
+        with pytest.raises(DatasetImportError, match="exceeds the 1 MB limit"):
+            import_dataset_zip(zip_path, str(tmp_path / "out"), max_total_mb=1)
+
+    def test_entry_count_is_capped(self, tmp_path, monkeypatch):
+        from service import dataset_import
+        monkeypatch.setattr(dataset_import, "_MAX_ZIP_ENTRIES", 3)
+        zip_path = self._zip_with(tmp_path, [
+            (f"images/i{i}.jpg", _jpeg()) for i in range(4)
+        ])
+        with pytest.raises(DatasetImportError, match="entries"):
+            import_dataset_zip(zip_path, str(tmp_path / "out"))
+
+    def test_per_entry_size_is_capped(self, tmp_path, monkeypatch):
+        from service import dataset_import
+        monkeypatch.setattr(dataset_import, "_MAX_ZIP_ENTRY_BYTES", 1 << 20)
+        zip_path = self._zip_with(tmp_path,
+                                  [("images/big.bin", b"x" * (2 << 20))])
+        with pytest.raises(DatasetImportError, match="exceeds"):
+            import_dataset_zip(zip_path, str(tmp_path / "out"),
+                               max_total_mb=512)
+
+    def test_a_decompression_bomb_ratio_is_rejected(self, tmp_path,
+                                                    monkeypatch):
+        from service import dataset_import
+        monkeypatch.setattr(dataset_import, "_MAX_ZIP_RATIO", 50)
+        # Highly repetitive content compresses ~1000:1.
+        zip_path = self._zip_with(tmp_path,
+                                  [("images/bomb.bin", b"\0" * (8 << 20))])
+        with pytest.raises(DatasetImportError, match="compression ratio"):
+            import_dataset_zip(zip_path, str(tmp_path / "out"),
+                               max_total_mb=512)
+
+    def test_symlink_entries_are_rejected(self, tmp_path):
+        zip_path = tmp_path / "link.zip"
+        with zipfile.ZipFile(zip_path, "w") as z:
+            z.writestr("data.yaml", "names: [cap]\n")
+            info = zipfile.ZipInfo("images/evil")
+            info.external_attr = 0o120777 << 16  # symlink mode
+            z.writestr(info, "/etc/passwd")
+        with pytest.raises(DatasetImportError, match="symlink"):
+            import_dataset_zip(str(zip_path), str(tmp_path / "out"))
+
+    def test_an_oversized_image_is_rejected_before_decode(self, tmp_path,
+                                                          monkeypatch):
+        from service import dataset_import
+        monkeypatch.setattr(dataset_import, "_MAX_IMAGE_PIXELS", 1000)
+
+        def never(path):
+            raise AssertionError("cv2.imread must not run on a rejected image")
+
+        # A real (small) PNG whose header says 120x80 = 9600 px > 1000.
+        frame = np.full((80, 120, 3), 128, dtype=np.uint8)
+        ok, png = cv2.imencode(".png", frame)
+        assert ok
+        zip_path = self._zip_with(tmp_path, [("images/huge.png", png.tobytes())])
+        monkeypatch.setattr(dataset_import.cv2, "imread", never)
+        with pytest.raises(DatasetImportError, match="too large"):
+            import_dataset_zip(zip_path, str(tmp_path / "out"))
+
+    def test_a_normal_dataset_still_imports(self, tmp_path):
+        zip_path = self._zip_with(tmp_path, [
+            ("images/img1.jpg", _jpeg()),
+            ("labels/img1.txt", "0 0.5 0.5 0.2 0.2\n"),
+        ])
+        classes, count = import_dataset_zip(zip_path, str(tmp_path / "out"))
+        assert classes == ["cap"]
+        assert count == 1
+
+
+class TestImageDimensions:
+    def test_png_jpeg_bmp_headers(self, tmp_path):
+        from service.dataset_import import _image_dimensions
+        frame = np.full((80, 120, 3), 128, dtype=np.uint8)
+        for ext in (".png", ".jpg", ".bmp"):
+            ok, buf = cv2.imencode(ext, frame)
+            assert ok
+            p = tmp_path / f"img{ext}"
+            p.write_bytes(buf.tobytes())
+            assert _image_dimensions(str(p)) == (120, 80), ext
+
+    def test_unknown_format_returns_none(self, tmp_path):
+        from service.dataset_import import _image_dimensions
+        p = tmp_path / "img.webp"
+        p.write_bytes(b"RIFF....WEBP")
+        assert _image_dimensions(str(p)) is None

@@ -6,7 +6,8 @@
 # 1. Base image — ships the heavy ML environment shared by `inference-service`
 #    (and the future `training-service`):
 #      - CUDA 12.6 devel toolchain (needed by pycuda)
-#      - Python 3.10 + pip configured against https://pypi.jetson-ai-lab.io/jp6/cu126
+#      - Python 3.10 + pip (the Jetson index https://pypi.jetson-ai-lab.io/jp6/cu126
+#        is passed explicitly to the installs that need it — no global config)
 #      - torch / torchvision / onnxruntime-gpu / tensorrt / pycuda / numpy 1.26.4
 #      - opencv-python / ultralytics / onnx / protobuf / grpcio /
 #        psutil / requests
@@ -59,11 +60,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# get-pip pinned by commit and verified by checksum — never pipe a live
+# remote script into the interpreter.
+ENV GET_PIP_URL=https://raw.githubusercontent.com/pypa/get-pip/f6f644156f23dfe9acc06e7b9ca75eee311f2e37/public/get-pip.py
+ENV GET_PIP_SHA256=fb24e693bab954209a063d90953621412ccad4a500905a726286e038f508ddf6
+
 RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.10 1 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
-    python3 -m pip install --no-cache-dir --upgrade pip --root-user-action=ignore && \
-    pip config set global.extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+    curl -fsSL -o /tmp/get-pip.py "${GET_PIP_URL}" && \
+    echo "${GET_PIP_SHA256}  /tmp/get-pip.py" | sha256sum -c - && \
+    python3.10 /tmp/get-pip.py && rm /tmp/get-pip.py && \
+    python3 -m pip install --no-cache-dir --upgrade pip --root-user-action=ignore
+# No global extra-index-url: a registry-wide extra index is a dependency-
+# confusion surface for every later `pip install` in every FROM-base image.
+# The commands that need the Jetson index pass it explicitly.
 
 ENV CUDA_HOME=/usr/local/cuda-12.6
 ENV CUDA_PATH=/usr/local/cuda-12.6
@@ -72,8 +82,14 @@ ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/libcusparseLt/12:/usr/lib/aarch64
 ENV CUDA_MODULE_LOADING=LAZY
 ENV PYTHONUNBUFFERED=1
 
-# TensorRT Python binding wheel (no aarch64 wheel on the Jetson index).
-ENV TENSORRT_INSTALL=https://github.com/Shattered217/Jetson-Orin-Nano-Wheels/releases/download/6.2.1rc1/tensorrt-10.3.0-cp310-none-linux_aarch64.whl
+# TensorRT Python binding wheel (no aarch64 wheel on the Jetson index). It
+# comes from a personal GitHub release — mutable by its owner — so it is
+# downloaded and checksum-verified before install, never installed by URL.
+ENV TENSORRT_WHEEL_URL=https://github.com/Shattered217/Jetson-Orin-Nano-Wheels/releases/download/6.2.1rc1/tensorrt-10.3.0-cp310-none-linux_aarch64.whl
+ENV TENSORRT_WHEEL_SHA256=d1560f3172f984d03f0344b9863a192c1b953b19c4ecca741951f43d1921434f
+
+# The Jetson package index, passed explicitly to the installs that need it.
+ENV JETSON_PIP_INDEX=https://pypi.jetson-ai-lab.io/jp6/cu126
 
 # Shared ML stack. The install is split because opencv-python needs numpy>=2
 # while pycuda/tensorrt need numpy<2: install opencv first (pulls numpy 2.x),
@@ -92,17 +108,23 @@ ENV TENSORRT_INSTALL=https://github.com/Shattered217/Jetson-Orin-Nano-Wheels/rel
 # default loader path.
 COPY os-base/requirements-common.txt /app/
 RUN pip install --no-cache-dir --root-user-action=ignore \
+        --extra-index-url "${JETSON_PIP_INDEX}" \
         -r /app/requirements-common.txt && \
     pip install --no-cache-dir --no-deps --root-user-action=ignore \
-        --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
+        --index-url "${JETSON_PIP_INDEX}" \
         torch==2.11.0 torchvision==0.26.0 && \
     pip install --no-cache-dir --no-deps --root-user-action=ignore \
         nvidia-cudss-cu12 && \
     ln -s /usr/local/lib/python3.10/dist-packages/nvidia/cu12/lib/libcudss*.so.0 \
         /usr/lib/aarch64-linux-gnu/ && \
+    curl -fsSL -o "/tmp/$(basename ${TENSORRT_WHEEL_URL})" "${TENSORRT_WHEEL_URL}" && \
+    echo "${TENSORRT_WHEEL_SHA256}  /tmp/$(basename ${TENSORRT_WHEEL_URL})" | sha256sum -c - && \
     pip install --no-cache-dir --no-deps --root-user-action=ignore \
-        onnxruntime-gpu "${TENSORRT_INSTALL}" && \
+        --extra-index-url "${JETSON_PIP_INDEX}" \
+        onnxruntime-gpu "/tmp/$(basename ${TENSORRT_WHEEL_URL})" && \
+    rm "/tmp/$(basename ${TENSORRT_WHEEL_URL})" && \
     pip install --no-cache-dir --root-user-action=ignore \
+        --extra-index-url "${JETSON_PIP_INDEX}" \
         pycuda==2024.1 "onnx>=1.21.0" && \
     pip install --no-cache-dir --force-reinstall --root-user-action=ignore \
         numpy==1.26.4
@@ -115,6 +137,10 @@ RUN mkdir -p /data/models /data/runs
 # ring layouts, importable as `conecsa_shm` by every FROM-base service
 # (inference-service, api-gateway). Installed on the default import path.
 COPY os-base/conecsa_shm/ /usr/local/lib/python3.10/dist-packages/conecsa_shm/
+
+# Shared dependency-free helpers (atomic persistence, bounded SQLite queue),
+# importable as `conecsa_common` by every FROM-base service.
+COPY os-base/conecsa_common/ /usr/local/lib/python3.10/dist-packages/conecsa_common/
 
 # ── Hardware-management agent ────────────────────────────────────────────────
 # This container doubles as the privileged hardware agent for network/Wi-Fi and
@@ -133,7 +159,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY os-base/agent/requirements.txt /app/agent/requirements.txt
-RUN pip install --no-cache-dir --root-user-action=ignore -r /app/agent/requirements.txt
+RUN pip install --no-cache-dir --root-user-action=ignore \
+        --extra-index-url "${JETSON_PIP_INDEX}" -r /app/agent/requirements.txt
 
 COPY os-base/agent/ /app/agent/
 COPY proto/ /app/proto/

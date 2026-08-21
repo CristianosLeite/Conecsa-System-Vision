@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import grpc
 import pytest
-
 from gateway.training.helpers import _grpc_error, _json, _json_error, _result
 
 
@@ -29,22 +28,24 @@ class TestGrpcError:
             (grpc.StatusCode.INVALID_ARGUMENT, 400),
             (grpc.StatusCode.UNAVAILABLE, 503),
             (grpc.StatusCode.DEADLINE_EXCEEDED, 503),
-            (grpc.StatusCode.INTERNAL, 500),
+            (grpc.StatusCode.INTERNAL, 502),
         ],
     )
     def test_status_mapping(self, code, status):
         resp = _grpc_error(FakeRpcError(code, details="no dataset"))
         assert resp.status_code == status
-        assert "no dataset" in json.loads(resp.get_data(as_text=True))["error"]
 
     def test_client_errors_keep_the_bare_detail(self):
         resp = _grpc_error(FakeRpcError(grpc.StatusCode.NOT_FOUND, details="gone"))
         assert json.loads(resp.get_data(as_text=True)) == {"error": "gone"}
 
-    def test_server_errors_are_prefixed(self):
-        resp = _grpc_error(FakeRpcError(grpc.StatusCode.INTERNAL, details="oops"))
+    def test_infrastructure_failures_never_leak_internals(self):
+        resp = _grpc_error(FakeRpcError(
+            grpc.StatusCode.INTERNAL,
+            details="failed to connect to 172.20.0.9:50052"))
         body = json.loads(resp.get_data(as_text=True))
-        assert body["error"] == "Training service error: oops"
+        assert "172.20" not in body["error"]
+        assert body["error"] == "Training service error"
 
 
 class TestResult:

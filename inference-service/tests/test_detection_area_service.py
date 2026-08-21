@@ -2,11 +2,10 @@
 import json
 
 import pytest
-
 from api.services.detection_area_service import (
+    MIN_SIZE,
     DetectionArea,
     DetectionAreaService,
-    MIN_SIZE,
     _clamp,
 )
 

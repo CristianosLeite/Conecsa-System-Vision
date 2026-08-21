@@ -2,9 +2,9 @@
 # Inference service image. Inherits the shared ML stack (CUDA + Python + torch
 # + tensorrt + pycuda + opencv + ultralytics + …) from conecsa-os-base:base.
 #
-# This Dockerfile adds only the service-specific layer: the Flask/Waitress
-# web stack, Jetson.GPIO bindings, application code and the compiled proto
-# stubs.
+# This Dockerfile adds only the service-specific layer: the application code
+# and the compiled proto stubs. The service is headless — no HTTP stack; the
+# api-gateway fronts it over gRPC and shared memory.
 # ============================================================================
 
 FROM base
@@ -13,7 +13,10 @@ WORKDIR /app
 
 # Service-specific Python deps (web stack + Jetson hardware bindings).
 COPY inference-service/requirements.txt /app/
-RUN pip install --no-cache-dir --root-user-action=ignore -r /app/requirements.txt
+# ${JETSON_PIP_INDEX} is inherited from the base image; passed explicitly
+# (the base no longer sets a global extra index).
+RUN pip install --no-cache-dir --root-user-action=ignore \
+        --extra-index-url "${JETSON_PIP_INDEX}" -r /app/requirements.txt
 
 ENV PYTHONPATH=/app/inference-service:/usr/lib/python3.10/dist-packages:/usr/local/lib/python3.10/dist-packages
 ENV TENSORRT_WORKER_PORT=5501

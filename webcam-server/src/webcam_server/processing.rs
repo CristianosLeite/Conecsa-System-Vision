@@ -27,7 +27,7 @@ impl WebcamServer {
         let g_gain = green as f32 / RGB_LEVEL_DEFAULT as f32;
         let b_gain = blue as f32 / RGB_LEVEL_DEFAULT as f32;
 
-        for px in rgb.chunks_exact_mut(3) {
+        for px in rgb.as_chunks_mut::<3>().0 {
             px[0] = ((px[0] as f32 * r_gain).clamp(0.0, 255.0)) as u8;
             px[1] = ((px[1] as f32 * g_gain).clamp(0.0, 255.0)) as u8;
             px[2] = ((px[2] as f32 * b_gain).clamp(0.0, 255.0)) as u8;
@@ -54,10 +54,10 @@ impl WebcamServer {
                 let (r, g, b) = match (is_even_row, is_even_col) {
                     (true, true) => {
                         let gsum: u16 = [
-                            (x > 0).then(|| get(x - 1, y) as u16).unwrap_or(0),
-                            (x + 1 < width).then(|| get(x + 1, y) as u16).unwrap_or(0),
-                            (y > 0).then(|| get(x, y - 1) as u16).unwrap_or(0),
-                            (y + 1 < height).then(|| get(x, y + 1) as u16).unwrap_or(0),
+                            if x > 0 { get(x - 1, y) as u16 } else { 0 },
+                            if x + 1 < width { get(x + 1, y) as u16 } else { 0 },
+                            if y > 0 { get(x, y - 1) as u16 } else { 0 },
+                            if y + 1 < height { get(x, y + 1) as u16 } else { 0 },
                         ]
                         .iter()
                         .sum();
@@ -65,19 +65,13 @@ impl WebcamServer {
                             + (x + 1 < width) as u16
                             + (y > 0) as u16
                             + (y + 1 < height) as u16;
-                        let g = if gcnt > 0 { (gsum / gcnt) as u8 } else { 0 };
+                        let g = gsum.checked_div(gcnt).unwrap_or(0) as u8;
 
                         let bsum: u16 = [
-                            (x > 0 && y > 0).then(|| get(x - 1, y - 1) as u16).unwrap_or(0),
-                            (x + 1 < width && y > 0)
-                                .then(|| get(x + 1, y - 1) as u16)
-                                .unwrap_or(0),
-                            (x > 0 && y + 1 < height)
-                                .then(|| get(x - 1, y + 1) as u16)
-                                .unwrap_or(0),
-                            (x + 1 < width && y + 1 < height)
-                                .then(|| get(x + 1, y + 1) as u16)
-                                .unwrap_or(0),
+                            if x > 0 && y > 0 { get(x - 1, y - 1) as u16 } else { 0 },
+                            if x + 1 < width && y > 0 { get(x + 1, y - 1) as u16 } else { 0 },
+                            if x > 0 && y + 1 < height { get(x - 1, y + 1) as u16 } else { 0 },
+                            if x + 1 < width && y + 1 < height { get(x + 1, y + 1) as u16 } else { 0 },
                         ]
                         .iter()
                         .sum();
@@ -85,42 +79,42 @@ impl WebcamServer {
                             + ((x + 1 < width && y > 0) as u16)
                             + ((x > 0 && y + 1 < height) as u16)
                             + ((x + 1 < width && y + 1 < height) as u16);
-                        let b = if bcnt > 0 { (bsum / bcnt) as u8 } else { 0 };
+                        let b = bsum.checked_div(bcnt).unwrap_or(0) as u8;
                         (get(x, y), g, b)
                     }
                     (true, false) => {
                         let g = get(x, y);
-                        let rsum = (x > 0).then(|| get(x - 1, y) as u16).unwrap_or(0)
-                            + (x + 1 < width).then(|| get(x + 1, y) as u16).unwrap_or(0);
+                        let rsum = (if x > 0 { get(x - 1, y) as u16 } else { 0 })
+                            + if x + 1 < width { get(x + 1, y) as u16 } else { 0 };
                         let rcnt = (x > 0) as u16 + (x + 1 < width) as u16;
-                        let r = if rcnt > 0 { (rsum / rcnt) as u8 } else { 0 };
+                        let r = rsum.checked_div(rcnt).unwrap_or(0) as u8;
 
-                        let bsum = (y > 0).then(|| get(x, y - 1) as u16).unwrap_or(0)
-                            + (y + 1 < height).then(|| get(x, y + 1) as u16).unwrap_or(0);
+                        let bsum = (if y > 0 { get(x, y - 1) as u16 } else { 0 })
+                            + if y + 1 < height { get(x, y + 1) as u16 } else { 0 };
                         let bcnt = (y > 0) as u16 + (y + 1 < height) as u16;
-                        let b = if bcnt > 0 { (bsum / bcnt) as u8 } else { 0 };
+                        let b = bsum.checked_div(bcnt).unwrap_or(0) as u8;
                         (r, g, b)
                     }
                     (false, true) => {
                         let g = get(x, y);
-                        let bsum = (x > 0).then(|| get(x - 1, y) as u16).unwrap_or(0)
-                            + (x + 1 < width).then(|| get(x + 1, y) as u16).unwrap_or(0);
+                        let bsum = (if x > 0 { get(x - 1, y) as u16 } else { 0 })
+                            + if x + 1 < width { get(x + 1, y) as u16 } else { 0 };
                         let bcnt = (x > 0) as u16 + (x + 1 < width) as u16;
-                        let b = if bcnt > 0 { (bsum / bcnt) as u8 } else { 0 };
+                        let b = bsum.checked_div(bcnt).unwrap_or(0) as u8;
 
-                        let rsum = (y > 0).then(|| get(x, y - 1) as u16).unwrap_or(0)
-                            + (y + 1 < height).then(|| get(x, y + 1) as u16).unwrap_or(0);
+                        let rsum = (if y > 0 { get(x, y - 1) as u16 } else { 0 })
+                            + if y + 1 < height { get(x, y + 1) as u16 } else { 0 };
                         let rcnt = (y > 0) as u16 + (y + 1 < height) as u16;
-                        let r = if rcnt > 0 { (rsum / rcnt) as u8 } else { 0 };
+                        let r = rsum.checked_div(rcnt).unwrap_or(0) as u8;
                         (r, g, b)
                     }
                     (false, false) => {
                         let bv = get(x, y);
                         let gsum: u16 = [
-                            (x > 0).then(|| get(x - 1, y) as u16).unwrap_or(0),
-                            (x + 1 < width).then(|| get(x + 1, y) as u16).unwrap_or(0),
-                            (y > 0).then(|| get(x, y - 1) as u16).unwrap_or(0),
-                            (y + 1 < height).then(|| get(x, y + 1) as u16).unwrap_or(0),
+                            if x > 0 { get(x - 1, y) as u16 } else { 0 },
+                            if x + 1 < width { get(x + 1, y) as u16 } else { 0 },
+                            if y > 0 { get(x, y - 1) as u16 } else { 0 },
+                            if y + 1 < height { get(x, y + 1) as u16 } else { 0 },
                         ]
                         .iter()
                         .sum();
@@ -128,19 +122,13 @@ impl WebcamServer {
                             + (x + 1 < width) as u16
                             + (y > 0) as u16
                             + (y + 1 < height) as u16;
-                        let g = if gcnt > 0 { (gsum / gcnt) as u8 } else { 0 };
+                        let g = gsum.checked_div(gcnt).unwrap_or(0) as u8;
 
                         let rsum: u16 = [
-                            (x > 0 && y > 0).then(|| get(x - 1, y - 1) as u16).unwrap_or(0),
-                            (x + 1 < width && y > 0)
-                                .then(|| get(x + 1, y - 1) as u16)
-                                .unwrap_or(0),
-                            (x > 0 && y + 1 < height)
-                                .then(|| get(x - 1, y + 1) as u16)
-                                .unwrap_or(0),
-                            (x + 1 < width && y + 1 < height)
-                                .then(|| get(x + 1, y + 1) as u16)
-                                .unwrap_or(0),
+                            if x > 0 && y > 0 { get(x - 1, y - 1) as u16 } else { 0 },
+                            if x + 1 < width && y > 0 { get(x + 1, y - 1) as u16 } else { 0 },
+                            if x > 0 && y + 1 < height { get(x - 1, y + 1) as u16 } else { 0 },
+                            if x + 1 < width && y + 1 < height { get(x + 1, y + 1) as u16 } else { 0 },
                         ]
                         .iter()
                         .sum();
@@ -148,7 +136,7 @@ impl WebcamServer {
                             + ((x + 1 < width && y > 0) as u16)
                             + ((x > 0 && y + 1 < height) as u16)
                             + ((x + 1 < width && y + 1 < height) as u16);
-                        let r = if rcnt > 0 { (rsum / rcnt) as u8 } else { 0 };
+                        let r = rsum.checked_div(rcnt).unwrap_or(0) as u8;
                         (r, g, bv)
                     }
                 };

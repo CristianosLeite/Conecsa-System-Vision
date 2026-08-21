@@ -105,10 +105,11 @@ class _Sam3Session:
     def __init__(self, checkpoint: str):
         t0 = time.monotonic()
         import torch  # heavy imports live only in this subprocess
+
         # sam3 is vendored into /data/training/sam3 on the device and is absent from
         # the host dev venv, so the type checker cannot resolve it here.
-        from sam3.model_builder import build_sam3_image_model  # pyright: ignore[reportMissingImports]
-        from sam3.model.sam3_image_processor import Sam3Processor  # pyright: ignore[reportMissingImports]
+        from sam3.model.sam3_image_processor import Sam3Processor  # type: ignore
+        from sam3.model_builder import build_sam3_image_model  # type: ignore
 
         self._torch = torch
         t_import = time.monotonic()

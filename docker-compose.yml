@@ -83,8 +83,10 @@ services:
         base: service:os-base
     container_name: conecsa-inference-service
     runtime: nvidia
-    privileged: true
-    pid: host
+    # No privileged / host PID: the GPU comes from `runtime: nvidia` +
+    # NVIDIA_VISIBLE_DEVICES, GPIO goes through the /run/conecsa-gpio socket
+    # volume, and host metrics moved to the os hardware agent. The dev
+    # compose has always run this same image without either flag.
     ipc: "service:webcam-server"
     environment:
       # GPU Configuration
@@ -112,8 +114,11 @@ services:
       # GPU fed without the cost of a full-resolution JPEG decode per frame.
       - PROCESSING_DECODE_SCALE=2
       # Stereo combine: split the side-by-side (left|right) frame and blend the
-      # two eyes into one image for display + detection. "none" to disable.
-      - STEREO_COMBINE=blend
+      # two eyes into one image for display + detection. Seeded off ("none")
+      # because it would tear an ordinary camera's picture in half; the Camera
+      # Settings toggle turns it on for a 3D camera and the per-model settings
+      # snapshot restores it from then on. "blend" to start enabled.
+      - STEREO_COMBINE=none
       - STEREO_BLEND_ALPHA=0.5
       - CAPTURE_RGB_RED=128
       - CAPTURE_RGB_GREEN=128
@@ -121,25 +126,14 @@ services:
       - CAPTURE_GAMMA=100
       - CAPTURE_GAIN=0
 
-      - PYTORCH_USE_FP16=1
-      - PYTORCH_DISABLE_CUDNN=0
-      - PYTORCH_PERF_MODE=1
-      - PYTORCH_SYNC_CUDA=0
       - LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/libcusparseLt/12:/usr/local/cuda/lib64:/usr/local/cuda-12.6/targets/aarch64-linux/lib
-      
-      # Optional: Force TensorRT runtime
-      - TENSORRT_RUNTIME=1
+
       - TENSORRT_AUTO_REBUILD_ENGINE=1
       - TENSORRT_WORKSPACE_MB=192
       # Number of parallel TensorRT inference contexts. >1 runs that many worker
       # subprocesses (ports 5501, 5502, …) and that many decode+infer pipeline
       # lanes, overlapping CPU/GPU across cores. Measured ~1.8x GPU scaling at 2.
       - TENSORRT_CONTEXTS=2
-      # waitress task-thread pool. Must exceed the worst-case concurrent
-      # long-lived connections (per web tab: MJPEG video + unified SSE; plus
-      # Node-RED event/stats streams) with headroom for normal requests, or
-      # the server queues every request once streams saturate the pool.
-      - WAITRESS_THREADS=32
 
       # Memory containment via jemalloc (paired with zram-swap + THP=madvise
       # on the Yocto host). Replaces the earlier attempt to cap glibc arenas
@@ -249,9 +243,8 @@ services:
               capabilities: [gpu]
 
   # API gateway — thin HTTP↔gRPC/SHM interface in front of the headless
-  # inference pipeline. Runs ADDITIVELY for now (own host port 5010) so it can
-  # be validated against the still-serving monolith before the cutover flips
-  # inference headless and moves the gateway to the external port.
+  # inference pipeline. The only HTTP surface on the device: nginx proxies
+  # /api to it (no ports are published here).
   api-gateway:
     build:
       context: .
@@ -267,14 +260,14 @@ services:
       - HARDWARE_AGENT_ADDR=os-base:50051
       - TRAINING_GRPC_ADDR=training-service:50071
       # Stereo combine for the training preview (matches inference-service).
-      - STEREO_COMBINE=blend
+      - STEREO_COMBINE=none
       - STEREO_BLEND_ALPHA=0.5
       - SHM_NAME=conecsa_frame_shm
       - PROCESSED_SHM_NAME=conecsa_processed_shm
       - GATEWAY_PORT=5000
       # Device software version, surfaced on /api/v1/status + /api/v1/health for
       # the conecsa-hub-vision hub to display.
-      - DEVICE_VERSION=2026.2-LTS
+      - DEVICE_VERSION=2026.3-LTS
       # Thread-per-connection: above the worst-case concurrent MJPEG + SSE
       # streams (per web tab: processed video + unified SSE; plus Node-RED).
       - WAITRESS_THREADS=32
@@ -294,12 +287,18 @@ services:
       # DEVICE_PAIR_TOKEN only to require a shared pairing secret.
       - CONECSA_CERT_DIR=/etc/conecsa/certs
       - DEVICE_PAIR_TOKEN=${DEVICE_PAIR_TOKEN:-}
+      # Audit trail: every mutating request is appended here and drained by the
+      # hub over mTLS. Needs its own writable volume (see `volumes:` below).
+      - AUDIT_DIR=/data/audit
     # No published ports: the gateway is reached only via the device's nginx on
     # the Docker network, and externally only through the hub over mTLS on :443.
     # It still listens on :5000 inside the container (nginx upstream + healthcheck).
     volumes:
       # Device key/CSR + hub-signed cert/CA, shared with the nginx TLS terminator.
       - conecsa-certs:/etc/conecsa/certs
+      # Audit records awaiting collection by the hub. Survives restarts and a
+      # long hub outage; the gateway rings it to a bounded size.
+      - audit-data:/data/audit
       # Host hostname = the avahi mDNS instance name; the gateway uses it as the
       # device id so enrollment, the cert SAN and discovery all agree on one id.
       - /etc/hostname:/etc/conecsa/host_hostname:ro
@@ -340,7 +339,7 @@ services:
       - SHM_NAME=conecsa_frame_shm
       # Stereo combine — keep in sync with inference-service so captured
       # dataset images match the geometry the live detector sees.
-      - STEREO_COMBINE=blend
+      - STEREO_COMBINE=none
       - STEREO_BLEND_ALPHA=0.5
       - GATEWAY_ADDR=http://api-gateway:5000
       # Training knobs sized for the Orin Nano 8GB.
@@ -449,6 +448,11 @@ services:
       # The nodes resolve it as: per-node config → INFERENCE_URL → built-in
       # default (http://api-gateway:5000). Repoint the whole flow with one var.
       - INFERENCE_URL=${INFERENCE_URL:-http://api-gateway:5000}
+      # REQUIRED (no default): encrypts third-party credentials stored in
+      # flows. Provision a unique per-deployment value in .env; Node-RED
+      # refuses to start without it (see flow/settings.js). Changing it
+      # invalidates credentials already stored in flows.
+      - NODE_RED_CREDENTIAL_SECRET=${NODE_RED_CREDENTIAL_SECRET:?set a unique per-deployment secret in .env}
     # No published ports: Node-RED is reached only via the device's nginx /flow
     # proxy. It still listens on :1880 inside the container.
     volumes:
@@ -475,6 +479,8 @@ volumes:
     name: conecsa-models-data
   detections-data:
     name: conecsa-detections-data
+  audit-data:
+    name: conecsa-audit-data
   runs-data:
     name: conecsa-runs-data
   training-data:

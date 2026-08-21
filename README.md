@@ -7,7 +7,8 @@ CUDA 12.6), with
 **TensorRT-only** inference. A separate native **`hub-vision`** desktop app is the
 single authenticated, secure entry point to a fleet: it logs operators in,
 discovers devices over mDNS, and reaches each one **only over mutual TLS**,
-pulling their detections (off-device, not in the compose stack).
+pulling their detections and their audit trails (off-device, not in the compose
+stack).
 
 The backend follows an **`app → api → service`** split: a thin **api-gateway**
 owns the entire external HTTP/SSE/MJPEG contract, while the heavy work runs in
@@ -48,6 +49,11 @@ a gRPC control server + the decode∥infer∥encode pipeline), a privileged
   stops polling, and the hub drains the backlog on reconnect — deleting the
   device copy only after its own store confirms the write, with timestamps
   reconstructed to the real detection time
+- **Audit trail**: every action a user takes — on the hub and on its devices —
+  is recorded with its actor, origin IP and outcome. Devices buffer their own
+  events on disk and the hub drains them over mTLS, so nothing is lost while it
+  is closed. History is kept for a configurable window and exports to CSV
+  (see [Audit trail](docs/services/hub-vision.md#audit-trail))
 - **Secure by default**: the device exposes only a `:443` **mTLS** endpoint; the
   hub acts as a private CA, enrolls devices by a one-click pairing, and is the
   sole client holding a valid certificate — no root certificate is ever installed

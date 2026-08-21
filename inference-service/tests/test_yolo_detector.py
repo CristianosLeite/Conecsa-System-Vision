@@ -1,6 +1,5 @@
 """Unit tests for YOLODetector confidence filtering and output decoding."""
 import numpy as np
-
 from api.config import Config
 from api.yolo_detector import YOLODetector
 

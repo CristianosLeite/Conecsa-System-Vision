@@ -3,7 +3,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from service._weights_averager import _average_state_dicts, _merge_checkpoints
+from service._weights_averager import (  # noqa: E402  (after importorskip)
+    _average_state_dicts,
+    _merge_checkpoints,
+)
 
 
 def _model(fill: float):  # -> torch.nn.Module (torch is an importorskip handle, not a module symbol)

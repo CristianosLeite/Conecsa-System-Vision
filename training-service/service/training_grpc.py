@@ -27,11 +27,10 @@ if not os.path.isdir(_PROTO_DIR):
 if _PROTO_DIR not in sys.path:
     sys.path.insert(0, _PROTO_DIR)
 
-import training_pb2 as pb            # noqa: E402
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+import training_pb2 as pb  # noqa: E402
 import training_pb2_grpc as pb_grpc  # noqa: E402
-
-import cv2                           # noqa: E402
-import numpy as np                   # noqa: E402
 
 from .capture_service import corners_to_letterbox, letterbox_square  # noqa: E402
 from .dataset_service import Box, DatasetError, NamedBox  # noqa: E402
@@ -679,7 +678,14 @@ def serve_grpc(application) -> None:
     """Start the TrainingControl gRPC server in a daemon thread (non-blocking)."""
     def _run() -> None:
         """Thread body: build, register, start the server and block on it."""
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+        # Explicit receive cap: labeled-image uploads (AddDatasetImage) travel
+        # as one message, so the default 4 MiB rejected large JPEGs with a
+        # bare RESOURCE_EXHAUSTED. Dataset ZIPs and weights stream in ~1 MiB
+        # chunks and are unaffected.
+        server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=8),
+            options=[("grpc.max_receive_message_length", 32 * 1024 * 1024)],
+        )
         pb_grpc.add_TrainingControlServicer_to_server(
             TrainingControlServicer(application), server
         )

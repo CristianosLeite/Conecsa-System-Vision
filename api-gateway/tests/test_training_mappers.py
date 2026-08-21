@@ -2,7 +2,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from gateway.training import _job_dict, _meta_dict, _parse_named_boxes
 
 

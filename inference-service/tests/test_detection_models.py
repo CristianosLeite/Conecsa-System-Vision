@@ -1,6 +1,5 @@
 """Unit tests for the detection dataclasses."""
 import numpy as np
-
 from api.models.detection_models import (
     Detection,
     DetectionResult,

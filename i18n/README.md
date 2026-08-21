@@ -8,7 +8,8 @@ Shared i18n catalogs for the two Leptos frontends, consumed at compile time by
   `camera`, `settings`, `training`, `statistics`, `flow`. Access in code:
   `t!(i18n, <namespace>::<key>)`.
 - `hub-vision/` — one file per locale (`<locale>.json`) with nested sections:
-  `common`, `sidebar`, `auth`, `devices`, `records`, `users`, `settings`.
+  `common`, `sidebar`, `auth`, `devices`, `records`, `datasets`, `recipes`,
+  `users`, `training`, `settings`, `audit`.
   Access in code: `t!(i18n, <section>.<key>)`.
 
 Locales: `en` (default / source of truth), `pt-BR`, `es`. Every key must exist
@@ -45,6 +46,8 @@ Keep these terms identical across both apps:
 | Live Stream | Transmissão ao Vivo | Transmisión en Vivo |
 | Camera | Câmera | Cámara |
 | Network | Rede | Red |
+| Audit | Auditoria | Auditoría |
+| Event | Evento | Evento |
 
 Never translated: brand/product names (CONECSA, Hub Vision, Node-RED,
 PostgreSQL, TensorRT, YOLO, SAM), technical tokens (GPU, CPU, RAM, FPS, ms,

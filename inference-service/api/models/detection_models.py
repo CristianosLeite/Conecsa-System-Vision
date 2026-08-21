@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 # noinspection PyPackageRequirements
-import numpy as np # Installed on os build.
+import numpy as np  # Installed on os build.
 
 
 @dataclass

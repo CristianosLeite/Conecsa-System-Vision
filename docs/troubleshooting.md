@@ -33,6 +33,19 @@
   service is up with `docker compose logs flow`
 - **TensorRT cold-start is slow**: normal on first use (~30s); the worker
   is pre-warmed in the background on the next startup
+- **Audit rows never reach the hub**: the backlog routes answer the paired hub
+  only. A `403` means the request did not arrive through the mTLS terminator —
+  check pairing and that nginx is in enforcing mode. Confirm the gateway has a
+  writable `/data/audit` (volume `conecsa-audit-data`); on failure it logs
+  `audit buffer … disabled` and stops recording rather than breaking requests
+- **Audit events show no user**: the device authenticates nobody, so the actor
+  is whatever the hub stamps. Actions taken outside the hub's device proxy are
+  recorded anonymously by design; see
+  [Audit trail](services/hub-vision.md#audit-trail)
+- **Audit rows are missing from the external database**: the mirror is
+  best-effort and write-only. While PostgreSQL/SQL Server is unreachable rows
+  stay pending in the hub's local `audit.db` and are copied when it returns —
+  the Audit page reads the local copy and is unaffected
 
 ## Running on the custom Yocto image (Jetson Orin Nano)
 

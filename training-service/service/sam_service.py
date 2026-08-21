@@ -233,7 +233,7 @@ class SamService:
             raise RuntimeError(
                 "SAM worker died mid-request (likely out of memory); "
                 f"see /tmp/sam_worker_{self._config.SAM_WORKER_PORT}.log"
-            )
+            ) from None
 
     def _touch(self) -> None:
         """Touch."""

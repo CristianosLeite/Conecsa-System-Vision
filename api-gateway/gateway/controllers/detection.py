@@ -2,6 +2,10 @@
 stats and the detections snapshot."""
 import logging
 
+# Compiled detection schemas (protobuf content-negotiation for the Tauri/native
+# and Leptos protobuf endpoints). Sits next to the other stubs in gateway/proto,
+# which `..grpc_clients` (imported above) puts on sys.path.
+import detection_pb2 as det_pb  # noqa: E402
 import grpc
 from flask import Response, request
 
@@ -18,11 +22,6 @@ from ..helpers import (
     _publish_if_success,
 )
 from . import api_bp
-
-# Compiled detection schemas (protobuf content-negotiation for the Tauri/native
-# and Leptos protobuf endpoints). Sits next to the other stubs in gateway/proto,
-# which `..grpc_clients` (imported above) puts on sys.path.
-import detection_pb2 as det_pb  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

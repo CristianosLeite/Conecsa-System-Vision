@@ -1,8 +1,8 @@
 """
 Class labels repository - Handles class labels file persistence.
 """
-import os
 import logging
+import os
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -53,11 +53,12 @@ class ClassLabelsRepository:
             True if saved successfully
         """
         try:
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(self.classes_file_path), exist_ok=True)
+            from conecsa_common import atomic_write_bytes
 
-            with open(self.classes_file_path, 'w') as f:
-                f.write('\n'.join(labels))
+            # Atomic + fsync: the labels file maps class indices to names for
+            # the live detector; a power cut must never truncate it.
+            atomic_write_bytes(self.classes_file_path,
+                               '\n'.join(labels).encode("utf-8"), mode=0o644)
 
             logger.info(f"Saved {len(labels)} class labels to {self.classes_file_path}")
             return True

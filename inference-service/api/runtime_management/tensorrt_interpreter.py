@@ -9,16 +9,19 @@ owns the engine, execution context and CUDA buffers.
 import gc
 import logging
 import os
+from typing import Any, Dict, List, Optional
 
 # noinspection PyPackageRequirements
 import numpy as np  # Package is included on os build.
 
-from typing import Optional, Any, Dict, List
-from .base_runtime import create_tensor_info
 from api.runtime_management._trt_engine_builder import (
-    ensure_cudla_compat,
     build_engine as build_engine_from_onnx,
 )
+from api.runtime_management._trt_engine_builder import (
+    ensure_cudla_compat,
+)
+
+from .base_runtime import create_tensor_info
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +42,9 @@ class TensorRTInterpreter:
         """
         ensure_cudla_compat()
         # noinspection PyPackageRequirements
-        import tensorrt as trt  # type: ignore  # Package is included on os build.
         # noinspection PyPackageRequirements
         import pycuda.driver as cuda  # type: ignore  # Package is included on os build.
+        import tensorrt as trt  # type: ignore  # Package is included on os build.
 
         self.trt = trt  # type: ignore
         self.cuda = cuda  # type: ignore
@@ -78,9 +81,11 @@ class TensorRTInterpreter:
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"TensorRT engine not found: {self.model_path}")
 
+        from ..model_paths import ENGINE_FILE_EXTENSIONS
+
         model_ext = os.path.splitext(self.model_path)[1].lower()
 
-        if model_ext in ['.engine', '.plan']:
+        if model_ext in ENGINE_FILE_EXTENSIONS:
             self._load_engine_file()
         elif model_ext == '.onnx':
             self.build_engine_from_onnx()

@@ -11,9 +11,10 @@ __pycache__/
 .mypy_cache/
 .venv/
 
-# Rust/Cargo
+# Rust/Cargo. Cargo.lock files are COMMITTED on purpose: these crates are
+# applications, so the lockfiles pin what actually ships (and CI's cargo-audit
+# and cache keys read them).
 /target/
-Cargo.lock
 **/*.rs.bk
 
 # Node/NPM
@@ -64,3 +65,4 @@ training-service/service/proto/*_pb2_grpc.py
 
 # Local-dev stand-in for the production /data volumes (created by scripts/dev.sh)
 /.dev-data/
+

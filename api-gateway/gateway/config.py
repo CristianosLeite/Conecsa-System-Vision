@@ -24,7 +24,7 @@ class Settings:
 
     # Stereo combine parameters for the training preview (same defaults as the
     # inference-service so the preview matches what gets captured/detected).
-    STEREO_COMBINE = os.environ.get("STEREO_COMBINE", "blend").strip().lower()
+    STEREO_COMBINE = os.environ.get("STEREO_COMBINE", "none").strip().lower()
     STEREO_BLEND_ALPHA = _env_float("STEREO_BLEND_ALPHA", 0.5)
     STEREO_OFFSET = _env_float("STEREO_OFFSET", 0.0)
     STEREO_OFFSET_Y = _env_float("STEREO_OFFSET_Y", 0.0)
@@ -35,9 +35,28 @@ class Settings:
     CAMERA_SHM_NAME = os.environ.get("SHM_NAME", "conecsa_frame_shm")
     PROCESSED_SHM_NAME = os.environ.get("PROCESSED_SHM_NAME", "conecsa_processed_shm")
 
+    # Audit trail: the device's own record of user actions, drained by the hub.
+    # The caps are ring limits — a hub that has been away for months must not
+    # be able to fill the eMMC, but losing audit rows is bad enough that they
+    # are set far above any realistic outage.
+    AUDIT_DIR = os.environ.get("AUDIT_DIR", "/data/audit")
+    AUDIT_MAX_RECORDS = int(os.environ.get("AUDIT_MAX_RECORDS", "50000"))
+    AUDIT_MAX_BYTES = int(os.environ.get("AUDIT_MAX_BYTES", str(64 * 1024 * 1024)))
+
+    # Include exception text/class in 500 bodies (development only; the
+    # production default keeps internals out of responses).
+    DEBUG_ERRORS = os.environ.get(
+        "GATEWAY_DEBUG_ERRORS", "").strip().lower() in ("1", "true")
+
     # HTTP server.
     PORT = int(os.environ.get("GATEWAY_PORT", "5000"))
     WAITRESS_THREADS = int(os.environ.get("WAITRESS_THREADS", "32"))
+
+    # A single labeled-image upload (one JPEG relayed to the training service
+    # in one gRPC message). Far below the global 600 MB body limit — a JPEG
+    # frame is a few MB; anything bigger is not a camera frame.
+    MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get(
+        "MAX_IMAGE_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 
     # Per-call gRPC deadlines (seconds). Control calls are quick; Wi-Fi
     # scan/connect block on the radio and are given longer in the hardware client.

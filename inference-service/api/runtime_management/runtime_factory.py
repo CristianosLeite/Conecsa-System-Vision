@@ -4,6 +4,7 @@ Runtime factory for creating and managing the TensorRT runtime instance.
 import logging
 import os
 from typing import Optional
+
 from .base_runtime import BaseRuntime
 from .remote_runtime import RemoteRuntime
 
@@ -60,5 +61,6 @@ class RuntimeFactory:
     @classmethod
     def is_supported_model(cls, model_path: str) -> bool:
         """Return True for TensorRT-compatible model extensions."""
+        from ..model_paths import TENSORRT_MODEL_EXTENSIONS
         ext = os.path.splitext(model_path)[1].lower()
-        return ext in ('.engine', '.plan', '.onnx')
+        return ext in TENSORRT_MODEL_EXTENSIONS

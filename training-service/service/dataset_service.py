@@ -21,7 +21,9 @@ import time
 import uuid
 import zipfile
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
+
+from conecsa_common import atomic_write_bytes, atomic_write_json, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +171,7 @@ class DatasetService:
                     classes.append(name)
             resolved = [
                 Box(classes.index(name), b.cx, b.cy, b.w, b.h)
-                for name, b in zip(names, boxes)
+                for name, b in zip(names, boxes, strict=False)
             ]
             self._save_classes(classes)
             image_id = str(uuid.uuid4())
@@ -230,7 +232,7 @@ class DatasetService:
             try:
                 count = max(1, min(int(count), 50))
             except (TypeError, ValueError):
-                raise DatasetError("Replica count must be an integer")
+                raise DatasetError("Replica count must be an integer") from None
             if not os.path.exists(self._image_path(image_id)):
                 raise DatasetError(f"Image '{image_id}' not found")
             meta = self._load_meta()
@@ -327,8 +329,8 @@ class DatasetService:
             f"{b.class_id} {b.cx:.6f} {b.cy:.6f} {b.w:.6f} {b.h:.6f}"
             for b in boxes
         ]
-        with open(path, "w") as f:
-            f.write("\n".join(lines) + "\n")
+        atomic_write_bytes(path, ("\n".join(lines) + "\n").encode("utf-8"),
+                           mode=0o644)
 
     # ── classes ───────────────────────────────────────────────────────────────
 
@@ -345,9 +347,9 @@ class DatasetService:
             return []
 
     def _save_classes(self, classes: List[str]) -> None:
-        """Save classes."""
-        with open(self._classes_file, "w") as f:
-            json.dump(classes, f, ensure_ascii=False)
+        """Save classes (atomic + fsync; power-cut safe)."""
+        atomic_write_json(self._classes_file, classes, mode=0o644,
+                          ensure_ascii=False)
 
     def get_classes(self) -> List[str]:
         """Get classes."""
@@ -416,18 +418,18 @@ class DatasetService:
     # ── metadata (name / cover) ───────────────────────────────────────────────
 
     def _load_meta(self) -> Dict:
-        """Load meta."""
-        try:
-            with open(self._meta_file, "r") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except (ValueError, OSError):
-            return {}
+        """Load meta.
+
+        Missing file → empty (first run); corrupt file → reported and
+        quarantined by read_json, never silently treated as an empty dataset.
+        """
+        data = read_json(self._meta_file, {})
+        return data if isinstance(data, dict) else {}
 
     def _save_meta(self, meta: Dict) -> None:
-        """Save meta."""
-        with open(self._meta_file, "w") as f:
-            json.dump(meta, f, ensure_ascii=False)
+        """Save meta (atomic + fsync; power-cut safe)."""
+        atomic_write_json(self._meta_file, meta, mode=0o644,
+                          ensure_ascii=False)
 
     def write_meta(self, name: str, created_at: Optional[float] = None) -> None:
         """Write meta."""

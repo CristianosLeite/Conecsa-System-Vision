@@ -4,6 +4,7 @@ Contains all configurations and environment variables.
 """
 import os
 
+
 class Config:
     """Class to manage all system configurations."""
 
@@ -26,6 +27,12 @@ class Config:
         # Model settings — models live in the shared volume mounted from
         # the `os` container at /data/models.
         self.MODELS_DIR = os.environ.get("MODELS_DIR", default="/data/models")
+
+        # Hard cap on a streamed model upload, counted server-side while the
+        # chunks arrive (the 8 GB device cannot afford unbounded buffering).
+        # Matches the gateway/nginx 600 MB body limit by default.
+        self.MAX_MODEL_UPLOAD_BYTES = int(os.environ.get(
+            "MAX_MODEL_UPLOAD_BYTES", default=600 * 1024 * 1024))
         self.MODEL_PATH = os.environ.get(
             "MODEL_PATH",
             default=os.path.join(self.MODELS_DIR, "weights.engine"),

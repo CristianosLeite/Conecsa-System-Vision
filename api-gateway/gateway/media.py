@@ -15,7 +15,6 @@ import time
 
 import cv2
 import numpy as np
-
 from conecsa_shm.camera_ring import CameraRingReader
 from conecsa_shm.processed_ring import ProcessedFrameReader
 from conecsa_shm.stereo import combine_stereo

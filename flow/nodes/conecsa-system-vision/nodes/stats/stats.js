@@ -7,17 +7,16 @@
  */
 module.exports = function (RED) {
   "use strict";
-  const { inferenceBaseUrl, subscribeSSE } = require("../../lib/http-client");
+  const { subscribeSSE } = require("../../lib/http-client");
+  const { initNode } = require("../../lib/node-base");
 
   function StatsNode(config) {
-    RED.nodes.createNode(this, config);
     const node = this;
+    initNode(RED, node, config, "connecting");
 
-    node.inferenceUrl = inferenceBaseUrl(config);
     node.mode = config.mode || "on-change";
     node.interval = (parseFloat(config.interval) || 2) * 1000;
 
-    node.status({ fill: "grey", shape: "ring", text: "connecting" });
 
     // Used by on-change mode: emit only when the detection count
     // changes. fps / inference_time fluctuate every frame and would

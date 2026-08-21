@@ -9,7 +9,7 @@ from multiprocessing.connection import Listener
 from typing import Any, Dict, List, Optional, Tuple
 
 # noinspection PyPackageRequirements
-import numpy as np # Package is included on os build.
+import numpy as np  # Package is included on os build.
 
 
 def _malloc_trim() -> None:
@@ -251,7 +251,10 @@ def _handle_build_engine_command(conn, msg: Dict[str, Any], interpreter) -> None
         logger.info(f"Building TensorRT engine: {onnx_path} → {engine_path}")
 
         try:
-            from .tensorrt_interpreter import TensorRTInterpreter, build_engine_from_onnx # type: ignore
+            from .tensorrt_interpreter import (  # type: ignore
+                TensorRTInterpreter,
+                build_engine_from_onnx,
+            )
         except ImportError as import_err:
             logger.error(f"Failed to import TensorRT components: {import_err}")
             _send_error(conn, f"TensorRT not available: {import_err}")

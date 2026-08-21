@@ -2,7 +2,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from api.services.config_service import ConfigService
 
 

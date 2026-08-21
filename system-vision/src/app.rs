@@ -99,6 +99,7 @@ async fn fetch_api<T: for<'de> Deserialize<'de>>(
         .headers()
         .set("X-Conecsa-Source", "frontend")
         .map_err(|e| format!("Failed to set header: {:?}", e))?;
+    crate::api::wasm32::http::set_proxy_cap(&request)?;
 
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await

@@ -1,3 +1,14 @@
+// Credential-encryption secret: REQUIRED. Third-party credentials stored in
+// flows are encrypted with it; a source-known fallback would make them
+// recoverable from any deployment, so startup fails loudly instead. Note:
+// changing the secret invalidates credentials already stored in flows.
+if (!process.env.NODE_RED_CREDENTIAL_SECRET) {
+  throw new Error(
+    "NODE_RED_CREDENTIAL_SECRET is not set; refusing to start with a " +
+    "publicly-known credential secret. Provision it in the compose file."
+  );
+}
+
 module.exports = {
   // Listen on all interfaces so the container is reachable
   uiHost: "0.0.0.0",
@@ -16,11 +27,8 @@ module.exports = {
   //   users: [{ username: "admin", password: "<bcrypt-hash>", permissions: "*" }]
   // },
 
-  // Allow the editor and API to be embedded in iframes
-  httpNodeCors: {
-    origin: "*",
-    methods: "GET,PUT,POST,DELETE",
-  },
+  // HTTP-in nodes are consumed same-origin (through nginx /flow or the hub's
+  // reverse proxy); no cross-origin caller exists, so no CORS is granted.
 
   // Allow iframe embedding by the WASM UI on the same origin (served directly,
   // behind :443 mTLS, or through the hub's 127.0.0.1 reverse proxy).
@@ -31,9 +39,8 @@ module.exports = {
 
   // Persist flows and credentials in the mounted volume
   flowFile: "flows.json",
-  // Secret used to encrypt stored credentials. Override per deployment via
-  // NODE_RED_CREDENTIAL_SECRET; changing it invalidates existing credentials.
-  credentialSecret: process.env.NODE_RED_CREDENTIAL_SECRET || "conecsa-node-red-secret",
+  // Secret used to encrypt stored credentials — required, validated above.
+  credentialSecret: process.env.NODE_RED_CREDENTIAL_SECRET,
 
   // Logging
   logging: {

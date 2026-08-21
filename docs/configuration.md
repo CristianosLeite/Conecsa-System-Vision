@@ -22,7 +22,7 @@ the code (what applies when the variable is unset); where the production
 | `SHM_NAME` | `conecsa_frame_shm` | — | Camera SHM segment name (must match webcam-server) |
 | `INFERENCE_GRPC_LISTEN` | `0.0.0.0:50061` | — | gRPC control server bind address |
 | `PROCESSING_DECODE_SCALE` | `2` | — | Reduced-scale JPEG decode for inference/overlay (1 = full, 2 = half, 4 = quarter) |
-| `STEREO_COMBINE` | `none` | `blend` | Stereo combine mode — split the side-by-side frame and blend both eyes into one image |
+| `STEREO_COMBINE` | `none` | `none` | Stereo combine mode — split the side-by-side frame and blend both eyes into one image. Starts off: it would tear an ordinary camera's picture in half, so the Camera Settings toggle (shown only for a 3D camera) enables it and the per-model settings snapshot restores it |
 | `STEREO_BLEND_ALPHA` | `0.5` | — | Blend factor for `STEREO_COMBINE=blend` |
 | `CAPTURE_AUTO_EXPOSURE` | `false` | — | Camera auto-exposure |
 | `CAPTURE_EXPOSURE_TIME` | `10000 / framerate` | `166` | Manual exposure time |
@@ -49,22 +49,25 @@ the code (what applies when the variable is unset); where the production
 | `PROCESSED_SHM_NAME` | `conecsa_processed_shm` | — | Processed SHM ring (overlaid feed) |
 | `GATEWAY_PORT` | `5000` | — | Internal HTTP port |
 | `WAITRESS_THREADS` | `32` | — | Waitress task threads (MJPEG/SSE pin one each) |
-| `STEREO_COMBINE` | `blend` | — | Stereo combine for the training preview (matches inference-service) |
+| `STEREO_COMBINE` | `none` | `none` | Stereo combine for the training preview (matches inference-service); fallback only — the live inference config wins when reachable |
 | `STEREO_BLEND_ALPHA` | `0.5` | — | Blend factor for the training preview |
-| `DEVICE_VERSION` | _(empty)_ | `2026.2-LTS` | Device software version, surfaced on `/api/v1/status` + `/api/v1/health` for the hub |
+| `DEVICE_VERSION` | _(empty)_ | `2026.3-LTS` | Device software version, surfaced on `/api/v1/status` + `/api/v1/health` for the hub |
 | `DEVICE_ID` | _(host hostname)_ | — | Device identity used by enrollment, the cert SAN and mDNS |
 | `CONECSA_CERT_DIR` | `/etc/conecsa/certs` | — | Device key/CSR + hub-signed cert/CA (volume shared with the nginx TLS terminator) |
 | `DEVICE_PAIR_TOKEN` | _(unset)_ | `${DEVICE_PAIR_TOKEN:-}` | Optional shared pairing secret; unset = first hub on the trusted LAN to pair wins |
 | `HUB_MDNS_ENABLED` | `1` | `0` | In-container mDNS advertiser; disabled in production (the host avahi-daemon advertises instead) |
 | `CLOCK_SYNC_THRESHOLD_SEC` | `30` | — | Drift from the hub's clock that triggers a step (the board has no RTC battery; see [Clock synchronization](services/hub-vision.md#clock-synchronization)) |
 | `CLOCK_SYNC_MIN_INTERVAL_SEC` | `60` | — | Minimum spacing between clock-step attempts, so a failing step is not retried on every 2s hub poll |
+| `AUDIT_DIR` | `/data/audit` | `/data/audit` | Audit trail directory (`audit.db`); needs a writable volume (`conecsa-audit-data`) |
+| `AUDIT_MAX_RECORDS` | `50000` | — | Audit ring cap (records); oldest evicted first |
+| `AUDIT_MAX_BYTES` | `67108864` (64 MB) | — | Audit ring cap (bytes); whichever cap hits first evicts |
 
 ## `training-service`
 
 | Variable | Default | Compose | Description |
 |---|---|---|---|
 | `SHM_NAME` | `conecsa_frame_shm` | — | Camera SHM ring (capture source; must match webcam-server) |
-| `STEREO_COMBINE` | `blend` | — | Stereo combine mode — compose sets inference-service to the same value so captured images match the live detector geometry (there is no runtime sync; the inference-service code default is `none`) |
+| `STEREO_COMBINE` | `none` | `none` | Stereo combine mode — compose sets inference-service to the same value so captured images match the live detector geometry (there is no runtime sync; the live inference config wins when reachable) |
 | `STEREO_BLEND_ALPHA` | `0.5` | — | Blend factor for `STEREO_COMBINE=blend` |
 | `GATEWAY_ADDR` | `http://api-gateway:5000` | — | Gateway URL used to hand `best.pt` back through the model-upload route |
 | `TRAIN_BATCH` | `4` | — | YOLO training batch size (sized for the Orin Nano 8 GB) |

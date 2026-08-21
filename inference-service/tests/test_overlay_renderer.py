@@ -1,6 +1,5 @@
 """Unit tests for the overlay box/text placement geometry."""
 import pytest
-
 from api.views.overlay_renderer import OverlayRenderer
 
 WIDTH, HEIGHT = 100, 80

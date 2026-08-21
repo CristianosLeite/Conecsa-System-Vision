@@ -2,12 +2,11 @@
 Overlay renderer - Renders status overlays on video frames.
 """
 # noinspection PyPackageRequirements
-import numpy as np # Package is included on os build.
+from typing import Tuple
 
 # noinspection PyPackageRequirements
-import cv2 # Package is included on os build.
-
-from typing import Tuple
+import cv2  # Package is included on os build.
+import numpy as np  # Package is included on os build.
 
 
 class OverlayRenderer:

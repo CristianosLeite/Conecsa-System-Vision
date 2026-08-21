@@ -19,7 +19,7 @@ use crate::i18n::*;
 pub(super) fn CapturePanel(on_capture: Callback<()>, capturing: ReadSignal<bool>) -> impl IntoView {
     let i18n = use_i18n();
     let (reload_key, set_reload_key) = signal(0u32);
-    let preview_url = move || format!("{}?r={}", training_preview_url(), reload_key.get());
+    let preview_url = move || training_preview_url(reload_key.get());
 
     // The overlay self-fetches on mount; there is no model switching or
     // external camera-change feed on this page, so the refresh triggers are

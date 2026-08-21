@@ -28,7 +28,11 @@ pub struct ConversionStatusResponse {
     pub error: Option<String>,
     pub engine_filename: Option<String>,
     pub auto_select_hint: Option<String>,
-    pub started_at: Option<f64>, // UNIX timestamp in seconds
+    pub started_at: Option<f64>, // device wall clock — informational only
+    /// Age reported by the device's monotonic clock. Use this, never
+    /// `Date::now() - started_at`: the browser and the device do not share a
+    /// wall clock, and the hub steps the device's one whenever it drifts.
+    pub elapsed_secs: Option<f64>,
 }
 
 /// Response from GET /api/v1/model/conversion (list active jobs)
@@ -72,6 +76,7 @@ pub async fn upload_model_file(file: web_sys::File) -> Result<UploadModelRespons
         .headers()
         .set("X-Conecsa-Source", "frontend")
         .map_err(|e| format!("Failed to set X-Conecsa-Source: {:?}", e))?;
+    crate::api::wasm32::http::set_proxy_cap(&request)?;
 
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -131,7 +136,11 @@ pub async fn select_model(model_name: &str) -> Result<(), String> {
 pub fn model_download_url(model_name: &str) -> String {
     // Percent-encode: model names are upload filenames and may contain spaces.
     let encoded = String::from(js_sys::encode_uri_component(model_name));
-    format!("{}/api/v1/model/{}/download", get_api_base_url(), encoded)
+    crate::components::access::with_cap(&format!(
+        "{}/api/v1/model/{}/download",
+        get_api_base_url(),
+        encoded
+    ))
 }
 
 /// Delete a model by name

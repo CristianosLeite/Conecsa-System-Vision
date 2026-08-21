@@ -5,16 +5,15 @@
  */
 module.exports = function (RED) {
   "use strict";
-  const { inferenceBaseUrl, request } = require("../../lib/http-client");
+  const { request } = require("../../lib/http-client");
+  const { initNode } = require("../../lib/node-base");
 
   function TriggerNode(config) {
-    RED.nodes.createNode(this, config);
     const node = this;
+    initNode(RED, node, config);
 
-    node.inferenceUrl = inferenceBaseUrl(config);
     node.action = config.action || "toggle";
 
-    node.status({ fill: "grey", shape: "ring", text: "idle" });
 
     node.on("input", function (msg) {
       let action = msg.action || node.action;

@@ -37,6 +37,9 @@ pub(super) fn MainComponent(
     gpio_refresh: ReadSignal<u32>,
     on_training_request: Callback<()>,
     external_conversion: ReadSignal<Option<PendingConversion>>,
+    /// Latest conversion state from the app event stream; forwarded to
+    /// Configuration, which owns the overlay.
+    conversion_event: ReadSignal<Option<crate::api::ConversionStatusResponse>>,
     converting: ReadSignal<bool>,
     set_converting: WriteSignal<bool>,
 ) -> impl IntoView {
@@ -109,6 +112,7 @@ pub(super) fn MainComponent(
                                     model_refresh=model_refresh
                                     set_model_refresh=set_model_refresh
                                     external_conversion=external_conversion
+                                    conversion_event=conversion_event
                                     set_converting=set_converting
                                 />
                             </div>

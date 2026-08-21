@@ -1,6 +1,5 @@
 """Unit tests for DatasetRegistry lifecycle (create/list/get/delete)."""
 import pytest
-
 from service.config import Config
 from service.dataset_registry import DatasetRegistry
 from service.dataset_service import DatasetError
@@ -68,3 +67,90 @@ class TestReloadFromDisk:
         r2 = DatasetRegistry(cfg, event_service=None)
         assert len(r2.list()) == 1
         assert r2.list()[0]["name"] == "Persisted"
+
+
+class TestFreezeDeleteRace:
+    """One lock owns the frozen transition (REFACTORING.md M4): a delete can
+    never interleave between a job validating a dataset and freezing it."""
+
+    def test_a_frozen_dataset_cannot_be_deleted(self, registry):
+        meta = registry.create("D1")
+        registry.freeze(meta["dataset_id"])
+        with pytest.raises(DatasetError, match="locked"):
+            registry.delete(meta["dataset_id"])
+        # Still listed and intact.
+        assert registry.get(meta["dataset_id"]) is not None
+
+    def test_release_reopens_deletion(self, registry):
+        meta = registry.create("D1")
+        ds = registry.freeze(meta["dataset_id"])
+        registry.release(ds)
+        registry.delete(meta["dataset_id"])
+        with pytest.raises(DatasetError):
+            registry.get(meta["dataset_id"])
+
+    def test_a_deleted_dataset_cannot_be_frozen(self, registry):
+        meta = registry.create("D1")
+        registry.delete(meta["dataset_id"])
+        with pytest.raises(DatasetError, match="not found"):
+            registry.freeze(meta["dataset_id"])
+
+    def test_double_freeze_is_refused(self, registry):
+        meta = registry.create("D1")
+        registry.freeze(meta["dataset_id"])
+        with pytest.raises(DatasetError, match="locked"):
+            registry.freeze(meta["dataset_id"])
+
+    def test_concurrent_freeze_and_delete_never_both_succeed(self, registry):
+        import threading
+
+        for _ in range(20):
+            meta = registry.create("D1")
+            dataset_id = meta["dataset_id"]
+            barrier = threading.Barrier(2)
+            outcomes = {}
+
+            def freeze(dataset_id=dataset_id, barrier=barrier, outcomes=outcomes):
+                barrier.wait()
+                try:
+                    registry.freeze(dataset_id)
+                    outcomes["freeze"] = True
+                except DatasetError:
+                    outcomes["freeze"] = False
+
+            def delete(dataset_id=dataset_id, barrier=barrier, outcomes=outcomes):
+                barrier.wait()
+                try:
+                    registry.delete(dataset_id)
+                    outcomes["delete"] = True
+                except DatasetError:
+                    outcomes["delete"] = False
+
+            threads = [threading.Thread(target=freeze),
+                       threading.Thread(target=delete)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+
+            assert outcomes["freeze"] != outcomes["delete"], \
+                "exactly one of freeze/delete may win"
+            if outcomes["freeze"]:
+                # The dataset survived; its directory must still exist for
+                # the training job that claimed it.
+                ds = registry.get(dataset_id)
+                import os
+                assert os.path.isdir(ds.root)
+                registry.release(ds)
+                registry.delete(dataset_id)
+
+    def test_a_failed_rmtree_is_reported(self, registry, monkeypatch):
+        import shutil as _shutil
+        meta = registry.create("D1")
+
+        def boom(path):
+            raise OSError("file is busy")
+
+        monkeypatch.setattr(_shutil, "rmtree", boom)
+        with pytest.raises(DatasetError, match="could not be deleted"):
+            registry.delete(meta["dataset_id"])

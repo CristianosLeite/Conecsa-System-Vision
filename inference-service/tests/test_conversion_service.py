@@ -1,4 +1,7 @@
 """Unit tests for ConversionService pure helpers and job serialization."""
+import time
+
+import pytest
 from api.services.conversion_service import (
     ConversionJob,
     ConversionService,
@@ -33,6 +36,8 @@ class TestConversionJobDefaults:
         assert job.error is None
         assert job.engine_filename is None
         assert isinstance(job.started_at, float)
+        assert isinstance(job.started_monotonic, float)
+        assert job.elapsed_secs >= 0.0
 
 
 class TestToDict:
@@ -53,7 +58,27 @@ class TestToDict:
             "error",
             "engine_filename",
             "started_at",
+            "elapsed_secs",
         }
+
+
+class TestElapsedSecs:
+    def test_is_measured_from_the_monotonic_clock(self):
+        # The device has no RTC battery, so the hub steps CLOCK_REALTIME
+        # whenever it notices drift — mid-conversion included. A job's age must
+        # come from the monotonic clock, so a `started_at` that jumps (here to
+        # the epoch) cannot move it.
+        job = ConversionJob("j1", "m.pt", "/m.pt", "/m.onnx", "/m.engine")
+        job.started_monotonic = time.monotonic() - 30.0
+        job.started_at = 0.0
+
+        assert job.elapsed_secs == pytest.approx(30.0, abs=1.0)
+        assert ConversionService.to_dict(job)["elapsed_secs"] == pytest.approx(30.0, abs=1.0)
+
+    def test_never_negative(self):
+        job = ConversionJob("j1", "m.pt", "/m.pt", "/m.onnx", "/m.engine")
+        job.started_monotonic = time.monotonic() + 100.0
+        assert job.elapsed_secs == 0.0
 
 
 class TestRemoveFileSafe:

@@ -4,7 +4,6 @@ import json
 import grpc
 import pytest
 from flask import Flask
-
 from gateway import helpers
 from gateway.helpers import (
     _accepts_protobuf,
@@ -95,20 +94,39 @@ class TestGrpcError:
     @pytest.mark.parametrize(
         "code, status",
         [
+            (grpc.StatusCode.NOT_FOUND, 404),
+            (grpc.StatusCode.FAILED_PRECONDITION, 409),
+            (grpc.StatusCode.INVALID_ARGUMENT, 400),
+            (grpc.StatusCode.RESOURCE_EXHAUSTED, 413),
             (grpc.StatusCode.UNAVAILABLE, 503),
             (grpc.StatusCode.DEADLINE_EXCEEDED, 503),
-            (grpc.StatusCode.INTERNAL, 500),
-            (grpc.StatusCode.NOT_FOUND, 500),
+            (grpc.StatusCode.INTERNAL, 502),
         ],
     )
     def test_status_mapping(self, code, status):
-        resp = _grpc_error(FakeRpcError(code, details="down"))
+        resp = _grpc_error(FakeRpcError(code, details="detail"))
         assert resp.status_code == status
-        assert "down" in json.loads(resp.get_data(as_text=True))["error"]
 
-    def test_error_without_code_or_details_is_500(self):
+    def test_client_errors_relay_the_service_detail(self):
+        # These messages are service-authored and are the UI's only diagnostic.
+        resp = _grpc_error(FakeRpcError(grpc.StatusCode.NOT_FOUND,
+                                        details="model 'x' not found"))
+        body = json.loads(resp.get_data(as_text=True))
+        assert body == {"error": "model 'x' not found"}
+
+    def test_infrastructure_failures_never_leak_internals(self):
+        # A connection failure's detail embeds the backend host:port; it
+        # belongs in the log, not in the response body.
+        resp = _grpc_error(FakeRpcError(
+            grpc.StatusCode.UNAVAILABLE,
+            details="failed to connect to 172.20.0.7:50051"))
+        body = json.loads(resp.get_data(as_text=True))
+        assert "172.20" not in body["error"]
+        assert body["error"] == "Inference service unavailable"
+
+    def test_error_without_code_or_details_is_502(self):
         resp = _grpc_error(grpc.RpcError("bare"))
-        assert resp.status_code == 500
+        assert resp.status_code == 502
 
 
 class TestResponseJson:

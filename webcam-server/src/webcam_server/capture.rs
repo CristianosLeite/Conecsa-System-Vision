@@ -27,33 +27,30 @@ impl WebcamServer {
 
         let fmt_exact = CameraFormat::new(resolution, FrameFormat::MJPEG, cfg.framerate);
         let req_exact = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(fmt_exact));
-        if let Ok(mut cam) = Camera::new(CameraIndex::Index(cfg.camera_index), req_exact) {
-            if cam.open_stream().is_ok() {
+        if let Ok(mut cam) = Camera::new(CameraIndex::Index(cfg.camera_index), req_exact)
+            && cam.open_stream().is_ok() {
                 eprintln!(
                     "[webcam] Opened with Exact MJPEG {}x{} @ {}fps",
                     cfg.width, cfg.height, cfg.framerate
                 );
                 return Ok(cam);
             }
-        }
 
         let req_hfr =
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::HighestFrameRate(cfg.framerate));
-        if let Ok(mut cam) = Camera::new(CameraIndex::Index(cfg.camera_index), req_hfr) {
-            if cam.open_stream().is_ok() {
+        if let Ok(mut cam) = Camera::new(CameraIndex::Index(cfg.camera_index), req_hfr)
+            && cam.open_stream().is_ok() {
                 eprintln!("[webcam] Opened with HighestFrameRate");
                 return Ok(cam);
             }
-        }
 
         let f_yuyv = CameraFormat::new(resolution, FrameFormat::YUYV, cfg.framerate);
         let r_yuyv = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(f_yuyv));
-        if let Ok(mut cam) = Camera::new(CameraIndex::Index(cfg.camera_index), r_yuyv) {
-            if cam.open_stream().is_ok() {
+        if let Ok(mut cam) = Camera::new(CameraIndex::Index(cfg.camera_index), r_yuyv)
+            && cam.open_stream().is_ok() {
                 eprintln!("[webcam] Opened with YUYV fallback");
                 return Ok(cam);
             }
-        }
 
         let fmt_close = CameraFormat::new(resolution, FrameFormat::MJPEG, cfg.framerate);
         let req_close = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(fmt_close));
@@ -114,11 +111,6 @@ impl WebcamServer {
         let restart_flag = self.needs_restart.clone();
         let rgb_hardware_supported = self.rgb_hardware_supported.clone();
 
-        // We need a mutable reference to poll_config, so use a separate clone.
-        // The ShmProducer interior is mmap'd and uses atomics, so we cast away
-        // the Arc for the config polling (single-thread only).
-        let shm_poll = Arc::clone(&shm);
-
         // Track the last error logged by the retry loop so a persistently
         // unavailable camera doesn't spam the same message every retry cycle.
         let mut last_error: Option<String> = None;
@@ -142,7 +134,6 @@ impl WebcamServer {
                 &dev_path,
                 &cfg,
                 &shm,
-                &shm_poll,
                 &config_arc,
                 &restart_flag,
                 &rgb_hardware_supported,
@@ -188,11 +179,7 @@ impl WebcamServer {
                                 break;
                             }
                             // Poll for config changes from consumer.
-                            // SAFETY: single writer thread, poll_config uses atomics.
-                            let shm_mut = unsafe {
-                                &mut *(Arc::as_ptr(&shm_poll) as *mut ShmProducer)
-                            };
-                            if let Some(proto_cfg) = shm_mut.poll_config() {
+                            if let Some(proto_cfg) = shm.poll_config() {
                                 Self::apply_shm_config(
                                     &proto_cfg,
                                     &config_arc,
@@ -213,10 +200,7 @@ impl WebcamServer {
                                 break;
                             }
                             // Poll for config changes from consumer.
-                            let shm_mut = unsafe {
-                                &mut *(Arc::as_ptr(&shm_poll) as *mut ShmProducer)
-                            };
-                            if let Some(proto_cfg) = shm_mut.poll_config() {
+                            if let Some(proto_cfg) = shm.poll_config() {
                                 Self::apply_shm_config(
                                     &proto_cfg,
                                     &config_arc,
@@ -229,8 +213,8 @@ impl WebcamServer {
                             let current_cfg = config_arc.lock().unwrap().clone();
                             let use_software_rgb = current_cfg.has_non_neutral_rgb_levels()
                                 && !rgb_hardware_supported.load(Ordering::Relaxed);
-                            if let Ok(frame) = cam.frame() {
-                                if let Ok(img) = frame.decode_image::<RgbFormat>() {
+                            if let Ok(frame) = cam.frame()
+                                && let Ok(img) = frame.decode_image::<RgbFormat>() {
                                     let w = img.width();
                                     let h = img.height();
                                     let mut raw = img.into_raw();
@@ -244,7 +228,6 @@ impl WebcamServer {
                                     }
                                     shm.publish_frame_rgb(&raw, w, h);
                                 }
-                            }
                         }
                     }
                 }
@@ -254,7 +237,6 @@ impl WebcamServer {
                         &dev_path,
                         &cfg,
                         &shm,
-                        &shm_poll,
                         &config_arc,
                         &restart_flag,
                         &rgb_hardware_supported,
@@ -291,10 +273,7 @@ impl WebcamServer {
                                     break;
                                 }
                                 // Poll for config changes.
-                                let shm_mut = unsafe {
-                                    &mut *(Arc::as_ptr(&shm_poll) as *mut ShmProducer)
-                                };
-                                if let Some(proto_cfg) = shm_mut.poll_config() {
+                                if let Some(proto_cfg) = shm.poll_config() {
                                     Self::apply_shm_config(
                                         &proto_cfg,
                                         &config_arc,

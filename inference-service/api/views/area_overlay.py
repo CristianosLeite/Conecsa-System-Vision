@@ -7,10 +7,9 @@ dashed border matching its shape. Saved areas are intentionally invisible —
 they only affect inference, not the rendered stream.
 """
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
-
 # noinspection PyPackageRequirements
 import cv2  # Package is included on os build.
+import numpy as np  # Package is included on os build.
 
 
 def draw_areas(img, areas):

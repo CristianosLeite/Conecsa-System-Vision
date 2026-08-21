@@ -49,7 +49,12 @@ where
 {
     // ?stats=1 opts this connection into the multiplexed high-rate stats
     // channel, so the web UI needs a single SSE connection (events + stats).
-    let url = format!("{}/api/v1/events/stream?stats=1", get_api_base_url());
+    // EventSource cannot set headers, so the hub-proxy capability (when
+    // present) travels as ?cap= instead.
+    let url = crate::components::access::with_cap(&format!(
+        "{}/api/v1/events/stream?stats=1",
+        get_api_base_url()
+    ));
     let es = EventSource::new(&url).map_err(|e| format!("Failed to open EventSource: {:?}", e))?;
 
     let on_message = Closure::wrap(Box::new(move |evt: MessageEvent| {

@@ -8,10 +8,10 @@ state and no drawing here.
 from typing import Optional
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import cv2  # Package is included on os build.
 
 # noinspection PyPackageRequirements
-import cv2  # Package is included on os build.
+import numpy as np  # Package is included on os build.
 
 
 def sigmoid(x):
