@@ -158,3 +158,9 @@ class Config:
     @property
     def weights_dir(self) -> str:
         return os.path.join(self.DATA_DIR, "weights")
+
+    @property
+    def base_dir(self) -> str:
+        # Checkpoints of existing device models fetched through the gateway to
+        # fine-tune from (StartTraining.base_model).
+        return os.path.join(self.DATA_DIR, "base")

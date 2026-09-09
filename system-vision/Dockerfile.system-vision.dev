@@ -68,10 +68,22 @@ COPY proto/ ./proto/
 # Shared translation catalogs (read by build.rs via ../i18n/system-vision)
 COPY i18n/ ./i18n/
 
-# Tailwind CSS v4 standalone binary — x86_64 (linux-x64) for the dev host.
-RUN curl -fsSL -o /usr/local/bin/tailwindcss \
-    https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-x64 && \
-    chmod +x /usr/local/bin/tailwindcss
+# Tailwind CSS v4 standalone binary, pinned by version and per-architecture
+# SHA256 (scripts/tailwind.pin is the source of truth; `bump-tailwind-version`).
+ARG TAILWIND_VERSION=4.3.3
+ARG TAILWIND_SHA256_X86_64=dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a
+ARG TAILWIND_SHA256_AARCH64=55fd0b241214eff3de1e8ee4f22796662f2d2e7a49bcfca7477cfd0bac398195
+RUN set -eu; arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64) asset=tailwindcss-linux-x64; sum="$TAILWIND_SHA256_X86_64" ;; \
+        aarch64) asset=tailwindcss-linux-arm64; sum="$TAILWIND_SHA256_AARCH64" ;; \
+        *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/tailwindcss \
+        "https://github.com/tailwindlabs/tailwindcss/releases/download/v${TAILWIND_VERSION}/${asset}"; \
+    echo "$sum  /usr/local/bin/tailwindcss" | sha256sum -c -; \
+    chmod +x /usr/local/bin/tailwindcss; \
+    tailwindcss --help | head -1
 
 RUN cd system-vision && tailwindcss -i ../styles/input.css -o ./styles.css --minify
 

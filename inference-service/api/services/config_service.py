@@ -7,7 +7,18 @@ controller and the gRPC servicer stay thin adapters that delegate here.
 import logging
 from typing import Dict, Tuple
 
+from .config_validation import (
+    CAMERA_INT_BOUNDS,
+    ConfigValidationError,
+    parse_capture_device,
+    validate_confidence,
+    validate_int,
+)
+
 logger = logging.getLogger(__name__)
+
+_WEBCAM_UNREACHABLE = ("Failed to reach webcam server. Ensure it is running and "
+                       "shared memory is accessible.")
 
 
 class ConfigService:
@@ -30,29 +41,48 @@ class ConfigService:
             "confidence_threshold": c.CONFIDENCE_THRESHOLD,
         }
 
-    def update_config(self, data: Dict) -> Tuple[bool, str]:
-        """Apply a partial config patch. Returns ``(ok, message)``."""
+    def update_config(self, data: Dict) -> Tuple[bool, str, int]:
+        """Apply a partial config patch.
+
+        Returns ``(ok, message, status)`` with the same status convention as
+        ``VideoService.apply_camera_update`` (200 ok, 400 validation, 503
+        webcam-server unreachable). The whole patch is validated through the
+        shared camera bounds first, then pushed to the webcam-server, and only
+        an acknowledged patch is written to the config and persisted — the
+        stored settings never describe a state the camera did not accept.
+        """
         if not data:
-            return False, "No data provided"
+            return False, "No data provided", 400
         c = self._config
         try:
-            if "capture_device" in data:
-                c.CAPTURE_DEVICE = data["capture_device"]
-                if self._video is not None:
-                    try:
-                        idx = int(str(data["capture_device"]).replace("/dev/video", ""))
-                        self._video.apply_webcam_server_config({"camera_index": idx})
-                    except ValueError:
-                        pass
-            if "capture_framerate" in data:
-                c.CAPTURE_FRAMERATE = int(data["capture_framerate"])
-                if self._video is not None:
-                    self._video.apply_webcam_server_config({"framerate": c.CAPTURE_FRAMERATE})
-            if "confidence_threshold" in data:
-                c.CONFIDENCE_THRESHOLD = float(data["confidence_threshold"])
+            camera_index = (parse_capture_device(data["capture_device"])
+                            if "capture_device" in data else None)
+            framerate = (validate_int("capture_framerate", data["capture_framerate"],
+                                      CAMERA_INT_BOUNDS["framerate"])
+                         if "capture_framerate" in data else None)
+            confidence = (validate_confidence(data["confidence_threshold"])
+                          if "confidence_threshold" in data else None)
+        except ConfigValidationError as exc:
+            return False, str(exc), 400
+
+        webcam_patch: Dict = {}
+        if camera_index is not None:
+            webcam_patch["camera_index"] = camera_index
+        if framerate is not None:
+            webcam_patch["framerate"] = framerate
+        try:
+            if webcam_patch and self._video is not None:
+                if not self._video.apply_webcam_server_config(webcam_patch):
+                    return False, _WEBCAM_UNREACHABLE, 503
+            if camera_index is not None:
+                c.CAPTURE_DEVICE = f"/dev/video{camera_index}"
+            if framerate is not None:
+                c.CAPTURE_FRAMERATE = framerate
+            if confidence is not None:
+                c.CONFIDENCE_THRESHOLD = confidence
             if self._settings is not None:
                 self._settings.save()
-            return True, "Configuration updated"
+            return True, "Configuration updated", 200
         except Exception as ex:  # noqa: BLE001
             logger.error("Error updating config: %s", ex)
-            return False, str(ex)
+            return False, str(ex), 500

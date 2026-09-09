@@ -84,6 +84,40 @@ class TestClassColorSuffix:
         assert data["nc"] == 2
         assert data["names"] == ["cap #ff0000", "bottle"]
 
+    def test_build_split_with_auto_tile_writes_the_crops_of_both_splits(self, tmp_path):
+        # The default TRAIN_TILE=auto slices every 16:9 frame into the K=2
+        # grid the inference-service runs, for the validation split too, so
+        # the metrics describe the deployed geometry. This is the split a
+        # federated shard goes through as well.
+        cv2 = pytest.importorskip("cv2")
+        np = pytest.importorskip("numpy")
+        cfg = SimpleNamespace(runs_dir=str(tmp_path / "runs"))
+        svc = DatasetService(_DATASET_ID, str(tmp_path), config=cfg)
+        svc.add_class("cap")
+        ok, jpeg = cv2.imencode(".jpg", np.full((720, 1280, 3), 90, dtype=np.uint8))
+        assert ok
+        ids = []
+        for _ in range(3):
+            entry = svc.add_image(jpeg.tobytes())
+            # Wholly inside tile 0 (x 192..448 px); tile 1 becomes background.
+            svc.set_labels(entry.image_id, [Box(0, 0.25, 0.5, 0.2, 0.2)])
+            ids.append(entry.image_id)
+
+        result = svc.build_split("job-1", tile="auto")
+
+        assert result.geometry == "tiles:auto"
+        assert result.stats.tiles == 6 and result.stats.whole == 0
+        assert (result.train_count, result.valid_count) == (4, 2)
+        root = tmp_path / "runs" / "job-1" / "dataset"
+        for split in ("train", "valid"):
+            crops = sorted(p.name for p in (root / split / "images").iterdir())
+            assert crops, split
+            assert all(name.endswith(("_t0.jpg", "_t1.jpg")) for name in crops), crops
+            for name in crops:
+                assert (root / split / "labels" / name.replace(".jpg", ".txt")).exists()
+        written = {p.name for s in ("train", "valid") for p in (root / s / "images").iterdir()}
+        assert written == {f"{i}_t{k}.jpg" for i in ids for k in (0, 1)}
+
 
 class TestDataclasses:
     def test_box_fields(self):

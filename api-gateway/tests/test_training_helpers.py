@@ -27,7 +27,7 @@ class TestGrpcError:
             (grpc.StatusCode.FAILED_PRECONDITION, 409),
             (grpc.StatusCode.INVALID_ARGUMENT, 400),
             (grpc.StatusCode.UNAVAILABLE, 503),
-            (grpc.StatusCode.DEADLINE_EXCEEDED, 503),
+            (grpc.StatusCode.DEADLINE_EXCEEDED, 504),
             (grpc.StatusCode.INTERNAL, 502),
         ],
     )

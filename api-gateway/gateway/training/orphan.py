@@ -23,13 +23,14 @@ import grpc
 
 from ..config import settings
 from ..grpc_clients import clients, inf, trn
+from .helpers import ACTIVE_CONVERSION_STATUSES, ACTIVE_JOB_STATUSES
 
 logger = logging.getLogger(__name__)
 
 #: Device job statuses during which the watchdog must never fire.
-_ACTIVE_JOB = ("preparing", "training", "uploading")
+_ACTIVE_JOB = ACTIVE_JOB_STATUSES
 #: Conversion statuses meaning a TensorRT build may hold the GPU.
-_ACTIVE_CONVERSION = ("pending", "converting_to_onnx", "converting_to_engine")
+_ACTIVE_CONVERSION = ACTIVE_CONVERSION_STATUSES
 
 _TICK_SEC = 30.0
 

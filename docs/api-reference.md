@@ -21,7 +21,7 @@ forwarded over the hub's mTLS channel.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/v1/status` | System state, active model, thresholds, runtime, FPS |
-| `POST` | `/api/v1/start` | Start detection |
+| `POST` | `/api/v1/start` | Start detection. Answers `409` while no camera is connected, while a training job is active or while a model conversion (TensorRT build) runs — the single GPU is busy |
 | `POST` | `/api/v1/stop` | Stop detection |
 | `GET` | `/api/v1/stats` | FPS, latency, detection count, frames with detections |
 | `POST` | `/api/v1/stats/reset` | Reset the stats counters |
@@ -30,17 +30,20 @@ forwarded over the hub's mTLS channel.
 | `GET` | `/api/v1/detections/snapshot` | Latest detections snapshot (JSON); each detection carries its normalized `bbox` corners. `?include_frame=false` omits the annotated JPEG frame; `?include_raw_frame=true` adds the clean frame (`raw_frame`, no overlay — used for dataset ingest). `pending_backlog` reports how many records the offline buffer holds. Polled by the [hub](services/hub-vision.md) over mTLS |
 | `GET` | `/api/v1/detections/backlog` | One page of offline-buffered detection records, oldest first (`?limit=N`, default 25, max 100). Each record carries `id`, `captured_at` and the snapshot-format detections/frame; the envelope adds `device_now` (the device clock, so the hub can offset-correct timestamps) and `pending` |
 | `POST` | `/api/v1/detections/backlog/ack` | Delete buffered records the hub confirmed persisting — body `{"ids": [..]}`, idempotent. The hub calls this only after its own store insert committed |
-| `GET` | `/api/v1/health` | Health check |
+| `POST` | `/api/v1/flow/token` | Mint a short-lived bearer token for the embedded Node-RED editor (`{"token", "expires_in"}`), carrying the operator's role the hub vouched for; the device UI opens `/flow/?access_token=<token>` with it. `503` when no secret is configured |
+| `GET` | `/api/v1/health` | Liveness: the gateway process answers (constant body) |
+| `GET` | `/api/v1/ready` | Readiness: probes the gRPC health service of the inference-service, training-service and hardware agent; `503` `degraded` when the inference-service is not serving |
 
 ## Models
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/v1/models` | List available models (name, size, date, active) |
+| `GET` | `/api/v1/models` | List available models (name, size, date, active, `has_weights` = the model keeps the `.pt` it was converted from as a training-checkpoint sidecar) |
 | `POST` | `/api/v1/model` | Upload a model. `.pt` → async conversion (202 + `job_id`). Other formats load immediately |
 | `POST` | `/api/v1/model/select` | Select active model by name |
 | `DELETE` | `/api/v1/model/<name>` | Remove a model |
 | `GET` | `/api/v1/model/<name>/download` | Download the model file |
+| `GET` | `/api/v1/model/<name>/weights` | Download the model's training checkpoint (the `.pt` it was converted from, see `has_weights`); 404 when it keeps none. Used by the training-service to fine-tune from the model |
 | `GET` | `/api/v1/model/conversion` | List active conversion jobs |
 | `GET` | `/api/v1/model/conversion/<job_id>` | Conversion status: `pending`, `converting_to_onnx`, `converting_to_engine`, `done`, `failed` |
 
@@ -112,7 +115,7 @@ endpoint returns the full state (`{"areas": [...]}`).
 | `POST` | `/api/v1/gpio/trigger` | Enable/disable GPIO trigger mode (`{"enabled": bool}`) |
 | `POST` | `/api/v1/gpio/pin` | Drive an output pin HIGH/LOW (`{"pin": 29\|31\|33, "level": bool}`). Used by the Node-RED `gpio` node |
 | `GET` | `/api/v1/network/config` | Current wired + Wi-Fi configuration |
-| `POST` | `/api/v1/network/config` | Apply IPv4 settings (`static`/`auto`) |
+| `POST` | `/api/v1/network/config` | Apply IPv4 settings: `{"interface": "wired"\|"wifi", "method": "auto"\|"static", "address", "prefix", "gateway", "dns": [...]}`. With `static`, `address` and `prefix` (1–32) are required and `address`, `gateway` and each `dns` entry must be IPv4 addresses (`400` otherwise); a change networkd cannot apply is rolled back to the previous configuration |
 | `GET` | `/api/v1/network/wifi/scan` | List available Wi-Fi networks |
 | `POST` | `/api/v1/network/wifi/connect` | Connect to a network (`{ssid, password}`) |
 | `POST` | `/api/v1/network/wifi/forget` | Remove a saved network (`{ssid}`) |
@@ -125,7 +128,7 @@ dataset-scoped route carries the `dataset_id` explicitly.
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/api/v1/training/enter` | Enter training mode (acquire GPU handover from inference) |
-| `POST` | `/api/v1/training/exit` | Leave training mode (resume inference runtime) |
+| `POST` | `/api/v1/training/exit` | Leave training mode (resume inference runtime). Body `{"resume_detection": false}` keeps the runtime released; the resume is also skipped while a training job is active |
 | `GET` | `/api/v1/training/preview` | Capture-preview frame (current camera image) |
 | `GET` | `/api/v1/training/datasets` | List datasets (id, name, counts, cover) |
 | `POST` | `/api/v1/training/datasets` | Create a dataset |
@@ -151,8 +154,12 @@ dataset-scoped route carries the `dataset_id` explicitly.
 | `POST` | `/api/v1/training/sam/load` | Load the SAM3 segmentation worker |
 | `POST` | `/api/v1/training/sam/unload` | Unload the SAM3 worker (free GPU memory) |
 | `POST` | `/api/v1/training/sam/segment` | SAM3-assisted segmentation for a prompt |
-| `POST` | `/api/v1/training/train` | Start a training job. Federated round: `{"federated": true, "initial_weights_id": ...}` trains from a stashed checkpoint and retains the resulting `last.pt` (`model_name` optional) |
-| `GET` | `/api/v1/training/train/status` | Current job status / progress (federated jobs expose `result_weights_id` when done) |
+| `GET` | `/api/v1/training/label-model` | Model-assisted labeling status (`loaded`, `model_name`, `class_names`): an existing engine on the inference-service's private TensorRT worker |
+| `POST` | `/api/v1/training/label-model/load` | Load an existing engine (`{"model_name": "X.engine"}`, any `.engine`/`.plan` of `GET /api/v1/models`) as the labeling assistant, on the same TensorRT runtime and `TILING_MODE` preprocessing as live detection |
+| `POST` | `/api/v1/training/label-model/unload` | Unload the labeling engine (terminates its private worker) |
+| `POST` | `/api/v1/training/label-model/detect` | Run the loaded engine on a dataset image (`{"dataset_id", "image_id", "threshold"}`); returns `boxes` (normalized center/size, `class_id` = the engine's index), `scores` and the parallel `class_names` the dataset resolves them by |
+| `POST` | `/api/v1/training/train` | Start a training job. `base_model` (`"X.engine"`, a `GET /api/v1/models` entry with `has_weights`) fine-tunes from that model's training checkpoint (its last `best.pt`) instead of the stock weights. Federated round: `{"federated": true, "initial_weights_id": ...}` trains from a stashed checkpoint and retains the resulting `last.pt` (`model_name` optional); exclusive with `base_model` |
+| `GET` | `/api/v1/training/train/status` | Current job status / progress. `geometry` is the effective training geometry once the split is built (`frames`, `tiles:auto` or `tiles:<px>`, see `TRAIN_TILE`); federated jobs expose `result_weights_id` when done |
 | `POST` | `/api/v1/training/train/cancel` | Cancel the running job |
 | `POST` | `/api/v1/training/train/finish` | Finish: hand `best.pt` to the model-upload route (pt→onnx→engine) |
 | `POST` | `/api/v1/training/weights` | Stash a checkpoint (multipart `file`) for federated training; returns `{"weights_id", "size"}` |
@@ -216,5 +223,6 @@ Simplified `/api/*` aliases kept for older clients; each relays to its
 | `POST` | `/api/overlay_threshold` | `/api/v1/overlay_threshold` |
 | `GET` | `/api/models` | `/api/v1/models` (returns the bare model list) |
 | `GET` | `/api/health` | `/api/v1/health` |
+| `GET` | `/api/ready` | `/api/v1/ready` |
 | `GET` | `/api/classes` | `/api/v1/classes` |
 | `POST` | `/api/classes` | `/api/v1/classes` |

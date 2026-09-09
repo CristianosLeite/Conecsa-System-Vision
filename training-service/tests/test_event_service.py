@@ -42,3 +42,14 @@ class TestWaitForChanges:
         assert changed is False
         assert events == []
         assert version == 0
+
+    def test_a_subscriber_behind_the_replay_buffer_gets_a_snapshot(self):
+        svc = EventService(history_limit=2)
+        for name in ("a", "b", "c", "d"):
+            svc.publish(name)
+        version, events, changed = svc.wait_for_changes(last_version=1, timeout=0.1)
+        assert (version, changed) == (4, True)
+        # One snapshot instead of an empty list with changed=True, which used
+        # to leave the gateway relay believing nothing was missed.
+        assert [e["type"] for e in events] == ["state_snapshot"]
+        assert events[0]["keys"] == ["training", "dataset", "sam"]

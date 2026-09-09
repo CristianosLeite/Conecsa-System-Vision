@@ -413,3 +413,83 @@ class TestCompleteValidatesTheChain:
         resp = self._complete(client, leaf, ca_cert)
         assert resp.status_code == 200
         assert enroll.is_enrolled() is True
+
+
+class TestCompleteInstallIsAtomic:
+    """Two tokenless completions cannot corrupt or mismatch the certificate
+    pair, and a failed install leaves neither litter nor a half-replaced pair."""
+
+    _chain = TestCompleteValidatesTheChain
+
+    @pytest.fixture
+    def app(self, cert_dir, monkeypatch):
+        from flask import Flask
+        monkeypatch.setenv("DEVICE_ID", "cam-42")
+        monkeypatch.delenv("DEVICE_PAIR_TOKEN", raising=False)
+        monkeypatch.setattr(enroll.clock, "step_clock",
+                            lambda raw, source, force=False: enroll.clock.StepOutcome.APPLIED)
+        app = Flask(__name__)
+        app.register_blueprint(enroll.enroll_bp)
+        return app
+
+    def _pair(self):
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        ca_key, ca_cert, ca_name = self._chain._make_ca()
+        leaf = self._chain._make_leaf(ca_key, ca_name, eku=[ExtendedKeyUsageOID.SERVER_AUTH])
+        return self._chain._pem(leaf), self._chain._pem(ca_cert)
+
+    @staticmethod
+    def _installed():
+        with open(enroll.CERT_PATH, "rb") as fh:
+            cert = x509.load_pem_x509_certificate(fh.read())
+        with open(enroll.CA_PATH, "rb") as fh:
+            ca = x509.load_pem_x509_certificate(fh.read())
+        return cert, ca
+
+    def test_concurrent_completions_install_exactly_one_matching_pair(self, app, cert_dir):
+        import threading
+        pairs = [self._pair(), self._pair()]  # two hubs, two CAs
+        barrier = threading.Barrier(2)
+        statuses = []
+
+        def post(pair):
+            client = app.test_client()
+            barrier.wait()
+            resp = client.post("/enroll/complete", json={
+                "device_cert": pair[0], "ca_cert": pair[1],
+                "hub_time": "2026-08-03T10:00:00.000Z"})
+            statuses.append(resp.status_code)
+
+        threads = [threading.Thread(target=post, args=(pair,)) for pair in pairs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        assert sorted(statuses) == [200, 403]
+        cert, ca = self._installed()
+        cert.verify_directly_issued_by(ca)  # never one hub's leaf with the other's CA
+        assert [f for f in os.listdir(cert_dir) if ".tmp" in f] == []
+
+    def test_a_failed_rename_leaves_the_previous_pair_and_no_litter(self, app, cert_dir,
+                                                                    monkeypatch):
+        client = app.test_client()
+        first = self._pair()
+        assert client.post("/enroll/complete", json={
+            "device_cert": first[0], "ca_cert": first[1],
+            "hub_time": "2026-08-03T10:00:00.000Z"}).status_code == 200
+        before = self._installed()
+
+        def boom(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "replace", boom)
+        with pytest.raises(OSError):
+            enroll._install_certs(*self._pair())
+        assert self._installed()[0] == before[0]
+        assert self._installed()[1] == before[1]
+        assert [f for f in os.listdir(cert_dir) if ".tmp" in f] == []
+
+    def test_installed_files_are_world_readable_for_nginx(self, app, cert_dir):
+        enroll._install_certs(*self._pair())
+        for path in (enroll.CERT_PATH, enroll.CA_PATH):
+            assert os.stat(path).st_mode & 0o777 == 0o644

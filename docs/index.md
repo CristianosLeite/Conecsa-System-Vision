@@ -20,6 +20,10 @@ their detection records over mutual TLS. It is not part of the compose stack —
 it runs on a hub machine, or **on a Jetson itself as a boot-time Wayland kiosk**
 on the DisplayPort — see [Fleet hub](services/hub-vision.md).
 
+Operators (rather than integrators) should start with the **user manual** — an
+interactive, trilingual guide that embeds a simulation of the hub and device
+screens: <https://conecsa.com.br/conecsa-object-detection/2026-5/manual/>.
+
 ## Documentation map
 
 | Page | Contents |

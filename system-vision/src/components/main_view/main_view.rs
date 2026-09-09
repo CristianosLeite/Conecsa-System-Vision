@@ -1,5 +1,8 @@
 //! Leptos UI components for the web frontend.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -14,10 +17,23 @@ use crate::models::PerformanceStats;
 
 use super::main_component::MainComponent;
 
+/// The dashboard view a host page can inject through Leptos context before
+/// mounting [`MainView`].
+///
+/// The only consumer is the interactive user manual (`manual/sim-device`),
+/// which drives the device UI from its prose and scrolls the prose when the
+/// reader navigates inside the simulated device. Absent from context,
+/// `MainView` owns a private signal and behaves exactly as before.
+#[derive(Clone, Copy)]
+pub struct HostView(pub RwSignal<ViewMode>);
+
 /// The `MainView` view component.
 #[component]
 pub fn MainView() -> impl IntoView {
     let i18n = use_i18n();
+    let host_view = use_context::<HostView>()
+        .map(|h| h.0)
+        .unwrap_or_else(|| RwSignal::new(ViewMode::LiveStream));
     let (status, set_status) = signal(None::<SystemStatus>);
     let (stats, set_stats) = signal(None::<PerformanceStats>);
     let (models, set_models) = signal(Vec::new());
@@ -27,7 +43,7 @@ pub fn MainView() -> impl IntoView {
     let (success_msg, set_success_msg) = signal(String::new());
     let (api_health, set_api_health) = signal(false);
     let (info_view, set_info_view) = signal(None::<String>);
-    let (current_view, set_current_view) = signal(ViewMode::LiveStream);
+    let (current_view, set_current_view) = (host_view.read_only(), host_view.write_only());
     // Bumped after a model select so model-scoped state (detection areas,
     // thresholds) is refreshed across sibling panels.
     let (model_refresh, set_model_refresh) = signal(0u32);
@@ -46,25 +62,65 @@ pub fn MainView() -> impl IntoView {
     // Set by Configuration while any model conversion runs; disables Start
     // Detection so the GPU stays free for the TensorRT engine build.
     let (converting, set_converting) = signal(false);
+    // True while a training job owns the GPU (`training_progress` events plus
+    // a status read on mount/snapshot/recovery, since a page reload, the hub
+    // iframe or a federated round can land on the dashboard mid-run);
+    // disables Start Detection like `converting`. The gateway refuses the
+    // start (409) in the same states — this is the explanation, not the gate.
+    let (training_active, set_training_active) = signal(false);
+    let refresh_training_active = move || {
+        spawn_local(async move {
+            if let Ok(job) = api::get_training_status().await {
+                let _ = set_training_active.try_set(job.is_active());
+            }
+        });
+    };
 
     // Load initial data
     spawn_local(async move {
         refresh_status(set_status, set_error_msg).await;
         check_api_health(set_api_health).await;
     });
+    refresh_training_active();
+
+    // Both background resources below end with the component: the poll loop
+    // checks `alive` each tick and the SSE handle is dropped (closing the
+    // EventSource) from `on_cleanup`. MainView is the single child of App
+    // today, so this only matters once a router or conditional render can
+    // remount it — but a remount that kept the old poller and stream would
+    // double the gateway load and the refreshes, silently.
+    let alive = Arc::new(AtomicBool::new(true));
+    // Owner-scoped slot (the handle is not Send, so a local StoredValue).
+    let sse_handle = StoredValue::new_local(None::<api::AppEventStreamHandle>);
+    {
+        let alive = alive.clone();
+        on_cleanup(move || {
+            alive.store(false, Ordering::Relaxed);
+            sse_handle.update_value(|slot| {
+                slot.take();
+            });
+        });
+    }
 
     // Auto-refresh status and API health every 5 seconds. The high-frequency
     // PerformanceStats fields are pushed in real time via SSE below, so this
     // loop only covers the slow-changing fields (active model, is_running,
     // thresholds).
-    let refresh_interval = move || {
-        spawn_local(async move {
-            loop {
-                TimeoutFuture::new(5000).await;
-                refresh_status(set_status, set_error_msg).await;
-                check_api_health(set_api_health).await;
-            }
-        });
+    let refresh_interval = {
+        let alive = alive.clone();
+        move || {
+            let alive = alive.clone();
+            spawn_local(async move {
+                loop {
+                    TimeoutFuture::new(5000).await;
+                    if !alive.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    refresh_status(set_status, set_error_msg).await;
+                    check_api_health(set_api_health).await;
+                }
+            });
+        }
     };
 
     Effect::new(move |_| {
@@ -76,9 +132,8 @@ pub fn MainView() -> impl IntoView {
     // change backend state (web UI, Node-RED, curl), so this reconciles the
     // mounted UI with authoritative backend reads whenever a relevant event
     // arrives; stats (`type: "stats"`) feed the dedicated `stats` signal in
-    // real time. The handle is leaked on purpose — the connection should live
-    // for the entire MainView lifetime, and the browser closes the EventSource
-    // automatically on page unload.
+    // real time. The handle lives in `sse_handle` for the MainView lifetime
+    // and is dropped — closing the connection — on cleanup.
     Effect::new(move |_| {
         match api::subscribe_app_events(move |event| {
             // High-rate stats channel multiplexed onto the same stream.
@@ -106,6 +161,20 @@ pub fn MainView() -> impl IntoView {
                         leptos::logging::error!("Failed to parse conversion event: {}", e)
                     }
                 }
+            }
+
+            // Training-job progress: only the active/idle flip matters here
+            // (the training page reads the full job itself). Matched on the
+            // type: the `training` key is shared with other training-service
+            // events whose payload is not a job.
+            if event.event_type == "training_progress" {
+                match serde_json::from_value::<api::TrainingJobStatus>(event.data.clone()) {
+                    Ok(job) => set_training_active.set(job.is_active()),
+                    Err(e) => leptos::logging::error!("Failed to parse training event: {}", e),
+                }
+            }
+            if is_snapshot {
+                refresh_training_active();
             }
 
             if is_snapshot || has_key("models") {
@@ -137,7 +206,7 @@ pub fn MainView() -> impl IntoView {
                 set_gpio_refresh.update(|n| *n = n.wrapping_add(1));
             }
         }) {
-            Ok(handle) => std::mem::forget(handle),
+            Ok(handle) => sse_handle.set_value(Some(handle)),
             Err(e) => leptos::logging::error!("Failed to open app event SSE: {}", e),
         }
     });
@@ -175,6 +244,7 @@ pub fn MainView() -> impl IntoView {
         let healthy = api_health.get();
         if was_healthy == Some(false) && healthy {
             set_model_refresh.update(|n| *n = n.wrapping_add(1));
+            refresh_training_active();
         }
         healthy
     });
@@ -239,6 +309,7 @@ pub fn MainView() -> impl IntoView {
                     conversion_event=conversion_event
                     converting=converting
                     set_converting=set_converting
+                    training_active=training_active
                 />
             }.into_any()
         }}

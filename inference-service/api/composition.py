@@ -22,6 +22,7 @@ from api.services import (
     EventService,
     FrameCodecService,
     GPIOService,
+    LabelingService,
     ModelService,
     ModelSettingsService,
     ProcessingPipelineService,
@@ -192,6 +193,10 @@ class Application:
         self.event_service = EventService()
         self.conversion_service = ConversionService(self.event_service)
         self.model_service.attach_conversion_service(self.conversion_service)
+        # Model-assisted labeling for the training page: an existing engine on
+        # a private TensorRT worker, same preprocessing/decode as live detection.
+        self.labeling_service = LabelingService(
+            self.config, self.model_service, event_service=self.event_service)
         # Fan stats out over the unified app-event SSE stream so web clients
         # need a single connection (events + stats) instead of two.
         self.stats_service.set_update_listener(self.event_service.publish_stats)

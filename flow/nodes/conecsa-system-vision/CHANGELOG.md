@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2 — 2026-09-03
+
+- The bundled `NOTICE` now names the scoped package
+  `@conecsa/node-red-contrib-conecsa-system-vision`. No functional changes.
+
 ## 1.1.1 — 2026-08-22
 
 - Published under the `@conecsa` npm scope:

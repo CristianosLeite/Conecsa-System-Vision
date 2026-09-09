@@ -8,15 +8,15 @@ camera resolution changes.
 State is persisted to a JSON file in the shared models volume so that areas
 survive container restarts.
 """
-import errno
 import json
 import logging
 import os
-import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from threading import Lock
 from typing import Dict, List, Optional
+
+from conecsa_common.atomic import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +117,8 @@ class DetectionAreaService:
             logger.error("Failed to load detection areas from %s: %s", self._storage_path, exc)
 
     def _persist(self) -> None:
-        """Atomically write the current areas to the JSON storage file."""
-        tmp_path = None
+        """Durably write the current areas to the JSON storage file."""
         try:
-            storage_dir = os.path.dirname(self._storage_path)
-            os.makedirs(storage_dir, exist_ok=True)
             # Don't persist the is_editing flag — it's transient UI state.
             # Persist editing areas too so they survive a restart; they'll
             # come back as saved, which matches the "save on commit" model.
@@ -136,31 +133,9 @@ class DetectionAreaService:
                 }
                 for a in self._areas
             ]
-            with tempfile.NamedTemporaryFile(
-                "w",
-                dir=storage_dir,
-                prefix=".detection_areas_",
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as f:
-                json.dump({"areas": serializable}, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-                tmp_path = f.name
-            os.replace(tmp_path, self._storage_path)
-        except Exception as exc:
+            atomic_write_json(self._storage_path, {"areas": serializable}, indent=2)
+        except Exception as exc:  # noqa: BLE001 - best-effort persist
             logger.error("Failed to persist detection areas: %s", exc)
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError as cleanup_exc:
-                    if cleanup_exc.errno != errno.ENOENT:
-                        logger.warning(
-                            "Failed to remove temporary detection area file %s: %s",
-                            tmp_path,
-                            cleanup_exc,
-                        )
 
     # ------------------------------------------------------------------
     # Public API

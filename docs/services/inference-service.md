@@ -2,8 +2,11 @@
 
 No HTTP server — the only surface is a **gRPC control server** on `:50061`
 (`proto/inference.proto`: `DetectionControl`, `ModelControl`,
-`ManagementControl`), started alongside the decode∥infer∥encode pipeline at
-module load; the process then blocks. The pipeline reads the camera SHM ring,
+`ManagementControl`, plus the standard gRPC health service), started
+alongside the decode∥infer∥encode pipeline at module load; the process then
+blocks on it. A port that cannot be bound ends the process with a non-zero
+exit so the container restart policy retries, rather than leaving a live
+process with no listener. The pipeline reads the camera SHM ring,
 runs inference and publishes the overlaid JPEGs to the processed SHM ring. The
 active runtime is TensorRT:
 
@@ -122,6 +125,20 @@ deleted **only after the hub acks having persisted them**. A persisted
 and buffering is offline-only by design — zero eMMC writes while the hub is
 polling. Database errors never take the pipeline down: the buffer recreates a
 corrupt file and disables itself as a last resort.
+
+## Model-assisted labeling
+
+The training page can pre-label a dataset image with any engine already on
+the device. `ModelControl.LoadLabelModel` pins that engine to a private
+TensorRT worker (`TENSORRT_LABEL_WORKER_PORT`, past the live model's context
+lanes) and `LabelDetect` runs one encoded image through the very same
+`ModelManager` preprocessing (`TILING_MODE` grid, letterbox) and `YOLODetector`
+decode/merge as live detection, over the engine's own classes sidecar, so the
+suggestions are exactly what the device would detect. `ReleaseRuntime` (the
+training GPU handover) and `UnloadLabelModel` (training page exit, detection
+start) terminate the worker. The `.pt` a conversion started from is kept as a
+`weights/<stem>.pt` sidecar (`ModelInfo.has_weights`, `DownloadModelWeights`)
+so the training-service can fine-tune from the model.
 
 ## Reference
 

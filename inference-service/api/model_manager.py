@@ -202,8 +202,12 @@ def letterbox_to_square(image_bgr, size: int, pad_value: int = DEFAULT_LETTERBOX
 class ModelManager:
     """Class to manage loading and execution of TensorRT models."""
 
-    def __init__(self, config):
+    def __init__(self, config, port: Optional[int] = None):
+        """``port`` pins the manager to one dedicated worker context (no
+        multi-context pool) — the labeling service uses it so an engine can
+        run beside, never instead of, the live model on the base ports."""
         self.config = config
+        self._port = port
         self.interpreter: Optional[Interpreter] = None
         self.input_details: List[Dict[str, Any]] = []
         self.output_details: List[Dict[str, Any]] = []
@@ -224,12 +228,16 @@ class ModelManager:
         self.runtime_api = self.runtime.name
 
         self._setup_interpreter()
-        self._build_context_pool()
+        if self._port is None:
+            self._build_context_pool()
     
     def _setup_interpreter(self):
         """Create the TensorRT interpreter."""
         logger.info("Creating TensorRT interpreter...")
-        interpreter = self.runtime.create_interpreter(self.config.MODEL_PATH)
+        if self._port is not None:
+            interpreter = self.runtime.create_interpreter_on_port(self.config.MODEL_PATH, self._port)
+        else:
+            interpreter = self.runtime.create_interpreter(self.config.MODEL_PATH)
         self.interpreter = interpreter
         logger.info(f"Model loaded successfully: {self.config.MODEL_PATH} with TensorRT")
         self._finalize_interpreter_setup(interpreter)

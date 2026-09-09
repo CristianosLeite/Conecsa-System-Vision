@@ -2,21 +2,43 @@
 
 use leptos::prelude::*;
 
+use crate::api::model_stem;
 use crate::i18n::*;
 
-/// Training launch form: mandatory model name + configurable epochs/batch/patience.
-/// `on_start` receives `(model_name, epochs, batch, patience)`.
+/// Training launch form: mandatory model name, the base model (stock weights
+/// or an existing device model's last `best.pt`) and epochs/batch/patience.
+/// `on_start` receives `(model_name, epochs, batch, patience, base_model)`
+/// where `base_model` is a model-list name or empty for the stock weights.
 #[component]
 pub(super) fn TrainModal(
     visible: ReadSignal<bool>,
     set_visible: WriteSignal<bool>,
-    on_start: Callback<(String, u32, u32, u32)>,
+    /// Device models with a training checkpoint (fine-tune candidates).
+    base_models: ReadSignal<Vec<String>>,
+    /// Base preselected when the modal opens (the labeling model, if any).
+    default_base_model: Signal<String>,
+    on_start: Callback<(String, u32, u32, u32, String)>,
 ) -> impl IntoView {
     let i18n = use_i18n();
     let (name, set_name) = signal(String::new());
     let (epochs, set_epochs) = signal(50u32);
     let (batch, set_batch) = signal(4u32);
     let (patience, set_patience) = signal(50u32);
+    let (base_model, set_base_model) = signal(String::new());
+
+    // On open, preselect the labeling model as the base and, when the name is
+    // still blank, seed it with that model's name — retraining under the same
+    // name replaces the model's .pt/.engine, so "improve X" is two clicks.
+    Effect::new(move |_| {
+        if !visible.get() {
+            return;
+        }
+        let base = default_base_model.get_untracked();
+        set_base_model.set(base.clone());
+        if !base.is_empty() && name.get_untracked().trim().is_empty() {
+            set_name.set(model_stem(&base).to_string());
+        }
+    });
 
     let name_valid = move || {
         let n = name.get();
@@ -36,6 +58,7 @@ pub(super) fn TrainModal(
             epochs.get_untracked().clamp(1, 1000),
             batch.get_untracked().clamp(1, 32),
             patience.get_untracked().clamp(0, 1000),
+            base_model.get_untracked(),
         ));
     };
 
@@ -60,6 +83,36 @@ pub(super) fn TrainModal(
                         />
                         <p class="ui-help-xs mb-4">
                             {t_string!(i18n, training::model_name_help)}
+                        </p>
+
+                        <label class="ui-label-xs block mb-1">
+                            {t_string!(i18n, training::base_model)}
+                        </label>
+                        <select
+                            class="ui-select mb-1 w-full cursor-pointer"
+                            on:change=move |ev| {
+                                let v = event_target_value(&ev);
+                                if !v.is_empty() && name.get_untracked().trim().is_empty() {
+                                    set_name.set(model_stem(&v).to_string());
+                                }
+                                set_base_model.set(v);
+                            }
+                        >
+                            <option value="" prop:selected=move || base_model.get().is_empty()>
+                                {t_string!(i18n, training::base_model_default)}
+                            </option>
+                            {move || base_models.get().into_iter().map(|m| {
+                                let this = m.clone();
+                                let is_selected = move || base_model.get() == this;
+                                view! {
+                                    <option value=m.clone() prop:selected=is_selected>
+                                        {model_stem(&m).to_string()}
+                                    </option>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </select>
+                        <p class="ui-help-xs mb-4">
+                            {t_string!(i18n, training::base_model_help)}
                         </p>
 
                         <div class="grid grid-cols-2 gap-3 mb-3">

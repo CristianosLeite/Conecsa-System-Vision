@@ -62,6 +62,9 @@ ROUTE_POLICIES = {
     ("POST", "/api/v1/counter/reset"): ROLE_USER,
     ("POST", "/api/v1/trigger/enable"): ROLE_USER,
     ("POST", "/api/v1/trigger/disable"): ROLE_USER,
+    # The editor token carries the caller's own role; Node-RED grants a plain
+    # user read-only access, so minting is not itself a privileged action.
+    ("POST", "/api/v1/flow/token"): ROLE_USER,
 
     # ── hub housekeeping (normally issued without an operator) ───────────────
     ("POST", "/api/v1/detections/backlog/ack"): ROLE_ADMIN,
@@ -104,6 +107,9 @@ ROUTE_POLICIES = {
     ("POST", "/api/v1/training/sam/load"): ROLE_ADMIN,
     ("POST", "/api/v1/training/sam/unload"): ROLE_ADMIN,
     ("POST", "/api/v1/training/sam/segment"): ROLE_ADMIN,
+    ("POST", "/api/v1/training/label-model/load"): ROLE_ADMIN,
+    ("POST", "/api/v1/training/label-model/unload"): ROLE_ADMIN,
+    ("POST", "/api/v1/training/label-model/detect"): ROLE_ADMIN,
 
     # ── datasets / images / weights ──────────────────────────────────────────
     ("POST", "/api/v1/training/datasets"): ROLE_ADMIN,

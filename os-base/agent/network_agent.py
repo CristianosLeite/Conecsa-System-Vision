@@ -6,12 +6,15 @@ Wi-Fi association is done through wpa_supplicant (via wpa_cli on the control
 socket). Replaces the old nmcli/nsenter approach, which does not work on the
 Yocto target (no NetworkManager/nmcli; nsenter into the host mount ns fails).
 """
+import ipaddress
 import logging
 import os
 import time
 
+from conecsa_common.atomic import atomic_write_bytes
+
 from . import networkd
-from .wpa import CTRL_DIR, WpaCli, WpaError
+from .wpa import CTRL_DIR, WpaCli, WpaError, encode_psk, encode_ssid
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +125,12 @@ class NetworkAgent:
         Writes a managed `10-conecsa-*.network` file then reloads/reconfigures
         the link via networkd. ``method`` is ``auto`` (DHCP) or ``static``
         (``address`` + ``prefix`` required). Returns ``{success, message}``.
+
+        Never strands the device: every static value is parsed as an IPv4
+        address / prefix length before anything is written (so a value can
+        neither be malformed nor smuggle an extra networkd directive), the
+        file is replaced atomically, and if networkd refuses to reload or to
+        reconfigure the link the previous file is put back and applied again.
         """
         if method not in ("auto", "static"):
             return {"success": False, "message": f"Invalid method: {method}"}
@@ -131,17 +140,89 @@ class NetworkAgent:
             return {"success": False, "message": f"No {kind} interface found"}
         ifindex, name = link
 
-        if method == "static" and (not address or not prefix):
-            return {"success": False, "message": "Address and prefix are required for static IP"}
+        dns = [server for server in (dns or []) if server]
+        if method == "static":
+            if not address or not prefix:
+                return {"success": False,
+                        "message": "Address and prefix are required for static IP"}
+            error = self._validate_static(address, prefix, gateway, dns)
+            if error:
+                return {"success": False, "message": error}
 
+        path = self._managed_path(name)
+        previous = self._read_managed_file(path)
         try:
-            self._write_network_file(name, method, address, prefix, gateway, dns or [])
+            self._write_network_file(name, method, address, prefix, gateway, dns)
             networkd.reload()
             networkd.reconfigure_link(ifindex)
         except Exception as exc:  # noqa: BLE001
-            logger.error("set_ip_config failed: %s", exc)
-            return {"success": False, "message": str(exc)}
+            logger.error("set_ip_config failed: %s; restoring the previous file", exc)
+            self._restore_managed_file(path, previous, ifindex)
+            return {"success": False,
+                    "message": f"{exc}; the previous network configuration was restored"}
         return {"success": True, "message": "Network configuration applied successfully"}
+
+    @staticmethod
+    def _validate_static(address: str, prefix: int, gateway: str,
+                         dns: list[str]) -> str | None:
+        """Return an error message for an invalid static config, else ``None``.
+
+        Parsing through ``ipaddress`` is the whole defence: a value that is
+        not exactly one dotted-quad (including anything carrying a newline or
+        another control character) cannot become an ``Address=``/``Gateway=``/
+        ``DNS=`` line.
+        """
+        try:
+            ipaddress.IPv4Address(address)
+        except (ValueError, TypeError):
+            return f"Invalid IPv4 address: {address!r}"
+        try:
+            prefix_len = int(prefix)
+        except (ValueError, TypeError):
+            return f"Invalid prefix length: {prefix!r}"
+        if not 1 <= prefix_len <= 32:
+            return "Prefix length must be between 1 and 32"
+        if gateway:
+            try:
+                ipaddress.IPv4Address(gateway)
+            except (ValueError, TypeError):
+                return f"Invalid gateway address: {gateway!r}"
+        for server in dns:
+            try:
+                ipaddress.IPv4Address(server)
+            except (ValueError, TypeError):
+                return f"Invalid DNS server address: {server!r}"
+        return None
+
+    @staticmethod
+    def _read_managed_file(path: str) -> bytes | None:
+        """Current bytes of the managed file, or ``None`` when it does not exist."""
+        try:
+            with open(path, "rb") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def _restore_managed_file(path: str, previous: bytes | None, ifindex: int) -> None:
+        """Put the pre-change file back (or remove ours) and re-apply it.
+
+        Best-effort: a failure here is logged, since the caller is already
+        reporting the original error.
+        """
+        try:
+            if previous is None:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+            else:
+                atomic_write_bytes(path, previous, mode=0o644)
+            networkd.reload()
+            networkd.reconfigure_link(ifindex)
+            logger.info("Previous network configuration restored")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Could not restore the previous network configuration: %s", exc)
 
     def _managed_path(self, iface: str) -> str:
         """Path of the managed `.network` file for *iface*."""
@@ -171,8 +252,10 @@ class NetworkAgent:
             lines.append("DHCP=yes")
             lines.append("LinkLocalAddressing=ipv4")
         content = "\n".join(lines) + "\n"
-        with open(self._managed_path(iface), "w", encoding="utf-8") as fh:
-            fh.write(content)
+        # Atomic replace: networkd never sees a truncated or half-written file,
+        # and a power cut cannot leave one behind. Readable by networkd (0644),
+        # like the stock files next to it.
+        atomic_write_bytes(self._managed_path(iface), content.encode("utf-8"), mode=0o644)
 
     # ── Wi-Fi ────────────────────────────────────────────────────────────────────
 
@@ -222,19 +305,27 @@ class NetworkAgent:
         iface = self._wifi_iface()
         if not iface:
             return {"success": False, "state": "INACTIVE", "message": "No wireless interface"}
-        if not ssid:
-            return {"success": False, "state": "INACTIVE", "message": "SSID is required"}
+        # Serialize the credentials before touching the supplicant: a value
+        # the control grammar cannot carry safely is refused here (hex SSID,
+        # quoted/escaped passphrase or bare 64-hex PSK — see wpa.encode_*).
+        try:
+            ssid_arg = encode_ssid(ssid)
+            psk_arg = encode_psk(password) if password else None
+        except WpaError as exc:
+            return {"success": False, "state": "INACTIVE", "message": str(exc)}
 
         wpa = WpaCli(iface)
         added = False
         try:
+            # LIST_NETWORKS prints the SSID as text, so a printable SSID set in
+            # hex form still matches here on the next connect.
             net_id = wpa.find_network_id(ssid)
             if net_id is None:
                 net_id = wpa.add_network()
                 added = True
-            wpa.set_network(net_id, "ssid", f'"{ssid}"')
-            if password:
-                wpa.set_network(net_id, "psk", f'"{password}"')
+            wpa.set_network(net_id, "ssid", ssid_arg)
+            if psk_arg is not None:
+                wpa.set_network(net_id, "psk", psk_arg)
             elif added:
                 # Brand-new network with no password → treat as open.
                 wpa.set_network(net_id, "key_mgmt", "NONE")

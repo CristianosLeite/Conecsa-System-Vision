@@ -21,6 +21,7 @@ mod gallery;
 mod label_canvas;
 mod label_editor;
 mod label_geometry;
+mod label_model_panel;
 mod label_sam_panel;
 mod label_shapes;
 mod label_toolbar;

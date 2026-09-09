@@ -6,7 +6,7 @@ import logging
 import grpc
 from flask import Response, request
 
-from .. import hardware
+from .. import hardware, readiness
 from ..grpc_clients import clients, inf
 from ..helpers import (
     DEVICE_VERSION,
@@ -49,8 +49,24 @@ def update_config():
 
 @api_bp.route('/api/v1/health', methods=['GET'])
 def health_check():
-    """GET /api/v1/health — gateway relay."""
+    """GET /api/v1/health — liveness: the gateway process answers HTTP."""
     return _json({"status": "healthy", "version": DEVICE_VERSION})
+
+
+@api_bp.route('/api/v1/ready', methods=['GET'])
+def readiness_check():
+    """GET /api/v1/ready — readiness: the backends the gateway relays to.
+
+    Probes each peer's gRPC health service. 503 ``degraded`` when the
+    inference-service is not serving (every control route depends on it);
+    the training-service and the hardware agent are reported but do not gate,
+    since the x86 development stack has no hardware agent.
+    """
+    backends = readiness.backends_status()
+    ready = backends["inference"] == readiness.SERVING
+    return _json({"status": "ready" if ready else "degraded",
+                  "backends": backends, "version": DEVICE_VERSION},
+                 200 if ready else 503)
 
 
 @api_bp.route('/api/system/status', methods=['GET'])

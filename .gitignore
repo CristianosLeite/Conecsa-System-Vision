@@ -69,3 +69,10 @@ training-service/service/proto/*_pb2_grpc.py
 # Local-dev stand-in for the production /data volumes (created by scripts/dev.sh)
 /.dev-data/
 
+
+# Interactive user manual (manual/): Trunk outputs and the generated Tailwind
+# CSS copied into each simulator crate (scripts/build-manual.sh)
+manual/dist/
+manual/*/dist/
+manual/*/styles.css
+manual/sim-flow/out/

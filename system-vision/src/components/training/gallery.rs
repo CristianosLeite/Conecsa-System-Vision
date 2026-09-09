@@ -5,20 +5,26 @@ use leptos::prelude::*;
 use crate::api::{training_image_url, TrainingImageInfo};
 use crate::i18n::*;
 
+use super::dataset_editor::{GalleryActions, ImagesState};
+
 /// Dataset thumbnail grid: select an image for labeling, delete captures,
 /// pick the dataset's cover image.
 #[component]
 pub(super) fn Gallery(
     dataset_id: String,
-    images: ReadSignal<Vec<TrainingImageInfo>>,
-    selected: ReadSignal<Option<String>>,
-    cover_image_id: ReadSignal<String>,
-    on_select: Callback<String>,
-    on_delete: Callback<String>,
-    on_set_cover: Callback<String>,
-    on_replicate: Callback<String>,
+    images: ImagesState,
+    actions: GalleryActions,
 ) -> impl IntoView {
     let i18n = use_i18n();
+    let selected = images.selected;
+    let cover_image_id = images.cover_image_id;
+    let images = images.list;
+    let GalleryActions {
+        on_select,
+        on_delete,
+        on_set_cover,
+        on_replicate,
+    } = actions;
     let dataset_id = StoredValue::new(dataset_id);
     view! {
         <div class="ui-card ui-card-pad-sm flex flex-col gap-3">

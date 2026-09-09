@@ -14,6 +14,8 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
+from .config_validation import ConfigValidationError, validate_camera_patch
+
 logger = logging.getLogger(__name__)
 
 # Health values published by the webcam-server into the SHM header (see
@@ -212,60 +214,22 @@ class VideoService:
 
         Returns ``(ok, message, status)`` where status mirrors the HTTP codes
         (200 ok, 400 validation, 503 webcam unreachable) so both the REST
-        controller and the gRPC servicer can stay thin.
+        controller and the gRPC servicer can stay thin. Validation lives in
+        ``config_validation`` and is shared with the generic config patch. The
+        webcam-server push comes before the stereo settings, so a body the
+        camera cannot accept changes nothing on either side.
         """
-        def _bool(v):
-            """Coerce a bool/str/number request value to a bool."""
-            if isinstance(v, bool):
-                return v
-            if isinstance(v, str):
-                return v.strip().lower() in {"1", "true", "yes", "on"}
-            return bool(v)
-
-        patch: Dict = {}
         try:
-            for key in ("camera_index", "width", "height"):
-                if key in data:
-                    patch[key] = int(data[key])
-            if "framerate" in data:
-                fr = int(data["framerate"])
-                if not 1 <= fr <= 240:
-                    return False, "framerate must be between 1 and 240", 400
-                patch["framerate"] = fr
-            if "auto_exposure" in data:
-                patch["auto_exposure"] = _bool(data["auto_exposure"])
-            for key, lo, hi in (("exposure_time", 1, 300000), ("rgb_red", 0, 255),
-                                ("rgb_green", 0, 255), ("rgb_blue", 0, 255),
-                                ("gamma", 1, 500), ("gain", 0, 480)):
-                if key in data:
-                    val = int(data[key])
-                    if not lo <= val <= hi:
-                        return False, f"{key} must be between {lo} and {hi}", 400
-                    patch[key] = val
-
-            stereo_enabled = _bool(data["stereo_enabled"]) if "stereo_enabled" in data else None
-            stereo_alpha = stereo_offset = stereo_offset_y = None
-            if "stereo_blend_alpha" in data:
-                stereo_alpha = float(data["stereo_blend_alpha"])
-                if not 0.0 <= stereo_alpha <= 1.0:
-                    return False, "stereo_blend_alpha must be between 0.0 and 1.0", 400
-            if "stereo_offset" in data:
-                stereo_offset = float(data["stereo_offset"])
-                if not -0.5 <= stereo_offset <= 0.5:
-                    return False, "stereo_offset must be between -0.5 and 0.5", 400
-            if "stereo_offset_y" in data:
-                stereo_offset_y = float(data["stereo_offset_y"])
-                if not -0.5 <= stereo_offset_y <= 0.5:
-                    return False, "stereo_offset_y must be between -0.5 and 0.5", 400
-            has_stereo = any(v is not None for v in
-                             (stereo_enabled, stereo_alpha, stereo_offset, stereo_offset_y))
-            if not patch and not has_stereo:
-                return False, "No recognised camera fields provided", 400
-
-            if has_stereo:
-                self.set_stereo_config(stereo_enabled, stereo_alpha, stereo_offset, stereo_offset_y)
-            if patch and not self.apply_webcam_server_config(patch):
-                return False, "Failed to reach webcam server. Ensure it is running and shared memory is accessible.", 503
+            patch = validate_camera_patch(data)
+        except ConfigValidationError as exc:
+            return False, str(exc), 400
+        try:
+            if patch.webcam and not self.apply_webcam_server_config(patch.webcam):
+                return (False, "Failed to reach webcam server. Ensure it is running and "
+                               "shared memory is accessible.", 503)
+            if patch.has_stereo:
+                self.set_stereo_config(patch.stereo_enabled, patch.stereo_alpha,
+                                       patch.stereo_offset, patch.stereo_offset_y)
             return True, "Camera configuration applied", 200
         except Exception as ex:  # noqa: BLE001
             return False, str(ex), 500

@@ -16,8 +16,8 @@ Modules:
   dependency-free.
 """
 
-from .atomic import atomic_write_bytes, atomic_write_json, read_json
+from .atomic import atomic_write_bytes, atomic_write_json, fsync_dir, read_json
 from .bounded_sqlite import BoundedSqliteQueue
 
-__all__ = ["BoundedSqliteQueue", "atomic_write_bytes", "atomic_write_json",
+__all__ = ["BoundedSqliteQueue", "atomic_write_bytes", "atomic_write_json", "fsync_dir",
            "read_json"]

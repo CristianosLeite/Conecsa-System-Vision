@@ -45,7 +45,7 @@ RUN if [ "$SAM3_INSTALL" = "1" ]; then \
         pip install --no-cache-dir --root-user-action=ignore \
             "setuptools<81" huggingface_hub safetensors pyyaml tqdm "ftfy==6.1.1" regex \
             "iopath>=0.1.10" typing_extensions einops pycocotools && \
-        pip install --no-cache-dir --root-user-action=ignore --no-deps "timm>=1.0.17" && \
+        pip install --no-cache-dir --root-user-action=ignore --no-deps "timm==1.0.29" && \
         pip install --no-cache-dir --root-user-action=ignore --no-deps /opt/sam3; \
     else \
         echo "SAM3 install explicitly skipped (SAM3_INSTALL=0); AI labeling will report unavailable"; \

@@ -24,12 +24,14 @@ logger = logging.getLogger(__name__)
 
 # Routes that mutate state but say nothing about a user's intent: hub
 # housekeeping, liveness pings, and one per-click interaction that would drown
-# the trail (SAM segmentation fires on every click while labelling).
+# the trail (SAM segmentation and model detection fire on every click while
+# labelling).
 SKIP_RULES = frozenset({
     "/api/v1/detections/backlog/ack",
     "/api/v1/audit/backlog/ack",
     "/api/v1/training/heartbeat",
     "/api/v1/training/sam/segment",
+    "/api/v1/training/label-model/detect",
 })
 
 # (method, registered rule) → stable event key. The *rule* is used, not the
@@ -43,6 +45,7 @@ ROUTE_EVENTS = {
     ("POST", "/api/stop"): "detection.stop",
     ("POST", "/api/v1/threshold"): "detection.threshold_changed",
     ("POST", "/api/threshold"): "detection.threshold_changed",
+    ("POST", "/api/v1/flow/token"): "flow.editor_opened",
     ("POST", "/api/v1/overlay_threshold"): "detection.overlay_threshold_changed",
     ("POST", "/api/overlay_threshold"): "detection.overlay_threshold_changed",
     ("POST", "/api/v1/stats/reset"): "detection.stats_reset",
@@ -87,6 +90,8 @@ ROUTE_EVENTS = {
     ("POST", "/api/v1/training/train/finish"): "training.finished",
     ("POST", "/api/v1/training/sam/load"): "sam.loaded",
     ("POST", "/api/v1/training/sam/unload"): "sam.unloaded",
+    ("POST", "/api/v1/training/label-model/load"): "label_model.loaded",
+    ("POST", "/api/v1/training/label-model/unload"): "label_model.unloaded",
 
     # ── datasets ─────────────────────────────────────────────────────────────
     ("POST", "/api/v1/training/datasets"): "dataset.created",
@@ -136,6 +141,7 @@ _BODY_DETAIL_FIELDS = {
     "/api/v1/training/datasets": "name",
     "/api/v1/training/datasets/<dataset_id>": "name",
     "/api/v1/training/train": "model_name",
+    "/api/v1/training/label-model/load": "model_name",
 }
 
 # rule → the URL parameter worth recording, when the body has nothing better.

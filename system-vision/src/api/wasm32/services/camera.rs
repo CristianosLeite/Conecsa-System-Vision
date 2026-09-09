@@ -3,7 +3,7 @@
 use crate::api::wasm32::http::fetch_api;
 
 /// A `SupportedFormat` struct.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SupportedFormat {
     pub format: String,
     pub width: u32,
@@ -13,7 +13,7 @@ pub struct SupportedFormat {
 }
 
 /// A `CameraDevice` struct.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CameraDevice {
     pub path: String,
     pub index: i32,
@@ -23,7 +23,7 @@ pub struct CameraDevice {
 }
 
 /// A `CameraDevicesResponse` struct.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CameraDevicesResponse {
     pub devices: Vec<CameraDevice>,
     pub current_device: String,

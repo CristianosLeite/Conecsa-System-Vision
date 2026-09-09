@@ -3,7 +3,7 @@
 use crate::api::wasm32::http::fetch_api;
 
 /// Resposta do endpoint GET /api/v1/gpio/status
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GpioStatus {
     pub gpio_available: bool,
     pub gpio_enabled: bool,
@@ -13,7 +13,7 @@ pub struct GpioStatus {
 }
 
 /// Resposta do endpoint POST /api/v1/gpio/trigger
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GpioTriggerResponse {
     pub success: bool,
     pub gpio_enabled: bool,

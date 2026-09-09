@@ -13,7 +13,7 @@ COPY nodes/conecsa-system-vision /usr/src/node-red/node_modules/@conecsa/node-re
 # config into the /data volume on every start (so settings.js changes apply on
 # redeploy) while preserving user flows/credentials.
 USER root
-COPY settings.js theme-auto.css conecsa_white_logo.png flows.json /usr/src/node-red/conecsa-seed/
+COPY settings.js admin-token.js theme-auto.css conecsa_white_logo.png flows.json /usr/src/node-red/conecsa-seed/
 COPY conecsa-entrypoint.sh /usr/src/node-red/conecsa-entrypoint.sh
 RUN chmod +x /usr/src/node-red/conecsa-entrypoint.sh \
     && chown -R node-red:node-red /data /usr/src/node-red/conecsa-seed

@@ -142,6 +142,7 @@ services:
       # pairing by default; set DEVICE_PAIR_TOKEN only to require a shared secret.
       - CONECSA_CERT_DIR=/etc/conecsa/certs
       - DEVICE_PAIR_TOKEN=${DEVICE_PAIR_TOKEN:-}
+      - NODE_RED_CREDENTIAL_SECRET=${NODE_RED_CREDENTIAL_SECRET:-conecsa-dev-only-secret}
       # In-container mDNS works on the dev bridge for local hub testing.
       - HUB_MDNS_ENABLED=${HUB_MDNS_ENABLED:-1}
       # Audit trail, drained by the hub over mTLS (same as production).
@@ -162,7 +163,7 @@ services:
     networks:
       - conecsa-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/api/v1/health')"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/api/v1/health', timeout=5).raise_for_status()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -249,6 +250,9 @@ services:
       - INFERENCE_URL=${INFERENCE_URL:-http://api-gateway:5000}
       # Dev-only fixed secret (production requires a real per-deployment one).
       - NODE_RED_CREDENTIAL_SECRET=${NODE_RED_CREDENTIAL_SECRET:-conecsa-dev-only-secret}
+      # The editor is published on the host below, so keep it usable without
+      # a token in development. Set FLOW_ADMIN_AUTH=1 to exercise the tokens.
+      - FLOW_ADMIN_AUTH=${FLOW_ADMIN_AUTH:-0}
     ports:
       # Dev convenience: publishes the (unauthenticated) editor on the host.
       - "${FLOW_PORT:-1880}:1880"

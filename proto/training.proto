@@ -204,6 +204,13 @@ message TrainRequest {
                                     // instead of the baked-in base weights
   bool federated = 7;               // federated round: stash last.pt as
                                     // result_weights_id and skip the model upload
+  string base_model = 8;            // fine-tune from an existing device model: a
+                                    // ModelControl.ListModels name (e.g. "X.engine")
+                                    // with has_weights — its checkpoint sidecar (the
+                                    // last best.pt it was built from) is fetched
+                                    // through the gateway. Exclusive with
+                                    // initial_weights_id; empty → the baked-in base
+                                    // weights
 }
 
 message TrainingJob {
@@ -222,6 +229,11 @@ message TrainingJob {
   string result_weights_id = 13;    // federated job, status "done": the stashed
                                     // last.pt, ready for DownloadWeights
   bool federated = 14;              // job runs as a federated round
+  string base_model = 15;           // the TrainRequest.base_model the job started from
+  string geometry = 16;             // effective training geometry once the split is
+                                    // built: "frames" | "tiles:auto" | "tiles:<px>" (the
+                                    // ModelUploadMeta.train_geometry vocabulary); empty
+                                    // while preparing
 }
 
 // ── Federated training (hub-orchestrated FedAvg) ─────────────────────────────

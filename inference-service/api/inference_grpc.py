@@ -11,12 +11,13 @@ import json
 import logging
 import os
 import sys
-import threading
 import time
 import uuid
 from concurrent import futures
+from typing import Optional
 
 import grpc
+from conecsa_common.atomic import fsync_dir
 
 from .model_paths import validate_model_filename
 
@@ -257,6 +258,7 @@ class ModelControlServicer(pb_grpc.ModelControlServicer):
                 name=m.name, path=getattr(m, "path", ""), size=int(getattr(m, "size", 0) or 0),
                 modified=float(getattr(m, "modified", 0.0) or 0.0),
                 is_active=bool(getattr(m, "is_active", False)),
+                has_weights=bool(getattr(m, "has_weights", False)),
             ))
         return pb.ModelList(models=out)
 
@@ -360,6 +362,64 @@ class ModelControlServicer(pb_grpc.ModelControlServicer):
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(f"Model '{request.name}' not found")
             return
+        yield from self._stream_file(path, request.name, context)
+
+    def DownloadModelWeights(self, request, context):
+        """RPC (server stream): the model's training-checkpoint sidecar."""
+        path = self._models.weights_file_path(request.name)
+        if not path:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(f"Model '{request.name}' has no training checkpoint")
+            return
+        yield from self._stream_file(path, request.name, context)
+
+    # ── model-assisted labeling ───────────────────────────────────────────────
+
+    def GetLabelModelStatus(self, request, context):
+        """RPC: state of the labeling engine on the private worker."""
+        s = self._app.labeling_service.status()
+        return pb.LabelModelStatus(
+            loaded=bool(s["loaded"]), model_name=s["model_name"],
+            class_names=list(s["class_names"]), message=s["message"],
+        )
+
+    def LoadLabelModel(self, request, context):
+        """RPC: load a listed engine as the labeling assistant."""
+        try:
+            self._app.labeling_service.load(request.name)
+            return pb.Result(success=True, message=f"Model '{request.name}' loaded for labeling")
+        except Exception as exc:  # noqa: BLE001
+            return pb.Result(success=False, message=str(exc))
+
+    def UnloadLabelModel(self, request, context):
+        """RPC: drop the labeling engine and its worker."""
+        try:
+            self._app.labeling_service.unload()
+            return pb.Result(success=True, message="Labeling model unloaded")
+        except Exception as exc:  # noqa: BLE001
+            return pb.Result(success=False, message=str(exc))
+
+    def LabelDetect(self, request, context):
+        """RPC: detections of the labeling engine on one encoded image."""
+        try:
+            detections = self._app.labeling_service.detect(
+                bytes(request.jpeg), float(request.threshold))
+            return pb.LabelDetectResult(
+                success=True,
+                detections=[
+                    pb.LabelDetection(
+                        class_id=int(d["class_id"]), class_name=d["class_name"],
+                        score=d["score"], x1=d["x1"], y1=d["y1"], x2=d["x2"], y2=d["y2"],
+                    )
+                    for d in detections
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001
+            return pb.LabelDetectResult(success=False, message=str(exc))
+
+    @staticmethod
+    def _stream_file(path: str, name: str, context):
+        """Yield a file as ~1 MiB ``ModelFileChunk`` messages."""
         try:
             with open(path, "rb") as f:
                 while True:
@@ -369,8 +429,35 @@ class ModelControlServicer(pb_grpc.ModelControlServicer):
                     yield pb.ModelFileChunk(chunk=chunk)
         except OSError as exc:
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Failed to read model '{request.name}': {exc}")
+            context.set_details(f"Failed to read model '{name}': {exc}")
             return
+
+def _parse_json_or_abort(raw: str, context) -> dict:
+    """Decode a ``ConfigJson`` body; a malformed one is INVALID_ARGUMENT."""
+    data: object = None
+    try:
+        data = json.loads(raw or "{}")
+    except ValueError as exc:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Invalid JSON: {exc}")
+    if not isinstance(data, dict):
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Body must be a JSON object")
+        raise AssertionError("abort() returns")  # pragma: no cover - abort raises
+    return data
+
+
+def _abort_for_status(context, status: int, message: str) -> None:
+    """Map a service ``(ok, message, status)`` failure to a gRPC status.
+
+    400 → INVALID_ARGUMENT (the gateway answers 400), 503 → UNAVAILABLE (503),
+    anything else → INTERNAL (502). The status used to be computed and then
+    discarded at this boundary, leaving every failure a 400.
+    """
+    code = {
+        400: grpc.StatusCode.INVALID_ARGUMENT,
+        503: grpc.StatusCode.UNAVAILABLE,
+    }.get(status, grpc.StatusCode.INTERNAL)
+    context.abort(code, message)
+
 
 class ManagementControlServicer(pb_grpc.ManagementControlServicer):
     """Classes + detection-areas: per-model state consumed by the live detector,
@@ -408,13 +495,16 @@ class ManagementControlServicer(pb_grpc.ManagementControlServicer):
         return pb.ConfigJson(json=json.dumps(self._app.config_service.get_config()))
 
     def UpdateConfig(self, request, context):
-        """RPC: apply a configuration update from a JSON body."""
-        try:
-            data = json.loads(request.json or "{}")
-        except ValueError as exc:
-            return pb.Result(success=False, message=f"Invalid JSON: {exc}")
-        ok, message = self._app.config_service.update_config(data)
-        return pb.Result(success=ok, message=message)
+        """RPC: apply a configuration update from a JSON body.
+
+        Failures are gRPC statuses (INVALID_ARGUMENT / UNAVAILABLE / INTERNAL)
+        so the gateway's shared error mapper answers 400 / 503 / 502.
+        """
+        data = _parse_json_or_abort(request.json, context)
+        ok, message, status = self._app.config_service.update_config(data)
+        if not ok:
+            _abort_for_status(context, status, message)
+        return pb.Result(success=True, message=message)
 
     # ── camera (thin: VideoService owns the logic) ───────────────────────────
     def GetCamera(self, request, context):
@@ -423,19 +513,17 @@ class ManagementControlServicer(pb_grpc.ManagementControlServicer):
 
     def UpdateCamera(self, request, context):
         """RPC: apply a camera update (via SHM) and persist it on success."""
-        try:
-            data = json.loads(request.json or "{}")
-        except ValueError as exc:
-            return pb.Result(success=False, message=f"Invalid JSON: {exc}")
-        ok, message, _status = self._app.video_service.apply_camera_update(data)
-        if ok:
-            ms = getattr(self._app, "model_settings_service", None)
-            if ms is not None:
-                try:
-                    ms.save()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("persist camera config failed: %s", exc)
-        return pb.Result(success=ok, message=message)
+        data = _parse_json_or_abort(request.json, context)
+        ok, message, status = self._app.video_service.apply_camera_update(data)
+        if not ok:
+            _abort_for_status(context, status, message)
+        ms = getattr(self._app, "model_settings_service", None)
+        if ms is not None:
+            try:
+                ms.save()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("persist camera config failed: %s", exc)
+        return pb.Result(success=True, message=message)
 
     # System metrics moved to the os hardware agent (HardwareService.GetSystemStatus);
     # the gateway calls it there now.
@@ -505,6 +593,9 @@ class ManagementControlServicer(pb_grpc.ManagementControlServicer):
                     message="A model conversion is in progress; try again when it finishes",
                 )
             self._app.detection_service.stop()
+            # The labeling engine goes with the runtime: reset its state so a
+            # stale "loaded" never survives the worker teardown below.
+            self._app.labeling_service.unload()
             from api.runtime_management.worker_client import release_all_workers
             release_all_workers()
             self._app.event_service.publish(
@@ -539,8 +630,9 @@ class _StagedFile:
         self._staged_path = staged_path
 
     def save(self, path: str) -> None:
-        """Atomically move the staged upload to *path*."""
+        """Atomically move the staged upload to *path* (durable: dir fsync)."""
         os.replace(self._staged_path, path)
+        fsync_dir(os.path.dirname(path))
 
 
 def _conversion_pb(job) -> "pb.ConversionJob":
@@ -581,28 +673,56 @@ def _event_pb(ev: dict) -> "pb.Event":
     )
 
 
-def serve_grpc(application) -> None:
-    """Start the DetectionControl gRPC server in a daemon thread (non-blocking)."""
-    def _run() -> None:
-        """Thread body: build, register, start the server and block on it."""
-        # Explicit receive cap: upload chunks are ~1 MiB, so 8 MiB is ample
-        # headroom while still bounding what one message can buffer.
-        server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=16),
-            options=[("grpc.max_receive_message_length", 8 * 1024 * 1024)],
-        )
-        pb_grpc.add_DetectionControlServicer_to_server(
-            DetectionControlServicer(application), server
-        )
-        pb_grpc.add_ModelControlServicer_to_server(
-            ModelControlServicer(application), server
-        )
-        pb_grpc.add_ManagementControlServicer_to_server(
-            ManagementControlServicer(application), server
-        )
-        server.add_insecure_port(LISTEN_ADDR)
-        server.start()
-        logger.info("Inference DetectionControl gRPC server listening on %s", LISTEN_ADDR)
-        server.wait_for_termination()
+def _bind_or_raise(server: grpc.Server, addr: str, what: str) -> None:
+    """``add_insecure_port`` with one failure mode: a RuntimeError naming the port.
 
-    threading.Thread(target=_run, daemon=True, name="inference-grpc").start()
+    grpcio used to return 0 on a bind failure and newer releases raise
+    instead; either way the daemon-thread start of old swallowed it.
+    """
+    try:
+        bound = server.add_insecure_port(addr)
+    except RuntimeError as exc:
+        raise RuntimeError(f"could not bind the {what} to {addr}: {exc}") from exc
+    if bound == 0:
+        raise RuntimeError(f"could not bind the {what} to {addr}")
+
+
+def serve_grpc(application, listen_addr: Optional[str] = None) -> grpc.Server:
+    """Bind and start the DetectionControl gRPC server; return it.
+
+    Runs on the calling thread so a bind failure is a plain exception the
+    entry point can turn into a non-zero exit — the server used to start in
+    a daemon thread that ignored ``add_insecure_port`` returning 0, leaving
+    a live process with no listener that nothing restarted. The standard
+    gRPC health service is registered and reports SERVING once the port is
+    open (the gateway's readiness probe checks it). ``grpc.so_reuseport`` is
+    off so a second instance cannot silently share the port.
+    """
+    addr = listen_addr or LISTEN_ADDR
+    from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+
+    # Explicit receive cap: upload chunks are ~1 MiB, so 8 MiB is ample
+    # headroom while still bounding what one message can buffer.
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=16),
+        options=[
+            ("grpc.max_receive_message_length", 8 * 1024 * 1024),
+            ("grpc.so_reuseport", 0),
+        ],
+    )
+    pb_grpc.add_DetectionControlServicer_to_server(
+        DetectionControlServicer(application), server
+    )
+    pb_grpc.add_ModelControlServicer_to_server(
+        ModelControlServicer(application), server
+    )
+    pb_grpc.add_ManagementControlServicer_to_server(
+        ManagementControlServicer(application), server
+    )
+    health_servicer = health.HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    _bind_or_raise(server, addr, "inference gRPC server")
+    server.start()
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    logger.info("Inference DetectionControl gRPC server listening on %s", addr)
+    return server

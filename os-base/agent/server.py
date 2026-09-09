@@ -190,12 +190,25 @@ def serve() -> None:
     # GpioAgent initialises the GPIO hardware and starts the shared-memory poll
     # loop before the server accepts calls.
     gpio = GpioAgent()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
+                         options=[("grpc.so_reuseport", 0)])
     pb_grpc.add_HardwareServiceServicer_to_server(HardwareServicer(gpio), server)
-    server.add_insecure_port(LISTEN_ADDR)
-    server.start()
-    logger.info("Hardware agent gRPC server listening on %s", LISTEN_ADDR)
+    health_servicer = health.HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
     try:
+        # A bind failure must not leave a live process with no listener: raise
+        # so `python3 -m agent` exits non-zero and the restart policy retries.
+        try:
+            bound = server.add_insecure_port(LISTEN_ADDR)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"could not bind the hardware agent to {LISTEN_ADDR}: {exc}") from exc
+        if bound == 0:
+            raise RuntimeError(f"could not bind the hardware agent to {LISTEN_ADDR}")
+        server.start()
+        health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+        logger.info("Hardware agent gRPC server listening on %s", LISTEN_ADDR)
         server.wait_for_termination()
     finally:
         gpio.cleanup()

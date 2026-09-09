@@ -128,13 +128,42 @@ async fn fetch_api<T: for<'de> Deserialize<'de>>(
 /// api-gateway. Using a relative base means requests inherit the serving origin,
 /// so the UI works at `:80`, behind `:443` mTLS, and through `127.0.0.1:<proxy>`.
 pub fn get_api_base_url() -> String {
-    String::new()
+    // Same-origin absolute paths in production. A host page may set
+    // `window.__conecsa_base_url` (e.g. ".") before the app mounts to make
+    // every URL the UI builds — API, streams, the Node-RED editor — relative
+    // to a prefix; the interactive user manual uses it to keep its simulated
+    // device inside its own directory. Absent or invalid: unchanged behaviour.
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w, &wasm_bindgen::JsValue::from_str("__conecsa_base_url")).ok())
+        .and_then(|v| v.as_string())
+        .map(|v| sanitize_base_prefix(&v))
+        .unwrap_or_default()
+}
+
+/// Only a same-origin path prefix is accepted: a scheme (`https://…`) or a
+/// protocol-relative `//host` would send API calls — with the proxy headers —
+/// to another origin, so those fall back to the default (empty). Trailing
+/// slashes are dropped because every caller appends `/api/…` itself.
+fn sanitize_base_prefix(value: &str) -> String {
+    let value = value.trim();
+    if value.starts_with("//") || value.contains("://") || value.contains(':') {
+        return String::new();
+    }
+    value.trim_end_matches('/').to_string()
 }
 
 /// Node-RED editor URL — proxied under `/flow` on the same origin (Node-RED is
-/// configured with `httpAdminRoot=/flow`).
-pub fn get_node_red_url() -> String {
-    "/flow/".to_string()
+/// configured with `httpAdminRoot=/flow`). With an editor token (minted by
+/// `POST /api/v1/flow/token`) it is passed as `?access_token=`, which the
+/// editor stores and sends as a bearer on its admin calls.
+pub fn get_node_red_url(token: Option<&str>) -> String {
+    let base = get_api_base_url();
+    match token {
+        Some(token) if !token.is_empty() => {
+            format!("{base}/flow/?access_token={}", js_sys::encode_uri_component(token))
+        }
+        _ => format!("{base}/flow/"),
+    }
 }
 
 /// Format size.

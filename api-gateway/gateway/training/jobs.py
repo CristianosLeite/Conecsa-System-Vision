@@ -46,6 +46,7 @@ def training_start():
             patience=int(body.get("patience") or 0),
             initial_weights_id=(body.get("initial_weights_id") or "").strip(),
             federated=federated,
+            base_model=str(body.get("base_model") or "").strip(),
         ))
     except grpc.RpcError as exc:
         return _grpc_error(exc)

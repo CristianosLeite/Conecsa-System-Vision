@@ -183,6 +183,25 @@ def _build_engine_from_onnx(onnx_path: str, engine_path: str) -> None:
     logger.info(f"TensorRT engine saved: {engine_path}")
 
 
+def _keep_weights_sidecar(pt_path: str, engine_path: str) -> None:
+    """Move the source .pt into the model's weights sidecar slot (best-effort).
+
+    A failure only costs the fine-tune/labeling option for this model, never
+    the conversion — the .pt is removed either way so it cannot linger as a
+    phantom list_models entry.
+    """
+    from api.services.model_service import ModelService
+
+    dest = ModelService.weights_file_for_model(engine_path)
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.replace(pt_path, dest)
+        logger.info(f"Kept training checkpoint as {dest}")
+    except OSError as exc:
+        logger.warning(f"Could not keep {pt_path} as {dest}: {exc}")
+        _remove_file_safe(pt_path)
+
+
 def _remove_file_safe(path: str) -> None:
     """Remove a file, logging a warning on failure instead of raising."""
     try:
@@ -405,7 +424,7 @@ class ConversionService:
                     )
                 self._set_status(job_id, ConversionStatus.CONVERTING_TO_ONNX,
                                  progress=40, message="ONNX export complete. Building TensorRT engine…")
-                tmp_files = [job.pt_path, job.onnx_path]
+                tmp_files = [job.onnx_path]
                 engine_progress = 45
             else:
                 tmp_files = [job.onnx_path]
@@ -427,7 +446,12 @@ class ConversionService:
                     ModelService.settings_file_for_model(job.engine_path), imgsz,
                     job.train_geometry)
 
-            # ── Cleanup intermediate files ─────────────────────────────
+            # ── Keep the checkpoint, drop the intermediates ────────────
+            # The .pt becomes the model's weights sidecar (fine-tune base /
+            # labeling assistant for the training-service); it must not stay
+            # beside the engine, where list_models would show it as a model.
+            if imgsz is not None and job.pt_path:
+                _keep_weights_sidecar(job.pt_path, job.engine_path)
             for path in tmp_files:
                 _remove_file_safe(path)
 

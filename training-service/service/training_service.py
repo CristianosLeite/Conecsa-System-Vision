@@ -12,6 +12,10 @@ Federated rounds (hub-orchestrated FedAvg) reuse the same job machinery but
 start from a stashed checkpoint (``initial_weights_id``) and, instead of
 uploading, stash the resulting last.pt back into the weights store
 (``result_weights_id``) for the hub to collect and average.
+
+A fine-tune starts from an existing device model instead (``base_model``, a
+model-list name whose weights sidecar is the last best.pt it was built from):
+the checkpoint is fetched through the gateway right before the split is built.
 """
 import json
 import logging
@@ -31,6 +35,7 @@ import requests
 from .config import Config
 from .dataset_registry import DatasetRegistry
 from .dataset_service import DatasetError, DatasetService, validate_model_name
+from .model_fetch import fetch_weights, list_models_with_weights, validate_model_ref
 from .train_overrides import OverrideError, parse_overrides
 
 logger = logging.getLogger(__name__)
@@ -63,6 +68,8 @@ class TrainingJob:
     # "tiles:<px>"), declared on the model upload so the inference-service
     # can warn when TILING_MODE disagrees with it.
     geometry: str = ""
+    # Existing device model (model-list name) the run fine-tunes from, if any.
+    base_model: str = ""
 
 
 class TrainingService:
@@ -108,7 +115,8 @@ class TrainingService:
 
     def start(self, dataset_id: str, model_name: str,
               epochs: int = 0, batch: int = 0, patience: int = 0,
-              initial_weights_id: str = "", federated: bool = False) -> TrainingJob:
+              initial_weights_id: str = "", federated: bool = False,
+              base_model: str = "") -> TrainingJob:
         """Start."""
         if federated:
             # No model upload happens, so the name is only a display label.
@@ -131,10 +139,25 @@ class TrainingService:
         # Resolve the starting checkpoint up front so an unknown id fails the
         # RPC instead of the job.
         weights_path = self._config.BASE_WEIGHTS
+        base_model = (base_model or "").strip()
+        if base_model and initial_weights_id:
+            raise DatasetError("base_model and initial_weights_id are mutually exclusive")
         if initial_weights_id:
             if self._weights is None:
                 raise DatasetError("Weights store is not available")
             weights_path = self._weights.path(initial_weights_id)
+        if base_model:
+            # Existence is checked here against the device model list; the
+            # download itself happens in the job (it is the first thing _run
+            # does), so the RPC stays fast.
+            base_model = validate_model_ref(base_model)
+            try:
+                available = list_models_with_weights(self._config.GATEWAY_ADDR)
+            except requests.RequestException as exc:
+                raise DatasetError(f"Could not list the device models: {exc}") from exc
+            if base_model not in available:
+                raise DatasetError(
+                    f"Model '{base_model}' has no training checkpoint on the device")
 
         with self._lock:
             if self._job.status not in ("idle", *_TERMINAL):
@@ -154,18 +177,21 @@ class TrainingService:
                 message="Preparing dataset split…",
                 model_name=model_name, total_epochs=epochs,
                 started_at=time.time(), dataset_id=dataset_id,
-                patience=patience, federated=federated,
+                patience=patience, federated=federated, base_model=base_model,
             )
             self._cancel_requested = False
             self._early_stop_requested = False
             self._job_dataset = dataset
 
-        # SAM and training never share the GPU (8GB budget).
+        # SAM and training never share the GPU (8GB budget). The TensorRT
+        # labeling engine lives in the inference-service, whose runtime the
+        # gateway releases before every run.
         if self._sam is not None:
             self._sam.unload()
 
         threading.Thread(
             target=self._run, args=(job_id, epochs, batch, patience, weights_path),
+            kwargs={"base_model": base_model},
             daemon=True, name=f"training-{job_id[:8]}",
         ).start()
         self._publish()
@@ -234,17 +260,24 @@ class TrainingService:
                     "dataset_id": job.dataset_id,
                     "federated": job.federated,
                     "result_weights_id": job.result_weights_id,
+                    "base_model": job.base_model,
                 },
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not publish training event: %s", exc)
 
     def _run(self, job_id: str, epochs: int, batch: int, patience: int,
-             weights_path: str) -> None:
+             weights_path: str, base_model: str = "") -> None:
         """Run."""
         dataset = self._job_dataset
         assert dataset is not None
         try:
+            if base_model:
+                # The device model's last best.pt, through the gateway (this
+                # service has no access to the inference-side model volume).
+                self._set(message=f"Fetching base weights from {base_model}…")
+                weights_path = fetch_weights(self._config.GATEWAY_ADDR, base_model,
+                                             self._config.base_dir)
             self._set(message="Slicing the dataset into training tiles…")
             split = dataset.build_split(
                 job_id,

@@ -19,6 +19,8 @@ pub fn ControlPanel(
     set_success_msg: WriteSignal<String>,
     /// True while a model conversion is running (disables Start Detection).
     converting: ReadSignal<bool>,
+    /// True while a training job is running (disables Start Detection).
+    training_active: ReadSignal<bool>,
 ) -> impl IntoView {
     let i18n = use_i18n();
 
@@ -64,6 +66,7 @@ pub fn ControlPanel(
             <DetectionToggleButton
                 status=status
                 converting=converting
+                training_active=training_active
                 on_start=start_detection
                 on_stop=stop_detection
             />

@@ -14,6 +14,7 @@ import os
 import sys
 
 import grpc
+from grpc_health.v1 import health_pb2_grpc
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ import training_pb2 as trn_pb  # noqa: E402
 import training_pb2_grpc as trn_grpc  # noqa: E402
 
 from .config import settings  # noqa: E402
+from .rpc_deadlines import with_deadlines  # noqa: E402
 
 
 class Clients:
@@ -38,7 +40,9 @@ class Clients:
     ``grpc.insecure_channel`` connects lazily (no I/O until the first RPC), so
     building the channels at construction time is cheap and lets every peer come
     up in any order — the first call simply blocks/retries until the server is
-    reachable.
+    reachable. Every channel is wrapped by ``rpc_deadlines.with_deadlines`` so
+    a call without an explicit ``timeout=`` still cannot park a waitress
+    thread forever on a peer that stops answering.
     """
 
     def __init__(self) -> None:
@@ -46,17 +50,21 @@ class Clients:
         # records, each with a base64 JPEG frame ≈ 180KB, is ~4.5MB) and left
         # the offline-buffer drain failing forever. The link is local (docker
         # network), so a generous cap is safe.
-        inf_channel = grpc.insecure_channel(
+        inf_channel = with_deadlines(grpc.insecure_channel(
             settings.INFERENCE_GRPC_ADDR,
             options=[("grpc.max_receive_message_length", 64 * 1024 * 1024)],
-        )
+        ))
         self.detection = inf_grpc.DetectionControlStub(inf_channel)
         self.model = inf_grpc.ModelControlStub(inf_channel)
         self.management = inf_grpc.ManagementControlStub(inf_channel)
-        hw_channel = grpc.insecure_channel(settings.HARDWARE_AGENT_ADDR)
+        hw_channel = with_deadlines(grpc.insecure_channel(settings.HARDWARE_AGENT_ADDR))
         self.hardware = hw_grpc.HardwareServiceStub(hw_channel)
-        trn_channel = grpc.insecure_channel(settings.TRAINING_GRPC_ADDR)
+        trn_channel = with_deadlines(grpc.insecure_channel(settings.TRAINING_GRPC_ADDR))
         self.training = trn_grpc.TrainingControlStub(trn_channel)
+        # Standard gRPC health service on each peer (readiness probe).
+        self.inference_health = health_pb2_grpc.HealthStub(inf_channel)
+        self.hardware_health = health_pb2_grpc.HealthStub(hw_channel)
+        self.training_health = health_pb2_grpc.HealthStub(trn_channel)
         self._inf_channel = inf_channel
         self._hw_channel = hw_channel
         self._trn_channel = trn_channel

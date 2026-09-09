@@ -17,6 +17,21 @@ from .detection_area_service import DetectionAreaService
 
 logger = logging.getLogger(__name__)
 
+# How long ``stop()`` waits for the pipeline to finish the frames it already
+# holds before a runtime swap/release proceeds. A wedged TensorRT worker times
+# out its own request after WORKER_REQUEST_TIMEOUT_SEC (8 s) — this sits above.
+_DRAIN_TIMEOUT_S = 10.0
+
+
+class StaleGeneration(RuntimeError):
+    """A pipeline item was prepared against a runtime that has since been swapped.
+
+    Every runtime swap (``initialize``) advances ``DetectionService.generation``;
+    ``prepare`` stamps the current value on its output and ``infer``/``finish``
+    refuse items carrying another one, so a frame preprocessed for one engine is
+    never submitted to another or decoded with the wrong labels/tiling.
+    """
+
 
 def normalized_bbox(bbox, width: int, height: int) -> List[float]:
     """Pixel corners (x1, y1, x2, y2) → normalized [x1, y1, x2, y2] in 0..1."""
@@ -84,6 +99,33 @@ class DetectionService:
         self._detection_count: int = 0
         self._count_lock: Lock = Lock()
         self.last_detection_result: Optional[DetectionResult] = None
+        # Runtime generation — advanced by every initialize(); see StaleGeneration.
+        self.generation: int = 0
+        # The processing pipeline, once it registers itself (attach_pipeline):
+        # stop() quiesces it before the caller swaps or releases the runtime.
+        self._pipeline = None
+
+    def attach_pipeline(self, pipeline) -> None:
+        """Register the processing pipeline so runtime transitions can quiesce it.
+
+        Called by ``ProcessingPipelineService`` at construction. ``pipeline``
+        must expose ``drain(timeout) -> bool`` and ``resume()``.
+        """
+        self._pipeline = pipeline
+
+    def _drain_pipeline(self) -> None:
+        """Close the detection path and wait for in-flight frames to finish."""
+        if self._pipeline is None:
+            return
+        if not self._pipeline.drain(_DRAIN_TIMEOUT_S):
+            logger.error(
+                "Pipeline did not quiesce within %.0fs; continuing with the runtime "
+                "swap (stale frames are rejected by generation)", _DRAIN_TIMEOUT_S)
+
+    def _resume_pipeline(self) -> None:
+        """Reopen the detection path after a runtime swap."""
+        if self._pipeline is not None:
+            self._pipeline.resume()
 
     def initialize(self) -> bool:
         """
@@ -109,6 +151,11 @@ class DetectionService:
 
             logger.info("Initializing YOLO detector...")
             self.yolo_detector = YOLODetector(self.class_labels, self.config)
+
+            # The runtime changed: frames prepared before this point must not
+            # reach it (StaleGeneration), and the pipeline may run again.
+            self.generation += 1
+            self._resume_pipeline()
 
             logger.info("Detection service initialized successfully")
             return True
@@ -144,22 +191,33 @@ class DetectionService:
 
             self.is_running = True
             logger.info("Detection started")
+        self._resume_pipeline()
         return True
 
     def stop(self) -> bool:
         """
-        Stop detection processing.
+        Stop detection processing and quiesce the pipeline.
+
+        Flipping ``is_running`` alone would leave frames in the pipeline's
+        stage queues and a worker mid-inference; a caller that then swaps the
+        model (``ModelService.activate_model``) or releases the TensorRT
+        workers (``ReleaseRuntime``) would race them. So this also drains the
+        pipeline — the detection path stays closed until ``initialize()`` or
+        ``start()`` reopens it — and only returns once nothing is in flight
+        (or after ``_DRAIN_TIMEOUT_S``, logged).
 
         Returns:
             bool: True if stopped successfully, False if not running
         """
         with self.lock:
-            if not self.is_running:
-                return False
-
-            self.is_running = False
-            logger.info("Detection stopped")
-        return True
+            was_running = self.is_running
+            if was_running:
+                self.is_running = False
+                logger.info("Detection stopped")
+        # Drain even when nothing was running: it is a no-op then, and it keeps
+        # the detection path closed for a swap/release that follows.
+        self._drain_pipeline()
+        return was_running
 
     # ------------------------------------------------------------------
     # Pipeline stages — split into prepare/infer/finish so the processing
@@ -170,11 +228,16 @@ class DetectionService:
     def prepare(self, frame: np.ndarray):
         """Stage A: snapshot detection areas + preprocess.
 
-        Returns ``(inputs, metas)`` — parallel lists holding one preprocessed
+        Returns ``(generation, inputs, metas)`` — the runtime generation this
+        frame was prepared against plus parallel lists holding one preprocessed
         tensor and one ``TileMeta`` per tile (a single full-frame entry when
         ``TILING_MODE=off``) — or ``None`` if detection is not ready.
         """
-        if not self.is_running or not self.model_manager or not self.yolo_detector:
+        # Snapshot the generation before touching the runtime: a swap that
+        # lands during preprocessing is then caught by infer/finish.
+        generation = self.generation
+        model_manager = self.model_manager
+        if not self.is_running or not model_manager or not self.yolo_detector:
             return None
 
         # Snapshot the current detection areas onto the detector so they apply
@@ -182,9 +245,17 @@ class DetectionService:
         if self.area_service is not None:
             self.yolo_detector.set_areas(self.area_service.list())
 
-        return self.model_manager.preprocess_tiles(frame)
+        inputs, metas = model_manager.preprocess_tiles(frame)
+        return generation, inputs, metas
 
-    def infer(self, inputs):
+    def _check_generation(self, generation: Optional[int]) -> None:
+        """Raise ``StaleGeneration`` for an item prepared against an older runtime."""
+        if generation is not None and generation != self.generation:
+            raise StaleGeneration(
+                f"frame prepared for runtime generation {generation}, "
+                f"current is {self.generation}")
+
+    def infer(self, inputs, generation: Optional[int] = None):
         """Stage B: run inference on each prepared tensor, in order.
 
         Returns ``(outputs, inference_time)`` — one model output per input and
@@ -193,8 +264,10 @@ class DetectionService:
         lane while other lanes interleave on the context pool. Only reachable
         once ``prepare`` returned a non-None result, which already implies a
         model manager; the guard exists so a stopped detector fails loudly
-        instead of raising AttributeError on None.
+        instead of raising AttributeError on None. ``generation`` (from
+        ``prepare``) is checked first so a stale frame never reaches a worker.
         """
+        self._check_generation(generation)
         model_manager = self.model_manager
         if model_manager is None:
             raise RuntimeError("Detection is not running: no model manager")
@@ -206,14 +279,17 @@ class DetectionService:
             total_time += seconds
         return outputs, total_time
 
-    def finish(self, outputs, frame: np.ndarray, metas, inference_time: float = 0.0) -> Optional[DetectionResult]:
+    def finish(self, outputs, frame: np.ndarray, metas, inference_time: float = 0.0,
+               generation: Optional[int] = None) -> Optional[DetectionResult]:
         """Stage C: postprocess detections + draw overlay. Returns DetectionResult.
 
         ``outputs``/``metas`` are the parallel lists produced by ``infer`` and
         ``prepare``. With tiling off the single entry goes through the exact
         pre-tiling decode path; with ``TILING_MODE=grid`` the detector decodes
-        each tile and merges duplicates across the overlap bands.
+        each tile and merges duplicates across the overlap bands. A stale
+        ``generation`` raises before the outputs meet the wrong labels/tiling.
         """
+        self._check_generation(generation)
         if not self.yolo_detector:
             return None
         if self.model_manager is not None and self.model_manager.tiling_active:
@@ -259,13 +335,8 @@ class DetectionService:
         Returns:
             bool: True if set successfully
         """
-        if threshold < 0 or threshold > 1:
-            return False
-
         with self.lock:
-            self.config.CONFIDENCE_THRESHOLD = threshold
-
-        return True
+            return self.config.set_confidence_threshold(threshold)
 
     def is_model_loaded(self) -> bool:
         """

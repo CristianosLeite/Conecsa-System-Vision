@@ -32,7 +32,8 @@ def list_models():
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     return _json({"models": [
-        {"name": m.name, "size": m.size, "modified": m.modified, "is_active": m.is_active}
+        {"name": m.name, "size": m.size, "modified": m.modified, "is_active": m.is_active,
+         "has_weights": m.has_weights}
         for m in ml.models
     ]})
 
@@ -174,14 +175,33 @@ def delete_model(model_name):
 @api_bp.route('/api/v1/model/<model_name>/download', methods=['GET'])
 def download_model(model_name):
     """GET /api/v1/model/<model_name>/download — gateway relay."""
-    stream = clients.model.DownloadModel(inf.ModelName(name=model_name), timeout=600)
+    return _stream_model_file(clients.model.DownloadModel, model_name,
+                              os.path.basename(model_name), f"Model '{model_name}' not found")
+
+
+@api_bp.route('/api/v1/model/<model_name>/weights', methods=['GET'])
+def download_model_weights(model_name):
+    """GET /api/v1/model/<model_name>/weights — the model's training checkpoint.
+
+    The .pt the engine was converted from (`has_weights` in the model list);
+    the training-service fetches it to fine-tune from the model or to run it
+    as a labeling assistant. 404 when the model keeps none.
+    """
+    stem = os.path.splitext(os.path.basename(model_name))[0]
+    return _stream_model_file(clients.model.DownloadModelWeights, model_name,
+                              f"{stem}.pt", f"Model '{model_name}' has no training checkpoint")
+
+
+def _stream_model_file(rpc, model_name, download_name, not_found_message):
+    """Relay a server-streaming model-file RPC as an attachment download."""
+    stream = rpc(inf.ModelName(name=model_name), timeout=600)
     # Pull the first chunk before answering: a NOT_FOUND raises here, while
     # the HTTP status can still be set (streamed bodies can't change it later).
     try:
         first = next(stream, None)
     except grpc.RpcError as exc:
         if exc.code() == grpc.StatusCode.NOT_FOUND:
-            return _json_error(f"Model '{model_name}' not found", 404)
+            return _json_error(not_found_message, 404)
         return _grpc_error(exc)
 
     def generate():
@@ -196,7 +216,7 @@ def download_model(model_name):
             return
 
     # Names are validated basenames server-side; also strip header-unsafe characters defensively.
-    safe_name = os.path.basename(model_name).replace('"', '').replace('\r', '').replace('\n', '')
+    safe_name = download_name.replace('"', '').replace('\r', '').replace('\n', '')
     return Response(
         generate(),
         mimetype="application/octet-stream",

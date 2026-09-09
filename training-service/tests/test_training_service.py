@@ -29,6 +29,20 @@ class FakeDataset:
                            TileSplitStats())
 
 
+class FakeWeightsStore:
+    """Records what a federated round stashes for the hub to collect."""
+
+    def __init__(self):
+        self.stashed = []
+
+    def stash_file(self, src_path):
+        self.stashed.append(src_path)
+        return "w-fed-1"
+
+    def path(self, weights_id):
+        return f"/data/training/weights/{weights_id}.pt"
+
+
 class FakeRegistry:
     def __init__(self, dataset):
         self._dataset = dataset
@@ -65,6 +79,7 @@ def config(tmp_path):
         TRAIN_STALL_TIMEOUT_SEC=3600,
         GATEWAY_ADDR="http://gateway.test:5000",
         runs_dir=str(tmp_path / "runs"),
+        base_dir=str(tmp_path / "base"),
     )
 
 
@@ -108,6 +123,35 @@ class TestStartValidation:
         with pytest.raises(DatasetError, match="Weights store"):
             svc.start("d1", "my-model", initial_weights_id="w1")
 
+    def test_base_model_and_initial_weights_are_exclusive(self, svc):
+        with pytest.raises(DatasetError, match="mutually exclusive"):
+            svc.start("d1", "my-model", initial_weights_id="w1", base_model="a.pt")
+
+    def test_base_model_must_be_a_valid_model_name(self, svc, monkeypatch):
+        import service.training_service as ts
+        monkeypatch.setattr(ts, "list_models_with_weights",
+                            lambda gw: pytest.fail("not reached"))
+        with pytest.raises(DatasetError, match="Invalid model name"):
+            svc.start("d1", "my-model", base_model="../Teste.engine")
+
+    def test_base_model_must_exist_on_the_device(self, svc, dataset, monkeypatch):
+        import service.training_service as ts
+        monkeypatch.setattr(ts, "list_models_with_weights", lambda gw: ["Other.engine"])
+        with pytest.raises(DatasetError, match="no training checkpoint"):
+            svc.start("d1", "my-model", base_model="Teste.engine")
+        assert dataset.frozen is False
+
+    def test_unreachable_gateway_fails_the_rpc(self, svc, dataset, monkeypatch):
+        import service.training_service as ts
+
+        def boom(gw):
+            raise ts.requests.ConnectionError("down")
+
+        monkeypatch.setattr(ts, "list_models_with_weights", boom)
+        with pytest.raises(DatasetError, match="Could not list"):
+            svc.start("d1", "my-model", base_model="Teste.engine")
+        assert dataset.frozen is False
+
 
 class TestStart:
     def test_successful_start_prepares_the_job(self, svc, dataset, config):
@@ -133,6 +177,21 @@ class TestStart:
 
     def test_explicit_epochs_override_the_default(self, svc):
         assert svc.start("d1", "my-model", epochs=7).total_epochs == 7
+
+    def test_base_model_is_recorded_on_the_job(self, svc, monkeypatch):
+        import service.training_service as ts
+        monkeypatch.setattr(ts, "list_models_with_weights", lambda gw: ["Teste.engine"])
+        job = svc.start("d1", "Teste", base_model=" Teste.engine ")
+        assert job.base_model == "Teste.engine"
+
+    def test_start_unloads_sam(self, config, dataset, monkeypatch):
+        monkeypatch.setattr(TrainingService, "_run", lambda self, *a, **k: None)
+        unloaded = []
+        sam = SimpleNamespace(unload=lambda: unloaded.append("sam"))
+        svc = TrainingService(config, FakeRegistry(dataset),  # pyright: ignore[reportArgumentType]
+                              sam_service=sam)
+        svc.start("d1", "my-model")
+        assert unloaded == ["sam"]
 
 
 class TestTrainerArgv:
@@ -165,9 +224,12 @@ class TestTrainerArgv:
 class FakeProcess:
     """A trainer that prints one ``done`` line and exits 0."""
 
-    def __init__(self, best="/runs/job/weights/best.pt"):
+    def __init__(self, best="/runs/job/weights/best.pt", last=None):
         import json
-        self.stdout = iter([json.dumps({"done": True, "best": best}) + "\n"])
+        payload = {"done": True, "best": best}
+        if last:
+            payload["last"] = last
+        self.stdout = iter([json.dumps(payload) + "\n"])
         self.stderr = iter([])
         self.returncode = 0
         self.pid = 4242
@@ -208,6 +270,68 @@ class TestRun:
         done = svc.get_job()
         assert done.status == "done" and done.geometry == "tiles:auto"
         assert uploads == ["/runs/job/weights/best.pt"]
+
+    def test_federated_round_trains_on_the_tile_split_and_stashes_last_pt(
+            self, config, dataset, monkeypatch):
+        # A federated round is the regular job on a shard: it must go through
+        # the same tile split as a local job (the hub averages what every
+        # device produced at that geometry) and hand last.pt to the weights
+        # stash instead of the model-upload route.
+        import service.training_service as ts
+        store = FakeWeightsStore()
+        svc = TrainingService(config, FakeRegistry(dataset),  # pyright: ignore[reportArgumentType]
+                              weights_store=store)  # pyright: ignore[reportArgumentType]
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(TrainingService, "_run", lambda self, *a, **k: None)
+            svc.start("d1", "", federated=True)
+        uploads = []
+        monkeypatch.setattr(ts.subprocess, "Popen",
+                            lambda *a, **k: FakeProcess(last="/runs/job/weights/last.pt"))
+        monkeypatch.setattr(TrainingService, "_upload_best",
+                            lambda self, best: uploads.append(best) or "conv-1")
+
+        job = svc.get_job()
+        svc._run(job.job_id, epochs=1, batch=4, patience=10, weights_path="/w.pt")
+
+        assert dataset.split_calls == [{"tile": "auto", "overlap": 0.2, "min_visible": 0.25}]
+        done = svc.get_job()
+        assert done.status == "done" and done.federated is True
+        assert done.geometry == "tiles:auto"
+        assert done.result_weights_id == "w-fed-1"
+        assert store.stashed == ["/runs/job/weights/last.pt"]
+        assert uploads == [], "a federated round never uploads a model itself"
+        assert dataset.frozen is False
+
+    def test_base_model_is_fetched_before_the_split_and_used_as_weights(
+            self, running, dataset, config, monkeypatch):
+        import service.training_service as ts
+        svc, _ = running
+        argv = []
+        monkeypatch.setattr(ts.subprocess, "Popen",
+                            lambda cmd, **k: argv.append(cmd) or FakeProcess())
+        fetched = []
+        monkeypatch.setattr(ts, "fetch_weights",
+                            lambda gw, name, dest: fetched.append((gw, name, dest))
+                            or "/base/Teste.pt")
+        svc._run(svc.get_job().job_id, epochs=1, batch=4, patience=10,
+                 weights_path="/assets/yolo26s.pt", base_model="Teste.engine")
+        assert fetched == [("http://gateway.test:5000", "Teste.engine", config.base_dir)]
+        assert argv[0][argv[0].index("--weights") + 1] == "/base/Teste.pt"
+        assert svc.get_job().status == "done"
+
+    def test_a_failed_base_fetch_fails_the_job(self, running, dataset, monkeypatch):
+        import service.training_service as ts
+
+        def boom(gw, name, dest):
+            raise DatasetError("Model 'Teste.engine' has no training checkpoint on the device")
+
+        monkeypatch.setattr(ts, "fetch_weights", boom)
+        svc, uploads = running
+        svc._run(svc.get_job().job_id, epochs=1, batch=4, patience=10,
+                 weights_path="/w.pt", base_model="Teste.engine")
+        job = svc.get_job()
+        assert job.status == "failed" and "no training checkpoint" in job.error
+        assert uploads == [] and dataset.frozen is False
 
     def test_tile_off_is_forwarded(self, running, dataset, config):
         svc, _ = running

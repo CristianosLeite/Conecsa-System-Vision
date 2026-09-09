@@ -80,6 +80,26 @@ control plane.
   (`SAM3_CHECKPOINT`, HF-gated and baked into the image at build time) turns a
   user prompt into a segmentation/box, loaded and unloaded explicitly to free
   GPU memory.
+- **Model-assisted labeling** — any engine already on the device can be the
+  labeling assistant instead of SAM3. It does not run here: the gateway hands
+  the dataset image to the [inference-service](inference-service.md), which
+  runs the engine on a private TensorRT worker with the same preprocessing
+  (`TILING_MODE`) and decode path as live detection, so the suggestions are
+  exactly what the device would detect. Boxes come back tagged with the
+  engine's class names; the editor resolves them against the dataset's
+  classes (creating missing ones) on accept. The engine is unloaded when the
+  training page exits, when detection starts and by every GPU handover.
+- **Fine-tuning from an existing model** — `StartTraining.base_model` (a
+  model-list name such as `X.engine`, one with `has_weights`) makes the run
+  start from that model's checkpoint sidecar — the inference-service keeps the
+  `.pt` a conversion started from (an earlier on-device run's `best.pt`, a
+  manual or federated `.pt` upload) under `weights/` next to the engine —
+  fetched through the gateway's model weights route into `{DATA_DIR}/base/`
+  instead of the baked-in `TRAIN_BASE_WEIGHTS`. Retraining under the same model
+  name replaces the engine and its sidecar, so a model's checkpoint on the
+  device is always its latest `best.pt`. Models converted before the sidecar
+  existed keep none until retrained or re-uploaded. Exclusive with the
+  federated `initial_weights_id`.
 - **Training job** — one ultralytics run at a time, executed in a child process
   (`_yolo_trainer`) that streams one JSON line per epoch; a reader thread folds
   those into the job state and publishes `training_progress` events. On success
@@ -106,7 +126,10 @@ per-device mTLS channel. The service-side building blocks:
   from a stashed checkpoint (`initial_weights_id`, falling back to the baked-in
   base weights) and, on success, stashes the resulting **`last.pt`** (same
   number of local epochs on every device) as `result_weights_id` instead of
-  uploading a model.
+  uploading a model. The round trains on the same split as a local job (tile
+  crops under the default `TRAIN_TILE=auto`) and reports its effective
+  `geometry` in the job status; the hub requires every participant to report
+  the same value and declares it on the final model upload.
 - **Averaging** — `AverageWeights` FedAvg-merges ≥2 stashed checkpoints in a
   CPU child process (`_weights_averager`, same isolation rule as the trainer):
   float tensors of the `model` **and** `ema` state dicts averaged in fp32 and
@@ -118,7 +141,12 @@ per-device mTLS channel. The service-side building blocks:
 Training and inference share a single Jetson GPU. Entering training mode hands
 the GPU over from the inference runtime (`Release` / `ResumeRuntime` on the
 inference-service), and exiting resumes it. The gateway exposes this as
-`/api/v1/training/enter` and `/api/v1/training/exit`.
+`/api/v1/training/enter` and `/api/v1/training/exit`. While a training job is
+active the GPU stays with the trainer: `POST /api/v1/start` answers `409`
+(the device UI shows the Start button disabled as "Training model…"), and a
+`/training/exit` does not resume detection — leaving the training page
+mid-run keeps inference stopped until the job ends and its model conversion
+finishes, exactly like the post-training handoff.
 
 !!! note "Sizing for the Orin Nano 8 GB"
     `TRAIN_BATCH` defaults to 4 and `TRAIN_WORKERS` to 0 (single-process

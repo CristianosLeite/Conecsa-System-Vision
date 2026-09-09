@@ -82,3 +82,4 @@ class TestGetImage:
         assert ctx.code is None
         assert reply.jpeg == b"not a jpeg"
         assert (reply.width, reply.height) == (0, 0)
+

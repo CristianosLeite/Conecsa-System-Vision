@@ -50,7 +50,7 @@ def atomic_write_bytes(path: str, data: bytes, mode: int = 0o600) -> None:
         except OSError:
             pass
         raise
-    _fsync_dir(directory)
+    fsync_dir(directory)
 
 
 def atomic_write_json(path: str, value: Any, mode: int = 0o600, **dumps_kwargs) -> None:
@@ -80,9 +80,11 @@ def read_json(path: str, default: Any) -> Any:
         return default
 
 
-def _fsync_dir(directory: str) -> None:
-    """Make the rename itself durable. Best-effort on filesystems that refuse
-    to open a directory (the data fsync already happened)."""
+def fsync_dir(directory: str) -> None:
+    """Make a rename/unlink in ``directory`` durable. Best-effort on
+    filesystems that refuse to open a directory (the data fsync already
+    happened). Public so callers that stage files themselves (two files that
+    must be renamed back to back, say) share the same durability step."""
     try:
         dir_fd = os.open(directory, os.O_RDONLY)
     except OSError:

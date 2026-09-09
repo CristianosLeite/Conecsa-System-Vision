@@ -8,7 +8,7 @@ use crate::api::wasm32::http::fetch_api;
 use crate::app::get_api_base_url;
 
 /// Response returned by POST /api/v1/model
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UploadModelResponse {
     pub status: String, // "success" | "converting"
     pub message: String,
@@ -18,7 +18,7 @@ pub struct UploadModelResponse {
 }
 
 /// Conversion status returned by GET /api/v1/model/conversion/<job_id>
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConversionStatusResponse {
     pub job_id: String,
     pub original_filename: String,
@@ -36,7 +36,7 @@ pub struct ConversionStatusResponse {
 }
 
 /// Response from GET /api/v1/model/conversion (list active jobs)
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveConversionsResponse {
     pub jobs: Vec<ConversionStatusResponse>,
 }
@@ -122,6 +122,58 @@ pub async fn upload_model_dialog() -> Result<(), String> {
          Please upload directly via the Python API endpoint: POST /api/v1/model"
             .to_string(),
     )
+}
+
+/// Response from GET /api/v1/models (every file in the model directory).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ModelsResponse {
+    models: Vec<ModelEntry>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ModelEntry {
+    name: String,
+    #[serde(default)]
+    has_weights: bool,
+}
+
+/// The device models split by what they can do on the training page:
+/// `labeling` = built TensorRT engines (`.engine`/`.plan`), usable as the
+/// labeling assistant on the device's own runtime; `fine_tune` = models
+/// that keep their training checkpoint (`has_weights`: the `.pt` an
+/// on-device run or an upload was converted from), usable as a fine-tune
+/// base. Both sorted by name; entries are model-list names (`Teste.engine`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrainingModelLists {
+    pub labeling: Vec<String>,
+    pub fine_tune: Vec<String>,
+}
+
+/// Fetch the model list once and split it (see `TrainingModelLists`).
+pub async fn list_training_models() -> Result<TrainingModelLists, String> {
+    let resp = fetch_api::<ModelsResponse>("/api/v1/models", "GET", None).await?;
+    Ok(split_training_models(resp.models.into_iter().map(|m| (m.name, m.has_weights))))
+}
+
+fn split_training_models(models: impl Iterator<Item = (String, bool)>) -> TrainingModelLists {
+    let mut lists = TrainingModelLists::default();
+    for (name, has_weights) in models {
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".engine") || lower.ends_with(".plan") {
+            lists.labeling.push(name.clone());
+        }
+        if has_weights {
+            lists.fine_tune.push(name);
+        }
+    }
+    lists.labeling.sort_unstable_by_key(|n| n.to_ascii_lowercase());
+    lists.fine_tune.sort_unstable_by_key(|n| n.to_ascii_lowercase());
+    lists
+}
+
+/// The display stem of a model-list name (`Teste.engine` → `Teste`).
+pub fn model_stem(name: &str) -> &str {
+    name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name)
 }
 
 /// Select a model by name

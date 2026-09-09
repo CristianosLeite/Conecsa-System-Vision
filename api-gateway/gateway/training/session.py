@@ -9,25 +9,44 @@ from .. import media
 from ..events import event_service
 from ..grpc_clients import clients, inf, trn
 from . import training_bp
-from .helpers import _grpc_error, _json, _json_error, _release_runtime
+from .helpers import (
+    _grpc_error,
+    _json,
+    _json_error,
+    _release_runtime,
+    training_job_active,
+)
 from .orphan import tracker
 
 logger = logging.getLogger(__name__)
 
 
 def _do_exit(resume_detection: bool) -> tuple[bool, str]:
-    """Exit training mode: best-effort SAM unload, then resume (or skip).
+    """Exit training mode: best-effort assistant unloads, then resume (or skip).
 
     Shared by the /training/exit route and the orphan watchdog. Returns
     ``(success, message)``; raises ``grpc.RpcError`` when the resume RPC
-    itself fails (callers map/log it).
+    itself fails (callers map/log it). A resume is never performed while a
+    training job is active: the trainer owns the GPU, so leaving the training
+    page mid-run keeps detection stopped (the dashboard's Start stays disabled
+    until the job ends), exactly like the post-training conversion handoff.
     """
-    # Best-effort SAM unload first; freeing inference is what matters.
+    # Best-effort unload of both labeling assistants first (SAM3 in the
+    # training-service, the labeling engine in the inference-service);
+    # freeing inference is what matters.
     try:
         clients.training.UnloadSam(trn.Empty())
     except grpc.RpcError as exc:
         logger.warning("UnloadSam on exit failed: %s", exc)
+    try:
+        clients.model.UnloadLabelModel(inf.Empty())
+    except grpc.RpcError as exc:
+        logger.warning("UnloadLabelModel on exit failed: %s", exc)
 
+    if resume_detection and training_job_active():
+        event_service.publish("detection_state_changed", keys=["status"],
+                              data={"is_running": False})
+        return True, "Inference left stopped: a model training is in progress"
     if not resume_detection:
         event_service.publish("detection_state_changed", keys=["status"],
                               data={"is_running": False})

@@ -3,7 +3,7 @@
 use crate::api::wasm32::http::fetch_api;
 
 /// IPv4 configuration of a single managed interface (wired or wireless).
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InterfaceConfig {
     #[serde(default)]
     pub name: String,
@@ -24,7 +24,7 @@ fn default_method() -> String {
 }
 
 /// Current Wi-Fi association state.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct WifiStatus {
     #[serde(default)]
     pub ssid: String,
@@ -35,7 +35,7 @@ pub struct WifiStatus {
 }
 
 /// Response from GET /api/v1/network/config (wired + Wi-Fi).
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetworkConfig {
     pub wired: InterfaceConfig,
     pub wifi: InterfaceConfig,
@@ -44,14 +44,14 @@ pub struct NetworkConfig {
 }
 
 /// Response from the IP-config POST endpoint.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetworkSetResponse {
     pub success: bool,
     pub message: String,
 }
 
 /// A single Wi-Fi network from a scan.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WifiNetwork {
     pub ssid: String,
     #[serde(default)]
@@ -65,14 +65,14 @@ pub struct WifiNetwork {
 }
 
 /// A `WifiScanResponse` struct.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WifiScanResponse {
     #[serde(default)]
     pub networks: Vec<WifiNetwork>,
 }
 
 /// A `WifiConnectResponse` struct.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WifiConnectResponse {
     pub success: bool,
     #[serde(default)]

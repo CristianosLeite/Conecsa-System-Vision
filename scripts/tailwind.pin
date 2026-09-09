@@ -1,0 +1,7 @@
+# Pinned Tailwind CSS standalone CLI (shell-sourceable; also mirrored as ARGs
+# in system-vision/Dockerfile.system-vision{,.dev} and
+# hub-vision/Dockerfile.hub-builder). Bump with the `bump-tailwind-version`
+# skill: version + both per-architecture SHA256 sums of the release assets.
+TAILWIND_VERSION=4.3.3
+TAILWIND_SHA256_X86_64=dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a
+TAILWIND_SHA256_AARCH64=55fd0b241214eff3de1e8ee4f22796662f2d2e7a49bcfca7477cfd0bac398195

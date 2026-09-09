@@ -87,3 +87,74 @@ fn apply_drag_resize_se_enforces_min_size() {
     approx(w, MIN_SIZE);
     approx(h, MIN_SIZE);
 }
+
+#[wasm_bindgen_test]
+fn label_anchor_sits_above_the_box() {
+    let (x, y) = label_anchor(100.0, 200.0, 300.0, VIEW);
+    approx(x, 100.0);
+    approx(y, 200.0 - LABEL_TEXT_GAP);
+}
+
+#[wasm_bindgen_test]
+fn label_anchor_flips_below_a_box_at_the_top_edge() {
+    let (x, y) = label_anchor(100.0, 0.0, 300.0, VIEW);
+    approx(x, 100.0);
+    approx(y, 300.0 + LABEL_TEXT_H - LABEL_TEXT_GAP);
+    // Just short of the room needed above → still below.
+    let (_, y) = label_anchor(100.0, LABEL_TEXT_H - 1.0, 300.0, VIEW);
+    approx(y, 300.0 + LABEL_TEXT_H - LABEL_TEXT_GAP);
+}
+
+#[wasm_bindgen_test]
+fn label_anchor_falls_back_inside_a_full_height_box() {
+    let (x, y) = label_anchor(100.0, 0.0, VIEW, VIEW);
+    approx(x, 100.0 + LABEL_TEXT_INSET.0);
+    approx(y, LABEL_TEXT_INSET.1);
+}
+
+#[wasm_bindgen_test]
+fn handle_rects_center_on_the_corners_of_a_large_box() {
+    let (x, y, r, b) = (100.0, 100.0, 300.0, 250.0);
+    let hs = handle_rects(x, y, r, b, (VIEW, VIEW));
+    let half = HANDLE / 2.0;
+    assert!(matches!(hs[0].2, Corner::Nw));
+    approx(hs[0].0, x - half);
+    approx(hs[0].1, y - half);
+    assert!(matches!(hs[1].2, Corner::Ne));
+    approx(hs[1].0, r - half);
+    approx(hs[1].1, y - half);
+    assert!(matches!(hs[2].2, Corner::Sw));
+    approx(hs[2].0, x - half);
+    approx(hs[2].1, b - half);
+    assert!(matches!(hs[3].2, Corner::Se));
+    approx(hs[3].0, r - half);
+    approx(hs[3].1, b - half);
+}
+
+#[wasm_bindgen_test]
+fn handle_rects_step_outside_a_small_box() {
+    // A box narrower than three handles: every handle lies fully outside it,
+    // touching the corner, so the body stays visible and grabbable.
+    let (x, y, r, b) = (200.0, 200.0, 210.0, 260.0);
+    let hs = handle_rects(x, y, r, b, (VIEW, VIEW));
+    approx(hs[0].0 + HANDLE, x);
+    approx(hs[0].1 + HANDLE, y);
+    approx(hs[1].0, r);
+    approx(hs[1].1 + HANDLE, y);
+    approx(hs[2].0 + HANDLE, x);
+    approx(hs[2].1, b);
+    approx(hs[3].0, r);
+    approx(hs[3].1, b);
+}
+
+#[wasm_bindgen_test]
+fn handle_rects_stay_inside_the_canvas() {
+    // Box flush with the canvas edges: handles are clamped, never clipped away.
+    let hs = handle_rects(0.0, 0.0, VIEW, VIEW, (VIEW, VIEW));
+    for (hx, hy, _) in hs {
+        assert!(hx >= 0.0 && hx + HANDLE <= VIEW, "{hx}");
+        assert!(hy >= 0.0 && hy + HANDLE <= VIEW, "{hy}");
+    }
+    approx(hs[0].0, 0.0);
+    approx(hs[3].0, VIEW - HANDLE);
+}

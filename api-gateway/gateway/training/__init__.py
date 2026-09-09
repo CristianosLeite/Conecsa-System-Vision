@@ -7,7 +7,8 @@ camera preview. Registered by app.py; kept as a sibling package (hardware.py
 precedent) so app.py stays a flat route list.
 
 Routes are split per resource: `session` (GPU handover + preview), `datasets`
-(registry + classes), `images` (capture + labels), `sam`, `weights`
+(registry + classes), `images` (capture + labels), `sam`, `label_model`
+(an existing device model as labeling assistant), `weights`
 (hub-orchestrated FedAvg) and `jobs` (the training run itself). Shared
 JSON/gRPC helpers live in `helpers`. All submodules register onto the single
 `training_bp` defined here.
@@ -18,7 +19,7 @@ training_bp = Blueprint("training", __name__)
 
 # Re-exported for the unit tests (historic `gateway.training` import surface).
 # Importing the submodules registers their routes on `training_bp`.
-from . import datasets, images, jobs, sam, session, weights  # noqa: E402,F401
+from . import datasets, images, jobs, label_model, sam, session, weights  # noqa: E402,F401
 from .helpers import _job_dict, _meta_dict, _parse_named_boxes  # noqa: E402,F401
 
 # Every training-surface request counts as client activity for the orphaned-

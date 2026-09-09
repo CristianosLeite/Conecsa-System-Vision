@@ -49,7 +49,17 @@ class TestWaitForChanges:
         assert events == []
         assert stats is None
 
-    def test_replay_only_returns_events_still_in_buffer(self):
+    def test_replay_returns_events_still_in_buffer(self):
+        svc = EventService(history_limit=2)
+        for _ in range(5):
+            svc.publish("x")  # versions 1..5; buffer keeps only 4 and 5
+        _version, events, _sv, _stats, changed = svc.wait_for_changes(
+            last_version=3, last_stats_version=None, timeout=0.1
+        )
+        assert changed is True
+        assert [e["version"] for e in events] == [4, 5]
+
+    def test_evicted_events_force_a_snapshot(self):
         svc = EventService(history_limit=2)
         for _ in range(5):
             svc.publish("x")  # versions 1..5; buffer keeps only 4 and 5
@@ -57,8 +67,10 @@ class TestWaitForChanges:
             last_version=0, last_stats_version=None, timeout=0.1
         )
         assert changed is True
-        # Evicted events (1..3) are gone; only the retained newer ones replay.
-        assert [e["version"] for e in events] == [4, 5]
+        # Events 1..3 were evicted: replaying only 4 and 5 would silently drop
+        # invalidations, so the subscriber gets one full-reconciliation snapshot.
+        assert [e["type"] for e in events] == ["state_snapshot"]
+        assert events[0]["version"] == 5
 
     def test_subscriber_ahead_of_buffer_forces_snapshot(self):
         # If last_version is ahead of every buffered event (e.g. a version

@@ -1,12 +1,12 @@
 //! Backend access layer (HTTP/SSE on wasm, Tauri IPC on native).
 
 /// Detection-area HTTP client. Mirrors `/api/v1/detection-areas/*` endpoints.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::wasm32::http::fetch_api;
 
 /// A `DetectionArea` struct.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionArea {
     pub id: String,
     pub x: f32,
@@ -24,7 +24,7 @@ fn default_shape() -> String {
 }
 
 /// A `DetectionAreasResponse` struct.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionAreasResponse {
     pub areas: Vec<DetectionArea>,
 }

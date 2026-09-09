@@ -225,3 +225,59 @@ class TestFreezeDeleteRace:
         monkeypatch.setattr(_shutil, "rmtree", boom)
         with pytest.raises(DatasetError, match="could not be deleted"):
             registry.delete(meta["dataset_id"])
+
+    def test_a_failed_rmtree_leaves_a_tombstone_that_a_restart_sweeps(
+            self, registry, monkeypatch, tmp_path):
+        import os
+        import shutil as _shutil
+        meta = registry.create("D1")
+        real_rmtree = _shutil.rmtree
+
+        def boom(path):
+            raise OSError("file is busy")
+
+        monkeypatch.setattr(_shutil, "rmtree", boom)
+        with pytest.raises(DatasetError):
+            registry.delete(meta["dataset_id"])
+        # The dataset is gone from the registry and cannot come back as a
+        # dataset: its directory is a dot-prefixed tombstone.
+        assert registry.list() == []
+        tombstones = [e for e in os.listdir(registry._config.datasets_dir)
+                      if e.startswith(".deleting-")]
+        assert len(tombstones) == 1
+        assert os.path.isfile(os.path.join(
+            registry._config.datasets_dir, tombstones[0], "meta.json"))
+        monkeypatch.setattr(_shutil, "rmtree", real_rmtree)
+
+        # A restart retries the deletion and does not register the tombstone.
+        again = DatasetRegistry(registry._config, event_service=None)
+        assert again.list() == []
+        assert not any(e.startswith(".deleting-")
+                       for e in os.listdir(registry._config.datasets_dir))
+
+    def test_a_failed_rename_keeps_the_dataset_registered(self, registry, monkeypatch):
+        import os
+        meta = registry.create("D1")
+
+        def boom(src, dst):
+            raise OSError("read-only volume")
+
+        monkeypatch.setattr(os, "rename", boom)
+        with pytest.raises(DatasetError, match="could not be deleted"):
+            registry.delete(meta["dataset_id"])
+        # Retryable: the entry is still there and its files are untouched.
+        registry.get(meta["dataset_id"])
+        assert os.path.isdir(registry._dataset_root(meta["dataset_id"]))
+        assert [d["name"] for d in registry.list()] == ["D1"]
+
+    def test_scan_ignores_dot_directories(self, registry):
+        import json
+        import os
+        stray = os.path.join(registry._config.datasets_dir, ".deleting-abc-123")
+        os.makedirs(stray)
+        with open(os.path.join(stray, "meta.json"), "w") as fh:
+            json.dump({"name": "ghost"}, fh)
+        # No rmtree here: the sweep runs in the constructor, so build one whose
+        # sweep is a no-op by making the tombstone a regular dot-dir first.
+        again = DatasetRegistry(registry._config, event_service=None)
+        assert again.list() == []

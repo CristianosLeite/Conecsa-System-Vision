@@ -33,7 +33,7 @@ pub use configuration::Configuration;
 pub use control_panel::{ControlPanel, ViewMode};
 pub use flow::Flow;
 pub use live_video_stream::LiveVideoStream;
-pub use main_view::MainView;
+pub use main_view::{HostView, MainView};
 pub use popup_messages::PopupMessages;
 pub use settings::{GpioSettings, NetworkSettings, Settings};
 pub use statistics::PerformanceStatistics;

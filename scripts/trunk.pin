@@ -1,0 +1,7 @@
+# Pinned prebuilt Trunk release (shell-sourceable; also mirrored as ARGs in
+# system-vision/Dockerfile.system-vision{,.dev} and hub-vision/Dockerfile.hub-builder,
+# checked by scripts/check-pins.sh). Bump with the `bump-trunk-version` skill:
+# version + both per-architecture SHA256 sums of the release tarballs.
+TRUNK_VERSION=0.21.14
+TRUNK_SHA256_X86_64=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+TRUNK_SHA256_AARCH64=b1d8e60e454f7fc182d9a4d95d1506ffbae947d8ba90f8f6f02da93b60f980f9

@@ -13,11 +13,6 @@ use super::dataset_delete_modal::DatasetDeleteModal;
 use super::dataset_name_modal::DatasetNameModal;
 use super::dataset_upload_modal::DatasetUploadModal;
 
-/// Job is active.
-fn job_is_active(status: &str) -> bool {
-    matches!(status, "preparing" | "training" | "uploading")
-}
-
 /// Dataset gallery: cards for every dataset (cover, name, counts) plus
 /// create/upload entry points. Selecting a card opens the dataset editor.
 #[component]
@@ -61,7 +56,7 @@ pub(super) fn DatasetGallery(
 
     spawn_local(async move {
         if let Ok(j) = api::get_training_status().await {
-            if job_is_active(&j.status) {
+            if j.is_active() {
                 let _ = set_training_ds.try_set(j.dataset_id);
             }
         }

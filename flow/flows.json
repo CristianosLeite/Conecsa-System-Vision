@@ -605,7 +605,7 @@
     "type": "global-config",
     "env": [],
     "modules": {
-      "@conecsa/node-red-contrib-conecsa-system-vision": "1.1.1"
+      "@conecsa/node-red-contrib-conecsa-system-vision": "1.1.2"
     }
   }
 ]

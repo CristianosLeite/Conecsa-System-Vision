@@ -1,4 +1,9 @@
-"""Unit tests for ConfigService (get/update of the capture + inference config)."""
+"""Unit tests for ConfigService (get/update of the capture + inference config).
+
+The generic patch is validated through the shared camera bounds, pushed to the
+webcam-server first, and persisted only when the push was acknowledged
+(review M2) — the same contract as the dedicated camera path.
+"""
 from types import SimpleNamespace
 
 import pytest
@@ -6,11 +11,13 @@ from api.services.config_service import ConfigService
 
 
 class FakeVideo:
-    def __init__(self):
+    def __init__(self, reachable=True):
         self.patches = []
+        self.reachable = reachable
 
     def apply_webcam_server_config(self, patch):
         self.patches.append(patch)
+        return self.reachable
 
 
 class FakeSettings:
@@ -47,16 +54,16 @@ class TestGetConfig:
 
 class TestUpdateConfig:
     def test_empty_data_is_rejected(self, config):
-        ok, msg = ConfigService(config).update_config({})
-        assert ok is False
+        ok, msg, status = ConfigService(config).update_config({})
+        assert (ok, status) == (False, 400)
         assert msg == "No data provided"
 
     def test_device_path_is_stripped_to_camera_index(self, config):
         video = FakeVideo()
-        ok, _ = ConfigService(config, video_service=video).update_config(
+        ok, _, status = ConfigService(config, video_service=video).update_config(
             {"capture_device": "/dev/video2"}
         )
-        assert ok is True
+        assert (ok, status) == (True, 200)
         assert config.CAPTURE_DEVICE == "/dev/video2"
         assert video.patches == [{"camera_index": 2}]
 
@@ -64,35 +71,70 @@ class TestUpdateConfig:
         video = FakeVideo()
         ConfigService(config, video_service=video).update_config({"capture_device": "1"})
         assert video.patches == [{"camera_index": 1}]
+        assert config.CAPTURE_DEVICE == "/dev/video1"
 
-    def test_non_numeric_device_skips_the_webcam_push(self, config):
+    def test_non_numeric_device_is_rejected_and_nothing_changes(self, config):
         video = FakeVideo()
-        ok, _ = ConfigService(config, video_service=video).update_config(
+        ok, msg, status = ConfigService(config, video_service=video).update_config(
             {"capture_device": "usb-cam"}
         )
-        # Config is still updated; only the camera-index push is skipped.
-        assert ok is True
-        assert config.CAPTURE_DEVICE == "usb-cam"
+        assert (ok, status) == (False, 400)
+        assert "capture_device" in msg
+        assert config.CAPTURE_DEVICE == "/dev/video0"
         assert video.patches == []
 
     def test_framerate_is_coerced_and_pushed(self, config):
         video = FakeVideo()
-        ok, _ = ConfigService(config, video_service=video).update_config(
+        ok, _, _ = ConfigService(config, video_service=video).update_config(
             {"capture_framerate": "60"}
         )
         assert ok is True
         assert config.CAPTURE_FRAMERATE == 60
         assert video.patches == [{"framerate": 60}]
 
-    def test_invalid_framerate_reports_the_error(self, config):
-        ok, msg = ConfigService(config).update_config({"capture_framerate": "fast"})
-        assert ok is False
-        assert msg  # the ValueError text is surfaced
+    @pytest.mark.parametrize("bad", ["fast", 0, 241, -5, True])
+    def test_out_of_range_framerate_is_rejected(self, config, bad):
+        video = FakeVideo()
+        ok, msg, status = ConfigService(config, video_service=video).update_config(
+            {"capture_framerate": bad}
+        )
+        assert (ok, status) == (False, 400)
+        assert "capture_framerate" in msg
+        assert config.CAPTURE_FRAMERATE == 30
+        assert video.patches == []
 
     def test_confidence_threshold_is_coerced_to_float(self, config):
-        ok, _ = ConfigService(config).update_config({"confidence_threshold": "0.7"})
+        ok, _, _ = ConfigService(config).update_config({"confidence_threshold": "0.7"})
         assert ok is True
         assert config.CONFIDENCE_THRESHOLD == 0.7
+
+    @pytest.mark.parametrize("bad", [-0.1, 1.5, "high"])
+    def test_out_of_range_confidence_is_rejected(self, config, bad):
+        ok, msg, status = ConfigService(config).update_config({"confidence_threshold": bad})
+        assert (ok, status) == (False, 400)
+        assert "confidence_threshold" in msg
+        assert config.CONFIDENCE_THRESHOLD == 0.5
+
+    def test_one_bad_field_rejects_the_whole_patch(self, config):
+        video, settings = FakeVideo(), FakeSettings()
+        ok, _, status = ConfigService(config, video, settings).update_config(
+            {"capture_framerate": 60, "confidence_threshold": 7}
+        )
+        assert (ok, status) == (False, 400)
+        assert config.CAPTURE_FRAMERATE == 30
+        assert video.patches == []
+        assert settings.saved == 0
+
+    def test_an_unreachable_webcam_server_is_a_503_and_nothing_is_persisted(self, config):
+        video, settings = FakeVideo(reachable=False), FakeSettings()
+        ok, msg, status = ConfigService(config, video, settings).update_config(
+            {"capture_framerate": 60, "confidence_threshold": 0.9}
+        )
+        assert (ok, status) == (False, 503)
+        assert "webcam server" in msg
+        assert config.CAPTURE_FRAMERATE == 30
+        assert config.CONFIDENCE_THRESHOLD == 0.5
+        assert settings.saved == 0
 
     def test_settings_are_persisted_after_update(self, config):
         settings = FakeSettings()
@@ -102,6 +144,6 @@ class TestUpdateConfig:
         assert settings.saved == 1
 
     def test_works_without_optional_collaborators(self, config):
-        ok, msg = ConfigService(config).update_config({"capture_device": "/dev/video1"})
-        assert ok is True
+        ok, msg, status = ConfigService(config).update_config({"capture_device": "/dev/video1"})
+        assert (ok, status) == (True, 200)
         assert msg == "Configuration updated"

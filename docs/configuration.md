@@ -39,6 +39,7 @@ the code (what applies when the variable is unset); where the production
 | `TENSORRT_WORKSPACE_MB` | `256` | `192` | TensorRT builder workspace (MB) for `.pt → .engine` conversion; 1280 engines usually need `512` (the builder retries 256/192/128) |
 | `TENSORRT_AUTO_REBUILD_ENGINE` | `1` | — | Rebuilds the engine when the model changes |
 | `TENSORRT_CONTEXTS` | `1` | `2` | Parallel TensorRT contexts / pipeline lanes (~1.8× GPU scaling at 2) |
+| `TENSORRT_LABEL_WORKER_PORT` | `TENSORRT_WORKER_PORT + 16` | — | Loopback port of the private TensorRT worker that runs an existing engine for model-assisted labeling on the training page (beside, never instead of, the live model's context lanes); released with the runtime |
 | `CUDA_VISIBLE_DEVICES` | `0` | — | GPU visible to CUDA |
 | `HUB_OFFLINE_THRESHOLD_SEC` | `5.0` | — | Seconds without a hub snapshot poll before the device considers the hub offline and starts buffering detections |
 | `DETECTION_BUFFER_MAX_RECORDS` | `5000` | — | Offline detection buffer cap (records); oldest evicted first |
@@ -56,9 +57,12 @@ the code (what applies when the variable is unset); where the production
 | `PROCESSED_SHM_NAME` | `conecsa_processed_shm` | — | Processed SHM ring (overlaid feed) |
 | `GATEWAY_PORT` | `5000` | — | Internal HTTP port |
 | `WAITRESS_THREADS` | `32` | — | Waitress task threads (MJPEG/SSE pin one each) |
+| `GATEWAY_GRPC_TIMEOUT` | `12` | — | Deadline (s) for every unary gRPC call to a backend that passes no explicit timeout; a call that exceeds it answers `504` |
+| `GATEWAY_GRPC_LONG_TIMEOUT` | `120` | — | Deadline (s) for the slow unary calls (model select/reload, detection start, runtime release/resume, training start/cancel/finish, dataset delete, capture, SAM unload) |
+| `GATEWAY_GRPC_UPLOAD_TIMEOUT` | `600` | — | Deadline (s) for client-streaming uploads (model, dataset, weights) without an explicit timeout |
 | `STEREO_COMBINE` | `none` | `none` | Stereo combine for the training preview (matches inference-service); fallback only — the live inference config wins when reachable |
 | `STEREO_BLEND_ALPHA` | `0.5` | — | Blend factor for the training preview |
-| `DEVICE_VERSION` | _(empty)_ | `2026.4-LTS` | Device software version, surfaced on `/api/v1/status` + `/api/v1/health` for the hub |
+| `DEVICE_VERSION` | _(empty)_ | `2026.5-LTS` | Device software version, surfaced on `/api/v1/status` + `/api/v1/health` for the hub |
 | `DEVICE_ID` | _(host hostname)_ | — | Device identity used by enrollment, the cert SAN and mDNS |
 | `CONECSA_CERT_DIR` | `/etc/conecsa/certs` | — | Device key/CSR + hub-signed cert/CA (volume shared with the nginx TLS terminator) |
 | `DEVICE_PAIR_TOKEN` | _(unset)_ | `${DEVICE_PAIR_TOKEN:-}` | Optional shared pairing secret; unset = first hub on the trusted LAN to pair wins |
@@ -66,6 +70,8 @@ the code (what applies when the variable is unset); where the production
 | `CLOCK_SYNC_THRESHOLD_SEC` | `30` | — | Drift from the hub's clock that triggers a step (the board has no RTC battery; see [Clock synchronization](services/hub-vision.md#clock-synchronization)) |
 | `CLOCK_SYNC_MIN_INTERVAL_SEC` | `60` | — | Minimum spacing between clock-step attempts, so a failing step is not retried on every 2s hub poll |
 | `AUDIT_DIR` | `/data/audit` | `/data/audit` | Audit trail directory (`audit.db`); needs a writable volume (`conecsa-audit-data`) |
+| `FLOW_ADMIN_TOKEN_SECRET` | _(falls back to `NODE_RED_CREDENTIAL_SECRET`)_ | `${FLOW_ADMIN_TOKEN_SECRET:-}` | HMAC secret for the Node-RED editor tokens (`POST /api/v1/flow/token`); must equal the value the `flow` service verifies with |
+| `FLOW_ADMIN_TOKEN_TTL_SEC` | `43200` (12 h) | — | Lifetime of an editor token |
 | `AUDIT_MAX_RECORDS` | `50000` | — | Audit ring cap (records); oldest evicted first |
 | `AUDIT_MAX_BYTES` | `67108864` (64 MB) | — | Audit ring cap (bytes); whichever cap hits first evicts |
 
@@ -104,6 +110,9 @@ the code (what applies when the variable is unset); where the production
 | Variable | Default | Compose | Description |
 |---|---|---|---|
 | `INFERENCE_URL` | `http://api-gateway:5000` | — | Base URL the Conecsa nodes use to reach the api-gateway |
+| `NODE_RED_CREDENTIAL_SECRET` | _(required)_ | `${NODE_RED_CREDENTIAL_SECRET:?}` | Encrypts credentials stored in flows; also signs the editor tokens unless `FLOW_ADMIN_TOKEN_SECRET` is set |
+| `FLOW_ADMIN_TOKEN_SECRET` | _(falls back to the credential secret)_ | `${FLOW_ADMIN_TOKEN_SECRET:-}` | Verifies the editor tokens the api-gateway mints (`flow/admin-token.js`) |
+| `FLOW_ADMIN_AUTH` | `1` | _(dev: `0`)_ | `0` leaves the editor open (no `adminAuth`); the dev stack publishes the editor on the host and sets it |
 | `DEVICE_ID` | _(empty)_ | — | Device id stamped on detection messages (node config takes precedence) |
 | `TZ` | — | `America/Sao_Paulo` | Timezone |
 

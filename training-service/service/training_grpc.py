@@ -9,8 +9,8 @@ import logging
 import os
 import subprocess
 import sys
-import threading
 from concurrent import futures
+from typing import Optional
 
 import grpc
 
@@ -111,6 +111,8 @@ def _job_pb(job) -> "pb.TrainingJob":
         dataset_id=job.dataset_id,
         result_weights_id=job.result_weights_id,
         federated=bool(job.federated),
+        base_model=getattr(job, "base_model", ""),
+        geometry=getattr(job, "geometry", ""),
     )
 
 
@@ -702,6 +704,7 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                 patience=int(request.patience),
                 initial_weights_id=request.initial_weights_id,
                 federated=bool(request.federated),
+                base_model=request.base_model,
             )
             return _job_pb(job)
         except DatasetError as exc:
@@ -741,25 +744,43 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
             last = new_version
 
 
-def serve_grpc(application) -> None:
-    """Start the TrainingControl gRPC server in a daemon thread (non-blocking)."""
-    def _run() -> None:
-        """Thread body: build, register, start the server and block on it."""
-        # Explicit receive cap: labeled-image uploads (AddDatasetImage) travel
-        # as one message, so the default 4 MiB rejected large JPEGs with a
-        # bare RESOURCE_EXHAUSTED. Dataset ZIPs and weights stream in ~1 MiB
-        # chunks and are unaffected.
-        server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=8),
-            options=[("grpc.max_receive_message_length", 32 * 1024 * 1024)],
-        )
-        pb_grpc.add_TrainingControlServicer_to_server(
-            TrainingControlServicer(application), server
-        )
-        server.add_insecure_port(application.config.GRPC_LISTEN)
-        server.start()
-        logger.info("TrainingControl gRPC server listening on %s",
-                    application.config.GRPC_LISTEN)
-        server.wait_for_termination()
+def serve_grpc(application, listen_addr: Optional[str] = None) -> grpc.Server:
+    """Bind and start the TrainingControl gRPC server; return it.
 
-    threading.Thread(target=_run, daemon=True, name="training-grpc").start()
+    Runs on the calling thread so a bind failure is a plain exception the
+    entry point can turn into a non-zero exit (the daemon-thread start used
+    to ignore ``add_insecure_port`` returning 0). Registers the standard gRPC
+    health service, SERVING once the port is open; ``grpc.so_reuseport`` is
+    off so a second instance cannot silently share the port.
+    """
+    addr = listen_addr or application.config.GRPC_LISTEN
+    from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+
+    # Explicit receive cap: labeled-image uploads (AddDatasetImage) travel
+    # as one message, so the default 4 MiB rejected large JPEGs with a
+    # bare RESOURCE_EXHAUSTED. Dataset ZIPs and weights stream in ~1 MiB
+    # chunks and are unaffected.
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=8),
+        options=[
+            ("grpc.max_receive_message_length", 32 * 1024 * 1024),
+            ("grpc.so_reuseport", 0),
+        ],
+    )
+    pb_grpc.add_TrainingControlServicer_to_server(
+        TrainingControlServicer(application), server
+    )
+    health_servicer = health.HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    # grpcio used to return 0 on a bind failure and newer releases raise;
+    # either way the old daemon-thread start swallowed it.
+    try:
+        bound = server.add_insecure_port(addr)
+    except RuntimeError as exc:
+        raise RuntimeError(f"could not bind the training gRPC server to {addr}: {exc}") from exc
+    if bound == 0:
+        raise RuntimeError(f"could not bind the training gRPC server to {addr}")
+    server.start()
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    logger.info("TrainingControl gRPC server listening on %s", addr)
+    return server

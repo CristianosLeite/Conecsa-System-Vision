@@ -1,20 +1,23 @@
 //! Leptos UI components for the web frontend.
 
 use leptos::prelude::*;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
 use crate::api::{training_image_url, LabelBox};
 use crate::i18n::*;
 
+use super::dataset_editor::{AiState, ClassesState, ImagesState};
 use super::label_geometry::{
-    apply_drag, is_background, norm_coords, BoxDrag, Corner, DragKind, DRAG_EPS, VIEW,
+    apply_drag, is_background, norm_coords, BoxDrag, Corner, DragKind, DRAG_EPS, MIN_DRAW_PX,
+    MIN_SIZE, VIEW,
 };
 use super::label_shapes::{
     committed_boxes_layer, draft_layer, points_layer, status_bar, suggestions_layer,
 };
 
 /// The drawing surface: the dataset image with an SVG overlay for the boxes,
-/// resize handles, SAM suggestions/points and the in-progress draft rectangle.
+/// resize handles, AI suggestions, SAM points and the in-progress draft rectangle.
 ///
 /// Owns the `draft` rectangle and all pointer handling; the rendering of each
 /// overlay layer lives in `label_shapes`. Selection (`selected_box`) and the
@@ -24,40 +27,53 @@ use super::label_shapes::{
 #[component]
 pub(super) fn LabelCanvas(
     dataset_id: String,
-    selected: ReadSignal<Option<String>>,
-    boxes: RwSignal<Vec<LabelBox>>,
-    classes: ReadSignal<Vec<String>>,
-    active_class: ReadSignal<usize>,
+    images: ImagesState,
+    classes: ClassesState,
+    ai: AiState,
     selected_box: RwSignal<Option<usize>>,
     drag: RwSignal<Option<BoxDrag>>,
-    sam_mode: ReadSignal<bool>,
-    sam_points: RwSignal<Vec<(f32, f32, bool)>>,
-    sam_suggestions: ReadSignal<Vec<LabelBox>>,
+    /// SAM prompt mode: background clicks become point prompts.
+    sam_mode: Signal<bool>,
+    /// Any assistant panel open above the canvas (it eats vertical room).
+    panel_open: Signal<bool>,
     /// Persist the current boxes (true = show a toast).
     on_save: Callback<bool>,
     /// Fired when the user tries to draw a box with no class selected.
     on_need_class: Callback<()>,
 ) -> impl IntoView {
     let i18n = use_i18n();
+    let selected = images.selected.read_only();
+    let boxes = images.boxes;
+    let active_class = classes.active.read_only();
+    let classes = classes.list.read_only();
+    let sam_points = ai.sam_points;
+    let suggestions = ai.suggestions.read_only();
+    let suggestion_names = ai.suggestion_names.read_only();
     // Copy-able handle so the canvas closure can build per-image URLs.
     let dataset_id = StoredValue::new(dataset_id);
     // Draft rectangle while drawing a new box, normalized (x0, y0, x1, y1).
     let draft = RwSignal::new(None::<(f32, f32, f32, f32)>);
+    // Rendered canvas size in CSS px — the overlay's coordinate space, so
+    // strokes, handles and text keep a fixed on-screen size whatever the
+    // monitor or image aspect. Seeded with the fallback and kept current by a
+    // ResizeObserver on the canvas container (see the image branch below).
+    let canvas = RwSignal::new((VIEW, VIEW));
 
     // The canvas is width-driven in a fixed, non-scrolling viewport. Cap its
-    // width by the available height so it always fits vertically; when the SAM
-    // panel is open it eats ~11rem more, so shrink the canvas to match (16rem ≈
-    // top bar + toolbar + status; +11rem for the SAM controls). The image
-    // branch scales this cap by the image's aspect ratio (see `canvas_box`).
+    // width by the available height so it always fits vertically; when an
+    // assistant panel is open it eats ~11rem more, so shrink the canvas to
+    // match (16rem ≈ top bar + toolbar + status; +11rem for the AI controls).
+    // The image branch scales this cap by the image's aspect ratio (see
+    // `canvas_box`).
     let canvas_height_avail = move || {
-        if sam_mode.get() {
+        if panel_open.get() {
             "100dvh - 27rem"
         } else {
             "100dvh - 16rem"
         }
     };
     let canvas_cap = move || {
-        if sam_mode.get() {
+        if panel_open.get() {
             "max-w-[calc(100dvh-27rem)]"
         } else {
             "max-w-[calc(100dvh-16rem)]"
@@ -78,13 +94,16 @@ pub(super) fn LabelCanvas(
         }
     };
 
-    // Reported by a box/handle rect when pressed (with the normalized click).
-    let on_box_down = Callback::new(move |(idx, origin): (usize, (f32, f32))| {
-        selected_box.set(Some(idx));
-        arm_drag(idx, DragKind::Move, origin);
-    });
-    let on_handle_down = Callback::new(move |(idx, corner, origin): (usize, Corner, (f32, f32))| {
-        arm_drag(idx, DragKind::Resize(corner), origin);
+    // Reported by a box rect (corner = None: select + move) or one of its
+    // resize handles (Some(corner)) when pressed, with the normalized click.
+    let on_press = Callback::new(move |(idx, corner, origin): (usize, Option<Corner>, (f32, f32))| {
+        match corner {
+            None => {
+                selected_box.set(Some(idx));
+                arm_drag(idx, DragKind::Move, origin);
+            }
+            Some(corner) => arm_drag(idx, DragKind::Resize(corner), origin),
+        }
     });
 
     // SVG-level handler: only true background presses (on the svg itself).
@@ -161,8 +180,11 @@ pub(super) fn LabelCanvas(
         };
         draft.set(None);
         let (w, h) = ((x1 - x0).abs(), (y1 - y0).abs());
-        // Ignore accidental clicks (boxes smaller than ~1% of the image).
-        if w < 0.01 || h < 0.01 {
+        // Ignore accidental clicks: the guard is a few *screen* pixels, not a
+        // share of the image, so tiny objects on a native-resolution frame
+        // can still be boxed.
+        let (cw, ch) = canvas.get_untracked();
+        if w * cw < MIN_DRAW_PX || h * ch < MIN_DRAW_PX || w < MIN_SIZE || h < MIN_SIZE {
             return;
         }
         // A box needs a real class id, or set_labels rejects the save with
@@ -232,8 +254,47 @@ pub(super) fn LabelCanvas(
                     let (w, h) = img_size.get().unwrap_or((1, 1));
                     format!("calc(({}) * {w} / {h})", canvas_height_avail())
                 };
+                // Measure the container whenever its layout size changes (image
+                // decoded, window resized, assistant panel opened…) and feed
+                // the overlay's px coordinate space. ResizeObserver reports once
+                // on `observe`, so the first measurement needs no extra trigger.
+                // The observer and its JS closure are not Send, so they live in
+                // an owner-scoped local slot that the cleanup drains; `try_set`
+                // because a late callback must not touch a disposed signal.
+                let container = NodeRef::<leptos::html::Div>::new();
+                let observer =
+                    StoredValue::new_local(None::<(web_sys::ResizeObserver, Closure<dyn FnMut()>)>);
+                let disconnect = move || {
+                    observer.update_value(|slot| {
+                        if let Some((obs, _)) = slot.take() {
+                            obs.disconnect();
+                        }
+                    });
+                };
+                Effect::new(move |_| {
+                    let Some(el) = container.get() else {
+                        return;
+                    };
+                    disconnect();
+                    let measured = el.clone();
+                    let measure = Closure::<dyn FnMut()>::new(move || {
+                        let rect = measured.get_bounding_client_rect();
+                        let size = (rect.width() as f32, rect.height() as f32);
+                        if size.0 > 0.0 && size.1 > 0.0 && canvas.try_get_untracked() != Some(size) {
+                            let _ = canvas.try_set(size);
+                        }
+                    });
+                    let Ok(obs) = web_sys::ResizeObserver::new(measure.as_ref().unchecked_ref())
+                    else {
+                        return;
+                    };
+                    obs.observe(&el);
+                    observer.set_value(Some((obs, measure)));
+                });
+                on_cleanup(disconnect);
                 view! {
                     <div
+                        node_ref=container
                         class="ui-media-bg relative w-full mx-auto rounded overflow-hidden select-none"
                         style=("aspect-ratio", aspect)
                         style=("max-width", canvas_box)
@@ -249,26 +310,30 @@ pub(super) fn LabelCanvas(
                         // instead of scrolling/zooming the page (browsers cancel
                         // pointermove mid-pan otherwise).
                         //
-                        // preserveAspectRatio="none": the 640-unit viewBox stretches
-                        // to the same box as the image, so normalized cx/cy/w/h keep
-                        // mapping 1:1 onto the picture with no per-axis scale in the
-                        // drawing or pointer math (`norm_coords` measures x and y
-                        // against the svg's own width and height). Side effect: on a
-                        // 16:9 image the square resize handles render slightly wider
-                        // than tall — acceptable.
+                        // The viewBox is the measured canvas size in CSS px, so one
+                        // overlay unit is one screen pixel (fixed-size handles,
+                        // strokes and text, undistorted glyphs on a 16:9 image) and
+                        // normalized cx/cy/w/h map onto the picture by multiplying
+                        // with that size. preserveAspectRatio="none" keeps the
+                        // overlay stretched over the whole image in the frame between
+                        // a resize and the next measurement; the pointer math
+                        // (`norm_coords`) measures against the svg's own box anyway.
                         <svg
                             class="absolute inset-0 w-full h-full cursor-crosshair touch-none"
-                            viewBox=format!("0 0 {} {}", VIEW, VIEW)
+                            viewBox=move || {
+                                let (w, h) = canvas.get();
+                                format!("0 0 {w} {h}")
+                            }
                             preserveAspectRatio="none"
                             on:pointerdown=on_pointer_down
                             on:pointermove=on_pointer_move
                             on:pointerup=commit_draft
                             on:pointerleave=move |_| draft.set(None)
                         >
-                            {committed_boxes_layer(i18n, boxes, selected_box, sam_mode, classes, on_box_down, on_handle_down)}
-                            {suggestions_layer(sam_suggestions)}
-                            {points_layer(sam_points)}
-                            {draft_layer(draft, classes, active_class)}
+                            {committed_boxes_layer(i18n, canvas, boxes, selected_box, sam_mode, classes, on_press)}
+                            {suggestions_layer(canvas, suggestions, suggestion_names)}
+                            {points_layer(canvas, sam_points)}
+                            {draft_layer(canvas, draft, classes, active_class)}
                         </svg>
                     </div>
                     {status_bar(i18n, boxes, classes, active_class)}

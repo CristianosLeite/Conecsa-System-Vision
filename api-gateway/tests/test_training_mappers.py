@@ -48,6 +48,13 @@ class TestJobDict:
         assert d["federated"] is True
         assert d["result_weights_id"] == "abc123"
 
+    def test_geometry_is_mapped(self):
+        assert _job_dict(_job(geometry="tiles:auto"))["geometry"] == "tiles:auto"
+
+    def test_missing_geometry_defaults_to_empty(self):
+        # Older stubs (or a job still preparing) carry no geometry.
+        assert _job_dict(_job())["geometry"] == ""
+
 
 class TestMetaDict:
     def test_full_meta(self):

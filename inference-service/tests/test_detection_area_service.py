@@ -147,3 +147,9 @@ class TestPersistenceReload:
         assert len(reloaded) == 1
         assert reloaded[0].is_editing is False  # persisted areas are not editing
         assert reloaded[0].label == "#1"
+
+
+def test_persisting_leaves_only_the_storage_file_behind(svc, tmp_path):
+    # Writes go through conecsa_common.atomic: no temp file survives a save.
+    svc.add()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["areas.json"]

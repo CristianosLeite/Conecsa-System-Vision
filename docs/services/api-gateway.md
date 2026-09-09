@@ -38,6 +38,17 @@ proto stubs on top of `conecsa-os-base:base`.
     task thread each. Size `WAITRESS_THREADS` above the worst-case number of
     concurrent streams.
 
+!!! note "Every backend call has a deadline"
+    The gRPC channels are wrapped by an interceptor (`gateway/rpc_deadlines.py`)
+    that gives every unary and client-streaming call a deadline when the call
+    site passes none — `GATEWAY_GRPC_TIMEOUT` for control calls,
+    `GATEWAY_GRPC_LONG_TIMEOUT` for the slow ones (runtime swaps, training
+    start/stop, dataset deletion) and `GATEWAY_GRPC_UPLOAD_TIMEOUT` for
+    uploads — so a backend that stays connected but stops answering cannot
+    park a request thread forever. A deadline that expires answers `504`;
+    an unreachable backend answers `503`. Server streams (the event relays,
+    downloads) are unbounded by design.
+
 ## Reference
 
 - Full endpoint catalogue: [HTTP API reference](../api-reference.md)

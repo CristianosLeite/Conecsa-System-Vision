@@ -1,11 +1,15 @@
 """SAM (Segment Anything) assisted-labeling routes: status, load/unload of the
 checkpoint and point/text-prompted segmentation."""
+import logging
+
 import grpc
 from flask import request
 
-from ..grpc_clients import clients, trn
+from ..grpc_clients import clients, inf, trn
 from . import training_bp
 from .helpers import _grpc_error, _json, _json_error, _result
+
+logger = logging.getLogger(__name__)
 
 
 @training_bp.route("/api/v1/training/sam", methods=["GET"])
@@ -20,7 +24,17 @@ def training_sam_status():
 
 @training_bp.route("/api/v1/training/sam/load", methods=["POST"])
 def training_sam_load():
-    """POST /api/v1/training/sam/load — gateway relay."""
+    """POST /api/v1/training/sam/load — gateway relay.
+
+    One labeling assistant at a time: the SAM3 cold load peaks near the
+    Orin's whole memory, so the TensorRT labeling engine (inference-service)
+    is dropped first, best-effort and status-probed.
+    """
+    try:
+        if clients.model.GetLabelModelStatus(inf.Empty()).loaded:
+            clients.model.UnloadLabelModel(inf.Empty())
+    except grpc.RpcError as exc:
+        logger.warning("Best-effort label-model unload before SAM load failed: %s", exc)
     try:
         # Cold load reads the multi-GB checkpoint; allow well beyond the
         # default control-call deadline.

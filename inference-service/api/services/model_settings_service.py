@@ -24,13 +24,13 @@ the live ``TILING_MODE``/``TILING_TILE`` and logs a warning on a mismatch —
 a whole-frame model under grid tiling, or a tile model with tiling off. The
 geometry is never applied either; an unknown geometry is silent.
 """
-import errno
 import json
 import logging
 import os
-import tempfile
 from threading import Lock
 from typing import Optional
+
+from conecsa_common.atomic import atomic_write_json
 
 from ..config import Config
 
@@ -273,33 +273,8 @@ class ModelSettingsService:
 
     @staticmethod
     def _write_payload(path: str, payload: dict) -> None:
-        """Atomically write ``payload`` as JSON (temp file + ``os.replace``)."""
-        tmp_path = None
+        """Durably write ``payload`` as JSON (``conecsa_common.atomic``; best-effort)."""
         try:
-            storage_dir = os.path.dirname(path)
-            os.makedirs(storage_dir, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                "w",
-                dir=storage_dir,
-                prefix=".model_settings_",
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as f:
-                json.dump(payload, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-                tmp_path = f.name
-            os.replace(tmp_path, path)
+            atomic_write_json(path, payload, indent=2)
         except Exception as exc:  # noqa: BLE001 - best-effort persist
             logger.error("Failed to persist model settings to %s: %s", path, exc)
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError as cleanup_exc:
-                    if cleanup_exc.errno != errno.ENOENT:
-                        logger.warning(
-                            "Failed to remove temp model settings file %s: %s",
-                            tmp_path,
-                            cleanup_exc,
-                        )

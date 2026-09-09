@@ -24,8 +24,11 @@ import hashlib
 import hmac
 import logging
 import os
+import secrets
+import threading
 from typing import TYPE_CHECKING
 
+from conecsa_common.atomic import fsync_dir
 from flask import Blueprint, jsonify, request
 
 from . import clock
@@ -136,23 +139,9 @@ def _load_or_create_key() -> "ec.EllipticCurvePrivateKey":
         return _load()
     finally:
         os.unlink(staged)
-    _fsync_dir(CERT_DIR)
+    fsync_dir(CERT_DIR)
     logger.info("generated device enrollment key at %s", KEY_PATH)
     return key
-
-
-def _fsync_dir(directory: str) -> None:
-    """Make a directory entry durable (best-effort)."""
-    try:
-        dir_fd = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(dir_fd)
-    except OSError:
-        pass
-    finally:
-        os.close(dir_fd)
 
 
 def public_fingerprint() -> str:
@@ -225,24 +214,44 @@ def _pairing_allowed():
 def _install_certs(device_cert: str, ca_cert: str) -> None:
     """Persist the hub-signed server cert and the hub CA (near-atomic pair).
 
-    Both temp files are written and fsynced before either rename, so the
-    window where nginx could observe a new leaf with the old CA shrinks to
-    the two back-to-back renames (microseconds; nginx only re-reads on its
-    entrypoint-triggered reload). Accepted residual — a full versioned-dir
-    switch is not worth the moving parts here.
+    Both files are staged under unique, exclusively-created temp names
+    (the same technique as ``_load_or_create_key``: a fixed ``.tmp`` name let
+    two concurrent completions truncate and rename each other's files),
+    written and fsynced before either rename, so the window where nginx could
+    observe a new leaf with the old CA shrinks to the two back-to-back renames
+    (microseconds; nginx only re-reads on its entrypoint-triggered reload).
+    Accepted residual — a full versioned-dir switch is not worth the moving
+    parts here. A failure anywhere leaves no staging file behind and, before
+    the first rename, the previous pair untouched. Completion is serialized by
+    ``_COMPLETE_LOCK`` in the route, so two requests never reach this at once.
     """
     _ensure_dir()
     staged = []
-    for path, data in ((CERT_PATH, device_cert), (CA_PATH, ca_cert)):
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        staged.append((tmp, path))
-    for tmp, path in staged:
-        os.replace(tmp, path)
-    _fsync_dir(CERT_DIR)
+    try:
+        for path, data in ((CERT_PATH, device_cert), (CA_PATH, ca_cert)):
+            tmp = f"{path}.tmp-{secrets.token_hex(8)}"
+            # Public material, but nginx runs as another user: world-readable.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            staged.append((tmp, path))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+        for tmp, path in staged:
+            os.replace(tmp, path)
+    finally:
+        for tmp, _path in staged:
+            try:
+                os.unlink(tmp)  # only still present after a failure
+            except FileNotFoundError:
+                pass
+    fsync_dir(CERT_DIR)
+
+
+# Serializes /enroll/complete and /enroll/reset: without a token, the only
+# gate against a second completion is is_enrolled(), which two concurrent
+# tokenless requests both pass before either installed anything.
+_COMPLETE_LOCK = threading.Lock()
 
 
 @enroll_bp.route("/info", methods=["GET"])
@@ -281,8 +290,17 @@ def complete():
     """Install the hub-signed certificate and CA (requires the pairing token).
 
     nginx is reloaded automatically by its entrypoint watcher when the cert
-    files appear, flipping the device into mTLS-enforcing mode.
+    files appear, flipping the device into mTLS-enforcing mode. One completion
+    at a time: the pairing check and the install run under ``_COMPLETE_LOCK``,
+    so a concurrent tokenless request sees the device enrolled and is refused
+    instead of racing the certificate pair.
     """
+    with _COMPLETE_LOCK:
+        return _complete_locked()
+
+
+def _complete_locked():
+    """Body of ``/enroll/complete``; the caller holds ``_COMPLETE_LOCK``."""
     ok, msg = _pairing_allowed()
     if not ok:
         return jsonify({"error": msg}), 403
@@ -398,15 +416,18 @@ def _reset_authorized() -> bool:
 def reset():
     """Unpair: clear the hub-signed cert + CA so the device returns to enrollment
     mode (nginx flips back automatically). Authorized via mTLS or the token."""
-    if not is_enrolled():
-        return jsonify({"status": "not_enrolled"})
-    if not _reset_authorized():
-        return jsonify({"error": "unpair requires the owning hub (mTLS) or the pairing token"}), 403
-    for path in (CERT_PATH, CA_PATH):
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            # Reset is idempotent; the file may already be absent.
-            pass
+    with _COMPLETE_LOCK:
+        if not is_enrolled():
+            return jsonify({"status": "not_enrolled"})
+        if not _reset_authorized():
+            return jsonify({"error": "unpair requires the owning hub (mTLS) or "
+                                     "the pairing token"}), 403
+        for path in (CERT_PATH, CA_PATH):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                # Reset is idempotent; the file may already be absent.
+                pass
+        fsync_dir(CERT_DIR)
     logger.info("device unpaired: cleared hub-signed certificate and CA")
     return jsonify({"status": "reset", "logical_name": logical_name()})

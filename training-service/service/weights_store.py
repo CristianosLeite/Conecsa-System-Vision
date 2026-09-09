@@ -13,6 +13,8 @@ import time
 import uuid
 from typing import Iterable, Tuple
 
+from conecsa_common.atomic import fsync_dir
+
 from .config import Config
 from .dataset_service import DatasetError
 
@@ -83,6 +85,7 @@ class WeightsStore:
             if size == 0:
                 raise DatasetError("Weights upload is empty")
             os.rename(tmp, self._blob_path(weights_id))
+            fsync_dir(self._config.weights_dir)
         except Exception:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -99,6 +102,7 @@ class WeightsStore:
         try:
             shutil.copyfile(src_path, tmp)
             os.rename(tmp, self._blob_path(weights_id))
+            fsync_dir(self._config.weights_dir)
         except Exception:
             if os.path.exists(tmp):
                 os.remove(tmp)

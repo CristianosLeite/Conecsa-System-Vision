@@ -44,8 +44,11 @@ done
 # ── What is public ────────────────────────────────────────────────────────────
 # Everything NOT listed here stays private. Deliberately absent:
 #   hub-vision/          — the closed fleet hub (code, icons, tauri config)
-#   Cargo.toml/Cargo.lock (root) — workspace whose only member is hub-vision;
-#                          system-vision and webcam-server are standalone
+#   Cargo.toml/Cargo.lock (root) — workspace of hub-vision and the manual's
+#                          simulator crates; system-vision and webcam-server
+#                          are standalone
+#   manual/              — the interactive user manual (links hub-vision); only
+#                          its published site is public
 #   .github/             — CI runs the hub suites; public CI is authored separately
 #   AGENTS.md, CLAUDE.md, .agents/, .claude/ — agent instructions, knowledge
 #                          base and Claude Code harness stay private
@@ -80,6 +83,11 @@ EXCLUDES=(
   "i18n/hub-vision"
   "scripts/build-hub.sh"
   "scripts/build-hub-jetson.sh"
+  "scripts/check-hub-builder.sh"
+  # The interactive user manual is private (manual/ links hub-vision); its
+  # build/publish scripts would fail immediately on the mirror.
+  "scripts/build-manual.sh"
+  "scripts/publish-manual.sh"
   "system-vision/public/Good Times Rg.otf"
   # Hub deployment glue (weston kiosk wrapper): no hub source, but reveals the
   # closed hub's runtime/KEK details and depends on the excluded
@@ -93,6 +101,8 @@ EXCLUDES=(
 # companion product) and matches none of them.
 FORBIDDEN_PATH_PATTERNS=(
   '^hub-vision(/|$)'
+  # The interactive user manual (manual/) links the closed hub crate.
+  '^manual(/|$)'
   '^i18n/hub-vision(/|$)'
   'src-tauri'
   'build-hub'
@@ -110,6 +120,8 @@ FORBIDDEN_PATH_PATTERNS=(
 # Content mentions worth eyeballing before a push (informational only).
 REPORT_TOKENS=(
   'hub-vision'
+  'manual/'
+  'build-manual'
   'src-tauri'
   'secrets\.bin'
   'Good Times'

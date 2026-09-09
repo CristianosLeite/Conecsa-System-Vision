@@ -4,30 +4,38 @@
   /* ── Label editor canvas (training) ─────────────────────────────────────── */
   /* SVG presentation: static styling lives here; per-class colors and the
      selection-driven fill/stroke-width stay as element attributes (which CSS
-     here intentionally does not set, so they take effect). */
+     here intentionally does not set, so they take effect). The overlay's
+     viewBox is sized in CSS pixels to the rendered canvas, so every width
+     below is a real on-screen pixel; non-scaling-stroke guards the one frame
+     where the viewBox lags a resize. */
   .ui-label-box {
     pointer-events: all;
     cursor: move;
+    vector-effect: non-scaling-stroke;
   }
 
   /* SAM mode: boxes are click-through so a click becomes a point prompt. */
   .ui-label-box-locked {
     pointer-events: none;
+    vector-effect: non-scaling-stroke;
   }
 
   .ui-label-text {
     pointer-events: none;
     paint-order: stroke;
     stroke: rgba(0, 0, 0, 0.67);
-    stroke-width: 3px;
-    font-size: 14px;
+    stroke-width: 2.5px;
+    font-size: 12px;
     font-weight: 700;
   }
 
+  /* Hollow: the translucent fill keeps the whole square a hit target while
+     the object underneath stays visible. */
   .ui-label-handle {
-    fill: #ffffff;
-    stroke-width: 1.5;
+    fill: rgba(255, 255, 255, 0.25);
+    stroke-width: 1.25;
     pointer-events: all;
+    vector-effect: non-scaling-stroke;
   }
 
   .ui-label-handle-nwse {
@@ -41,15 +49,17 @@
   .ui-label-suggestion {
     fill: none;
     stroke: var(--accent-yellow);
-    stroke-width: 2.5;
-    stroke-dasharray: 8 5;
+    stroke-width: 1.25;
+    stroke-dasharray: 6 4;
     pointer-events: none;
+    vector-effect: non-scaling-stroke;
   }
 
   .ui-label-point {
     stroke: #fff;
-    stroke-width: 2;
+    stroke-width: 1.5;
     pointer-events: none;
+    vector-effect: non-scaling-stroke;
   }
 
   .ui-label-point-positive {
@@ -62,8 +72,9 @@
 
   .ui-label-draft {
     fill: none;
-    stroke-width: 2.5;
+    stroke-width: 1.25;
     stroke-dasharray: 4 3;
     pointer-events: none;
+    vector-effect: non-scaling-stroke;
   }
 }

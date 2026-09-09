@@ -14,6 +14,8 @@ import time
 import uuid
 from typing import Dict, List
 
+from conecsa_common.atomic import fsync_dir
+
 from .config import Config
 from .dataset_import import import_dataset_zip
 from .dataset_service import (
@@ -24,6 +26,9 @@ from .dataset_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A dataset being deleted is renamed to this prefix first (see delete()).
+_TOMBSTONE_PREFIX = ".deleting-"
 
 
 class DatasetRegistry:
@@ -41,6 +46,7 @@ class DatasetRegistry:
         os.makedirs(config.datasets_dir, exist_ok=True)
         os.makedirs(config.runs_dir, exist_ok=True)
         self._migrate_legacy()
+        self._sweep_tombstones()
         self._scan()
 
     # ── startup ───────────────────────────────────────────────────────────────
@@ -53,18 +59,38 @@ class DatasetRegistry:
         dataset_id = str(uuid.uuid4())
         dst = self._dataset_root(dataset_id)
         os.rename(legacy, dst)  # same volume: atomic; legacy gone afterwards
+        fsync_dir(self._config.datasets_dir)
         ds = DatasetService(dataset_id, dst, self._config)
         # No geometry argument: the legacy layout only ever held 640×640
         # letterboxed images, whatever DATASET_IMG_SIZE says now.
         ds.write_meta("Default")
         logger.info("Migrated legacy dataset %s -> %s", legacy, dst)
 
+    def _sweep_tombstones(self) -> None:
+        """Remove datasets whose deletion did not finish (see delete()).
+
+        A tombstone is unregistered already, so this is the retry for a
+        deletion whose rmtree failed: every restart tries again until the
+        directory is gone.
+        """
+        for entry in os.listdir(self._config.datasets_dir):
+            if not entry.startswith(_TOMBSTONE_PREFIX):
+                continue
+            path = os.path.join(self._config.datasets_dir, entry)
+            try:
+                shutil.rmtree(path)
+                logger.info("Removed leftover dataset tombstone %s", entry)
+            except OSError as exc:
+                logger.warning("Dataset tombstone %s still cannot be removed: %s", entry, exc)
+
     def _scan(self) -> None:
         """Scan."""
         for entry in os.listdir(self._config.datasets_dir):
             root = os.path.join(self._config.datasets_dir, entry)
+            if entry.startswith("."):
+                continue  # staging dirs (.import-*), tombstones (.deleting-*)
             if not os.path.isfile(os.path.join(root, "meta.json")):
-                continue  # staging dirs (.import-*) and strays
+                continue  # strays
             try:
                 self._check_id(entry)
             except DatasetError:
@@ -163,7 +189,17 @@ class DatasetRegistry:
             ds.frozen = False
 
     def delete(self, dataset_id: str) -> None:
-        """Delete."""
+        """Delete a dataset: unregister it, then remove its files.
+
+        The directory is first renamed to a tombstone (``.deleting-<id>-<uuid>``)
+        under the lock, and only then is the entry dropped: a rename that
+        fails leaves the dataset registered and retryable, while a successful
+        one makes the dataset invisible to every reader at once — ``_scan``
+        ignores dot-directories, so a tombstone can never come back as a
+        dataset after a restart. The rmtree of the tombstone runs outside the
+        lock; if it fails the error is reported and the next restart's
+        ``_sweep_tombstones`` retries it.
+        """
         self._check_id(dataset_id)
         with self._lock:
             ds = self._datasets.get(dataset_id)
@@ -171,19 +207,27 @@ class DatasetRegistry:
                 raise DatasetError(f"Dataset '{dataset_id}' not found")
             if ds.frozen:
                 raise DatasetError("Dataset is locked while a training job is running")
+            root = self._dataset_root(dataset_id)
+            tombstone = os.path.join(
+                self._config.datasets_dir,
+                f"{_TOMBSTONE_PREFIX}{dataset_id}-{uuid.uuid4().hex}")
+            try:
+                os.rename(root, tombstone)
+                fsync_dir(self._config.datasets_dir)
+            except FileNotFoundError:
+                tombstone = None  # nothing on disk; just unregister
+            except OSError as exc:
+                raise DatasetError(f"Dataset could not be deleted: {exc}") from exc
             self._datasets.pop(dataset_id, None)
-        # The entry is unreachable now, so the filesystem work can run outside
-        # the lock — and failures are reported, not silently half-done.
+        self._publish()
+        if tombstone is None:
+            return
         try:
-            shutil.rmtree(self._dataset_root(dataset_id))
-        except FileNotFoundError:
-            pass
+            shutil.rmtree(tombstone)
         except OSError as exc:
-            self._publish()
             raise DatasetError(
                 f"Dataset removed, but some files could not be deleted: {exc}"
             ) from exc
-        self._publish()
 
     def import_zip(self, name: str, zip_path: str) -> dict:
         """Validate + normalize an uploaded YOLO-format ZIP into a new dataset.
@@ -205,6 +249,7 @@ class DatasetRegistry:
             )
             root = self._dataset_root(dataset_id)
             os.rename(staging, root)
+            fsync_dir(self._config.datasets_dir)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise

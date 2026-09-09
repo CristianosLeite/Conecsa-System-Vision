@@ -18,6 +18,7 @@ import itertools
 import logging
 import os
 import socket
+import string
 import time
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,54 @@ CTRL_DIR = "/run/wpa_supplicant"
 
 _counter = itertools.count()
 
+_SSID_MAX_BYTES = 32
+_PASSPHRASE_MIN, _PASSPHRASE_MAX = 8, 63
+_PSK_HEX_LEN = 64
+
 
 class WpaError(RuntimeError):
     """A wpa_supplicant control command failed, timed out, or returned FAIL."""
+
+
+# ── credential serialization ────────────────────────────────────────────────
+# SET_NETWORK values are parsed by wpa_supplicant's config grammar: a
+# double-quoted string with backslash escapes, or a bare hex string. The
+# operator's SSID/passphrase must never be able to change that grammar.
+
+def encode_ssid(ssid: str) -> str:
+    """Serialize an SSID for ``SET_NETWORK <id> ssid`` as its hex byte form.
+
+    Hex sidesteps quoting entirely, so quotes, backslashes, spaces and
+    non-ASCII characters all round-trip exactly. Raises :class:`WpaError` for
+    an empty SSID or one over the 802.11 limit of 32 bytes.
+    """
+    raw = ssid.encode("utf-8")
+    if not raw:
+        raise WpaError("SSID is required")
+    if len(raw) > _SSID_MAX_BYTES:
+        raise WpaError(f"SSID must be at most {_SSID_MAX_BYTES} bytes")
+    return raw.hex()
+
+
+def encode_psk(password: str) -> str:
+    """Serialize a passphrase (or a raw PSK) for ``SET_NETWORK <id> psk``.
+
+    A 64-digit hex string is the pre-shared key itself and goes bare;
+    anything else is a WPA passphrase, which the standard restricts to 8–63
+    printable ASCII characters, serialized as a quoted string with ``\\`` and
+    ``"`` escaped the way wpa_supplicant's parser expects. Anything outside
+    those rules raises :class:`WpaError` instead of reaching the socket.
+    """
+    if len(password) == _PSK_HEX_LEN and all(c in string.hexdigits for c in password):
+        return password
+    if not _PASSPHRASE_MIN <= len(password) <= _PASSPHRASE_MAX:
+        raise WpaError(
+            f"Wi-Fi passphrase must be {_PASSPHRASE_MIN}-{_PASSPHRASE_MAX} characters "
+            f"(or a {_PSK_HEX_LEN}-digit hex key)")
+    if any(not 0x20 <= ord(c) <= 0x7E for c in password):
+        raise WpaError("Wi-Fi passphrase must be printable ASCII")
+    escaped = password.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 class WpaCli:

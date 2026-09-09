@@ -51,6 +51,8 @@ def _job_dict(job) -> dict:
         "dataset_id": job.dataset_id,
         "federated": job.federated,
         "result_weights_id": job.result_weights_id,
+        "base_model": getattr(job, "base_model", ""),
+        "geometry": getattr(job, "geometry", ""),
     }
 
 
@@ -95,3 +97,34 @@ def _parse_named_boxes(raw: str) -> list:
 def _release_runtime() -> "inf.Result":
     """Release the inference GPU runtime (GPU handover to training)."""
     return clients.management.ReleaseRuntime(inf.Empty())
+
+
+#: Training job statuses that own the GPU (the trainer subprocess is alive).
+ACTIVE_JOB_STATUSES = ("preparing", "training", "uploading")
+#: Conversion statuses meaning a TensorRT build may hold the GPU.
+ACTIVE_CONVERSION_STATUSES = ("pending", "converting_to_onnx", "converting_to_engine")
+
+
+def training_job_active() -> bool:
+    """True while a training job holds the GPU (``ACTIVE_JOB_STATUSES``).
+
+    An unreachable training-service cannot be training, so a gRPC failure
+    answers False (logged): the callers gate detection on this and must not
+    be blocked by a service that is merely down.
+    """
+    try:
+        job = clients.training.GetTraining(trn.Empty())
+    except grpc.RpcError as exc:
+        logger.warning("Training job probe failed; assuming idle: %s", exc)
+        return False
+    return job.status in ACTIVE_JOB_STATUSES
+
+
+def conversion_active() -> bool:
+    """True while a model conversion (TensorRT build) may hold the GPU."""
+    try:
+        cl = clients.model.ListConversions(inf.Empty())
+    except grpc.RpcError as exc:
+        logger.warning("Conversion probe failed; assuming idle: %s", exc)
+        return False
+    return any(j.status in ACTIVE_CONVERSION_STATUSES for j in cl.jobs)

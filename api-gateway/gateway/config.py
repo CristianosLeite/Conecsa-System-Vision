@@ -58,9 +58,21 @@ class Settings:
     MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get(
         "MAX_IMAGE_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 
-    # Per-call gRPC deadlines (seconds). Control calls are quick; Wi-Fi
-    # scan/connect block on the radio and are given longer in the hardware client.
+    # gRPC deadlines (seconds), applied by gateway/rpc_deadlines.py to every
+    # call that passes no explicit timeout. Control calls are quick; a runtime
+    # swap or a training start is not (long); client-streaming uploads carry
+    # whole files (upload). Wi-Fi scan/connect set their own in hardware.py.
     GRPC_TIMEOUT = float(os.environ.get("GATEWAY_GRPC_TIMEOUT", "12"))
+    GRPC_LONG_TIMEOUT = float(os.environ.get("GATEWAY_GRPC_LONG_TIMEOUT", "120"))
+    GRPC_UPLOAD_TIMEOUT = float(os.environ.get("GATEWAY_GRPC_UPLOAD_TIMEOUT", "600"))
+
+    # Editor tokens for the embedded Node-RED editor (gateway/flow_token.py):
+    # signed with this secret and verified by flow/admin-token.js. Falls back
+    # to the credential secret Node-RED already requires, so a deployment
+    # needs no extra secret; empty disables the route (503).
+    FLOW_ADMIN_TOKEN_SECRET = (os.environ.get("FLOW_ADMIN_TOKEN_SECRET", "").strip()
+                               or os.environ.get("NODE_RED_CREDENTIAL_SECRET", "").strip())
+    FLOW_ADMIN_TOKEN_TTL_SEC = _env_float("FLOW_ADMIN_TOKEN_TTL_SEC", 12 * 3600.0)
 
     # Auto-exit training mode after this much client silence (the orphaned-
     # training watchdog; see gateway/training/orphan.py). 0 disables it.

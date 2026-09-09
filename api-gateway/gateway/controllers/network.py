@@ -41,11 +41,25 @@ def set_network_config():
     method = body.get("method")
     if not method:
         return _json({"error": "'method' field is required"}, 400)
+    if method not in ("auto", "static"):
+        return _json({"error": "'method' must be 'auto' or 'static'"}, 400)
+    prefix = None
+    if body.get("prefix") not in (None, ""):
+        try:
+            prefix = int(body["prefix"])
+        except (TypeError, ValueError):
+            return _json({"error": "'prefix' must be an integer"}, 400)
+    dns = body.get("dns")
+    if dns is not None and (not isinstance(dns, list)
+                            or not all(isinstance(s, str) for s in dns)):
+        return _json({"error": "'dns' must be a list of strings"}, 400)
+    # The agent parses every address with `ipaddress` and rejects anything
+    # else; the checks above only keep type errors from becoming a 500.
     try:
         result = hardware.set_network_config(
             interface=body.get("interface", "wired"), method=method,
-            address=body.get("address"), prefix=body.get("prefix"),
-            gateway=body.get("gateway"), dns=body.get("dns"))
+            address=body.get("address"), prefix=prefix,
+            gateway=body.get("gateway"), dns=dns)
     except grpc.RpcError as exc:
         return _network_agent_error(exc)
     except Exception as exc:  # noqa: BLE001

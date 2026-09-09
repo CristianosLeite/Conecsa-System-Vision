@@ -6,6 +6,9 @@ const path = require("path");
 const SETTINGS_PATH = path.join(__dirname, "..", "..", "..", "settings.js");
 
 function loadSettingsFresh() {
+  // Jest keeps its own module registry: deleting from require.cache alone
+  // hands back the previously evaluated settings object.
+  jest.resetModules();
   delete require.cache[require.resolve(SETTINGS_PATH)];
   return require(SETTINGS_PATH);
 }
@@ -36,5 +39,23 @@ describe("settings.js credential secret", () => {
     process.env.NODE_RED_CREDENTIAL_SECRET = "x";
     const settings = loadSettingsFresh();
     expect(settings.httpNodeCors).toBeUndefined();
+  });
+
+  it("turns editor authentication on with the credential secret", () => {
+    process.env.NODE_RED_CREDENTIAL_SECRET = "x";
+    delete process.env.FLOW_ADMIN_AUTH;
+    const settings = loadSettingsFresh();
+    expect(settings.adminAuth.type).toBe("credentials");
+    expect(typeof settings.adminAuth.tokens).toBe("function");
+  });
+
+  it("leaves the editor open only when FLOW_ADMIN_AUTH=0", () => {
+    process.env.NODE_RED_CREDENTIAL_SECRET = "x";
+    process.env.FLOW_ADMIN_AUTH = "0";
+    try {
+      expect(loadSettingsFresh().adminAuth).toBeUndefined();
+    } finally {
+      delete process.env.FLOW_ADMIN_AUTH;
+    }
   });
 });

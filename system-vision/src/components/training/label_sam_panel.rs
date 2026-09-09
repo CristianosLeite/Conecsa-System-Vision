@@ -2,26 +2,28 @@
 
 use leptos::prelude::*;
 
-use crate::api::LabelBox;
 use crate::components::configuration::threshold_slider::ThresholdSlider;
 use crate::i18n::*;
+
+use super::dataset_editor::AiState;
 
 /// AI-assist (SAM) prompt bar: a concept text prompt + Suggest/Accept/Clear and
 /// the confidence threshold. Rendered by the editor only while SAM is on.
 /// Suggestions are tagged with the prompt's class (created if new) on Accept.
 #[component]
 pub(super) fn LabelSamPanel(
-    sam_text: ReadSignal<String>,
-    set_sam_text: WriteSignal<String>,
-    sam_busy: ReadSignal<bool>,
-    sam_suggestions: ReadSignal<Vec<LabelBox>>,
-    sam_threshold: ReadSignal<f32>,
-    set_sam_threshold: WriteSignal<f32>,
+    ai: AiState,
     on_sam_suggest: Callback<()>,
     on_sam_accept: Callback<()>,
     on_sam_clear: Callback<()>,
 ) -> impl IntoView {
     let i18n = use_i18n();
+    let sam_text = ai.sam_text.read_only();
+    let set_sam_text = ai.sam_text.write_only();
+    let sam_busy = ai.busy;
+    let sam_suggestions = ai.suggestions;
+    let sam_threshold = ai.threshold.read_only();
+    let set_sam_threshold = ai.threshold.write_only();
     view! {
         <div class="ui-list-box flex flex-col gap-2 p-2">
             <div class="flex items-center gap-2 flex-wrap">

@@ -2,16 +2,17 @@
 
 use leptos::prelude::*;
 
-use crate::api::{LabelBox, SamStatusResponse};
-
+use super::dataset_editor::{AiState, Assistant, ClassesState, ImagesState, LabelActions};
 use super::label_canvas::LabelCanvas;
 use super::label_geometry::BoxDrag;
+use super::label_model_panel::LabelModelPanel;
 use super::label_sam_panel::LabelSamPanel;
 use super::label_toolbar::LabelToolbar;
 
 /// Bounding-box editor card. Owns the shared selection (`selected_box`) and the
 /// in-progress move/resize (`drag`) plus the global Delete / pointerup listeners,
-/// and composes the toolbar, the (optional) SAM prompt bar and the canvas.
+/// and composes the toolbar, the (optional) assistant bar — SAM prompts or a
+/// device model's Detect — and the canvas.
 ///
 /// Canvas interaction: drag the body to move, drag a corner handle to resize,
 /// drag on the background to draw a new box; in SAM mode clicks become point
@@ -20,32 +21,21 @@ use super::label_toolbar::LabelToolbar;
 #[component]
 pub(super) fn LabelEditor(
     dataset_id: String,
-    selected: ReadSignal<Option<String>>,
-    boxes: RwSignal<Vec<LabelBox>>,
-    classes: ReadSignal<Vec<String>>,
-    active_class: ReadSignal<usize>,
-    sam_mode: ReadSignal<bool>,
-    sam_points: RwSignal<Vec<(f32, f32, bool)>>,
-    sam_suggestions: ReadSignal<Vec<LabelBox>>,
-    sam_status: ReadSignal<Option<SamStatusResponse>>,
-    sam_busy: ReadSignal<bool>,
-    sam_text: ReadSignal<String>,
-    set_sam_text: WriteSignal<String>,
-    sam_threshold: ReadSignal<f32>,
-    set_sam_threshold: WriteSignal<f32>,
-    on_sam_toggle: Callback<()>,
-    on_sam_suggest: Callback<()>,
-    on_sam_accept: Callback<()>,
-    on_sam_clear: Callback<()>,
-    /// Persist the current boxes (true = show a toast).
-    on_save: Callback<bool>,
-    /// Fired when the user tries to draw a box with no class selected.
-    on_need_class: Callback<()>,
+    images: ImagesState,
+    classes: ClassesState,
+    ai: AiState,
+    actions: LabelActions,
 ) -> impl IntoView {
+    let selected = images.selected;
+    let boxes = images.boxes;
+    let assistant = ai.assistant;
+    let on_save = actions.on_save;
     let selected_box = RwSignal::new(None::<usize>);
     // Active move/resize of an already-committed box (shared with the canvas and
     // the global mouseup listener).
     let drag = RwSignal::new(None::<BoxDrag>);
+    let sam_mode = Signal::derive(move || assistant.get() == Assistant::Sam);
+    let panel_open = Signal::derive(move || assistant.get() != Assistant::Off);
 
     // A fresh image clears any selection/drag so a stale index can't carry over
     // to the next image's boxes after they autoload.
@@ -127,47 +117,45 @@ pub(super) fn LabelEditor(
         <div class="ui-card ui-card-pad-sm flex flex-col gap-3">
             <LabelToolbar
                 selected_box=selected_box.read_only()
-                boxes=boxes.read_only()
+                boxes=boxes
                 classes=classes
+                ai=ai
                 on_set_class=on_set_class
                 on_delete=on_delete
-                sam_status=sam_status
-                sam_busy=sam_busy
-                sam_mode=sam_mode
-                on_sam_toggle=on_sam_toggle
+                on_assistant_change=actions.on_assistant_change
             />
 
-            {move || if sam_mode.get() {
-                view! {
+            {move || match assistant.get() {
+                Assistant::Sam => view! {
                     <LabelSamPanel
-                        sam_text=sam_text
-                        set_sam_text=set_sam_text
-                        sam_busy=sam_busy
-                        sam_suggestions=sam_suggestions
-                        sam_threshold=sam_threshold
-                        set_sam_threshold=set_sam_threshold
-                        on_sam_suggest=on_sam_suggest
-                        on_sam_accept=on_sam_accept
-                        on_sam_clear=on_sam_clear
+                        ai=ai
+                        on_sam_suggest=actions.on_sam_suggest
+                        on_sam_accept=actions.on_accept
+                        on_sam_clear=actions.on_clear
                     />
-                }.into_any()
-            } else {
-                view! { <span/> }.into_any()
+                }.into_any(),
+                Assistant::Model(_) => view! {
+                    <LabelModelPanel
+                        ai=ai
+                        on_detect=actions.on_model_detect
+                        on_accept=actions.on_accept
+                        on_clear=actions.on_clear
+                    />
+                }.into_any(),
+                Assistant::Off => view! { <span/> }.into_any(),
             }}
 
             <LabelCanvas
                 dataset_id=dataset_id
-                selected=selected
-                boxes=boxes
+                images=images
                 classes=classes
-                active_class=active_class
+                ai=ai
                 selected_box=selected_box
                 drag=drag
                 sam_mode=sam_mode
-                sam_points=sam_points
-                sam_suggestions=sam_suggestions
+                panel_open=panel_open
                 on_save=on_save
-                on_need_class=on_need_class
+                on_need_class=actions.on_need_class
             />
         </div>
     }

@@ -75,7 +75,13 @@ pub struct ShmProducer {
     slot_size: usize,
     shm_name: std::ffi::CString,
     last_config_seq: AtomicU32,
+    /// Frames refused because they did not fit one slot (see `fits_slot`).
+    dropped_frames: AtomicU64,
 }
+
+/// After the first drop, log every Nth so an oversized stream cannot flood
+/// the journal at frame rate.
+const DROP_LOG_EVERY: u64 = 100;
 
 // SAFETY: `ptr` is a private mmap'd region that outlives the struct (unmapped
 // only in Drop); all access to it goes through raw-pointer/atomic operations
@@ -173,22 +179,46 @@ impl ShmProducer {
                 slot_size,
                 shm_name,
                 last_config_seq: AtomicU32::new(0),
+                dropped_frames: AtomicU64::new(0),
             })
         }
+    }
+
+    /// Frames refused because they exceeded the slot (RAW and JPEG alike).
+    /// A diagnostic counter: read by the tests today, and the natural hook
+    /// for a health field later.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped_frames.load(Ordering::Relaxed)
+    }
+
+    /// Whether a frame of `len` bytes fits one slot; counts and (rate-limited)
+    /// logs the drop otherwise.
+    ///
+    /// A JPEG used to be clamped to the slot and published as a complete
+    /// frame of `slot_size` bytes — a truncated, invalid image the consumer
+    /// accepted (its only check is `size <= slot_size`). A clear drop is the
+    /// honest outcome; `SHM_SLOT_MIN_BYTES` is the knob when it happens.
+    fn fits_slot(&self, len: usize, what: &str, dims: Option<(u32, u32)>) -> bool {
+        if len <= self.slot_size {
+            return true;
+        }
+        let dropped = self.dropped_frames.fetch_add(1, Ordering::Relaxed) + 1;
+        if dropped == 1 || dropped.is_multiple_of(DROP_LOG_EVERY) {
+            let dims = dims.map(|(w, h)| format!(" ({w}x{h})")).unwrap_or_default();
+            eprintln!(
+                "[webcam] {what} frame dropped (#{dropped}): {len} bytes exceeds SHM slot {} bytes{dims}; raise SHM_SLOT_MIN_BYTES",
+                self.slot_size
+            );
+        }
+        false
     }
 
     /// Publish a raw RGB frame (format_flag = 0).
     pub fn publish_frame_rgb(&self, data: &[u8], w: u32, h: u32) {
         // Never publish dimensions that cannot fit in one slot; that breaks
         // the consumer reshape path for RAW frames.
-        if data.len() > self.slot_size {
-            eprintln!(
-                "[webcam] RAW frame dropped: {} bytes exceeds SHM slot {} bytes ({}x{})",
-                data.len(),
-                self.slot_size,
-                w,
-                h
-            );
+        if !self.fits_slot(data.len(), "RAW", Some((w, h))) {
             return;
         }
 
@@ -199,12 +229,17 @@ impl ShmProducer {
 
     /// Publish a JPEG frame (format_flag = 1).
     pub fn publish_frame_jpeg(&self, data: &[u8]) {
+        if !self.fits_slot(data.len(), "JPEG", None) {
+            return;
+        }
         self.publish_frame(data, FORMAT_JPEG, None);
     }
 
-    /// Publish frame — the seqlock writer (see the module docs).
+    /// Publish frame — the seqlock writer (see the module docs). Callers
+    /// checked `fits_slot`, so the whole payload is copied.
     fn publish_frame(&self, data: &[u8], format: u32, dims: Option<(u32, u32)>) {
-        let len = data.len().min(self.slot_size);
+        debug_assert!(data.len() <= self.slot_size, "callers check fits_slot");
+        let len = data.len();
 
         unsafe {
             let seq = self.atomic_u64(off::FRAME_WRITE_SEQ);
@@ -340,6 +375,27 @@ mod tests {
         assert_eq!(seq_at(&shm), 2);
         shm.publish_frame_rgb(&[0u8; 64 * 64 * 3], 64, 64);
         assert_eq!(seq_at(&shm), 4);
+    }
+
+    #[test]
+    fn an_oversized_jpeg_is_dropped_not_truncated() {
+        // A JPEG larger than the slot used to be clamped and published as a
+        // complete frame: a corrupt image instead of a clear drop.
+        let name = format!("conecsa-shm-oversize-test-{}", std::process::id());
+        let shm = ShmProducer::new(&name, 64, 64).expect("create segment");
+        let seq_at = |shm: &ShmProducer| unsafe {
+            shm.atomic_u64(off::FRAME_WRITE_SEQ).load(Ordering::Acquire)
+        };
+        let too_big = vec![0xFFu8; shm.slot_size + 1];
+        shm.publish_frame_jpeg(&too_big);
+        assert_eq!(seq_at(&shm), 0, "nothing was published");
+        assert_eq!(shm.dropped_frames(), 1);
+        shm.publish_frame_rgb(&too_big, 64, 64);
+        assert_eq!(shm.dropped_frames(), 2);
+        // A frame that exactly fills the slot is still fine.
+        shm.publish_frame_jpeg(&too_big[..shm.slot_size]);
+        assert_eq!(seq_at(&shm), 2);
+        assert_eq!(shm.dropped_frames(), 2);
     }
 
     #[test]

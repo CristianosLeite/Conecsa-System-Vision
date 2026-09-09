@@ -42,6 +42,8 @@ pub(super) fn MainComponent(
     conversion_event: ReadSignal<Option<crate::api::ConversionStatusResponse>>,
     converting: ReadSignal<bool>,
     set_converting: WriteSignal<bool>,
+    /// True while a training job owns the GPU (disables Start Detection).
+    training_active: ReadSignal<bool>,
 ) -> impl IntoView {
     view! {
         <div class="app-scale-viewport">
@@ -129,6 +131,7 @@ pub(super) fn MainComponent(
                                     set_error_msg=set_error_msg
                                     set_success_msg=set_success_msg
                                     converting=converting
+                                    training_active=training_active
                                 />
                                 <div class="app-side-fill">
                                     <PerformanceStatistics stats=stats />

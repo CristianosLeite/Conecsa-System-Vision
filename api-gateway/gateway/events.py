@@ -215,10 +215,25 @@ def _relay_training_events() -> None:
             time.sleep(_RECONNECT_BACKOFF_S)
 
 
+_relays_lock = threading.Lock()
+_relays_started = False
+
+
 def start_relays() -> None:
-    """Start the daemon relay threads (idempotent per process)."""
-    threading.Thread(target=_relay_events, daemon=True, name="event-relay").start()
-    threading.Thread(target=_relay_stats, daemon=True, name="stats-relay").start()
-    threading.Thread(target=_relay_training_events, daemon=True,
-                     name="training-event-relay").start()
+    """Start the daemon relay threads, once per process.
+
+    Each relay loops for the life of the process, so a second call (an app
+    factory, a reloader, a test) would double every event and backend stream;
+    the once-flag makes the documented idempotency real.
+    """
+    global _relays_started
+    with _relays_lock:
+        if _relays_started:
+            logger.debug("Telemetry relays already running; not starting again")
+            return
+        _relays_started = True
+        threading.Thread(target=_relay_events, daemon=True, name="event-relay").start()
+        threading.Thread(target=_relay_stats, daemon=True, name="stats-relay").start()
+        threading.Thread(target=_relay_training_events, daemon=True,
+                         name="training-event-relay").start()
     logger.info("Telemetry relays started (StreamEvents + StreamStats + training)")

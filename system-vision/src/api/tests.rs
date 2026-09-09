@@ -27,3 +27,17 @@ fn empty_or_whitespace_input_yields_no_classes() {
     assert!(parse_classes_text("").is_empty());
     assert!(parse_classes_text(" \n\t\n").is_empty());
 }
+
+fn job(status: &str) -> TrainingJobStatus {
+    serde_json::from_value(serde_json::json!({ "status": status })).unwrap()
+}
+
+#[wasm_bindgen_test]
+fn training_job_is_active_only_while_it_owns_the_gpu() {
+    for s in ["preparing", "training", "uploading"] {
+        assert!(job(s).is_active(), "{s} must count as active");
+    }
+    for s in ["idle", "done", "failed", "cancelled", ""] {
+        assert!(!job(s).is_active(), "{s:?} must not count as active");
+    }
+}

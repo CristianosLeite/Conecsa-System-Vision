@@ -3,7 +3,7 @@
 use crate::api::wasm32::http::fetch_api;
 
 /// Response from POST /api/v1/system/power
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SystemPowerResponse {
     pub success: bool,
     pub message: String,

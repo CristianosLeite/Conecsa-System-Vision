@@ -71,3 +71,10 @@ class Config:
             self.OVERLAY_THRESHOLD = threshold
             return True
         return False
+
+    def set_confidence_threshold(self, threshold: float) -> bool:
+        """Set the detection confidence threshold (0..1); False when out of range."""
+        if 0.0 <= threshold <= 1.0:
+            self.CONFIDENCE_THRESHOLD = threshold
+            return True
+        return False

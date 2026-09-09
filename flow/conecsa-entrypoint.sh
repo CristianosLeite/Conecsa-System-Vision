@@ -8,7 +8,7 @@ set -e
 
 SEED=/usr/src/node-red/conecsa-seed
 
-for f in settings.js theme-auto.css conecsa_white_logo.png; do
+for f in settings.js admin-token.js theme-auto.css conecsa_white_logo.png; do
     if [ -f "$SEED/$f" ]; then
         cp -f "$SEED/$f" "/data/$f"
     fi

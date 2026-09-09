@@ -116,6 +116,30 @@ pub struct SamSegmentResponse {
     pub scores: Vec<f32>,
 }
 
+/// Status of the model labeling assistant: an existing engine on the
+/// inference-service's private TensorRT worker.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LabelModelStatusResponse {
+    pub loaded: bool,
+    #[serde(default)]
+    pub model_name: String,
+    #[serde(default)]
+    pub class_names: Vec<String>,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// Suggestions from the labeling model: `boxes[i].class_id` is the MODEL's
+/// class index; `class_names[i]` is what the dataset resolves it by.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LabelDetectResponse {
+    pub boxes: Vec<LabelBox>,
+    #[serde(default)]
+    pub scores: Vec<f32>,
+    #[serde(default)]
+    pub class_names: Vec<String>,
+}
+
 /// A `TrainingJobStatus` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrainingJobStatus {
@@ -140,6 +164,14 @@ pub struct TrainingJobStatus {
     pub started_at: f64,
     #[serde(default)]
     pub dataset_id: String,
+}
+
+impl TrainingJobStatus {
+    /// True while the job owns the GPU (trainer alive, or its result being
+    /// uploaded); mirrors the gateway's `ACTIVE_JOB_STATUSES`.
+    pub fn is_active(&self) -> bool {
+        matches!(self.status.as_str(), "preparing" | "training" | "uploading")
+    }
 }
 
 /// A `SimpleResult` struct.
@@ -497,13 +529,47 @@ pub async fn sam_segment(
     fetch_api("/api/v1/training/sam/segment", "POST", Some(&body)).await
 }
 
-/// Start training.
+/// Get label model status.
+pub async fn get_label_model_status() -> Result<LabelModelStatusResponse, String> {
+    fetch_api("/api/v1/training/label-model", "GET", None).await
+}
+
+/// Load an existing device model (model-list name) as the labeling assistant.
+pub async fn load_label_model(model_name: &str) -> Result<SimpleResult, String> {
+    let body = serde_json::json!({ "model_name": model_name }).to_string();
+    fetch_api("/api/v1/training/label-model/load", "POST", Some(&body)).await
+}
+
+/// Unload the labeling model.
+pub async fn unload_label_model() -> Result<SimpleResult, String> {
+    fetch_api("/api/v1/training/label-model/unload", "POST", Some("{}")).await
+}
+
+/// Run the loaded labeling model on one dataset image.
+pub async fn label_detect(
+    dataset_id: &str,
+    image_id: &str,
+    threshold: f32,
+) -> Result<LabelDetectResponse, String> {
+    let body = serde_json::json!({
+        "dataset_id": dataset_id,
+        "image_id": image_id,
+        "threshold": threshold,
+    })
+    .to_string();
+    fetch_api("/api/v1/training/label-model/detect", "POST", Some(&body)).await
+}
+
+/// Start training. `base_model` is an existing device model (model-list
+/// name with a training checkpoint) to fine-tune from, or empty for the
+/// baked-in base weights.
 pub async fn start_training(
     dataset_id: &str,
     model_name: &str,
     epochs: u32,
     batch: u32,
     patience: u32,
+    base_model: &str,
 ) -> Result<TrainingJobStatus, String> {
     let body = serde_json::json!({
         "dataset_id": dataset_id,
@@ -511,6 +577,7 @@ pub async fn start_training(
         "epochs": epochs,
         "batch": batch,
         "patience": patience,
+        "base_model": base_model,
     })
     .to_string();
     fetch_api("/api/v1/training/train", "POST", Some(&body)).await

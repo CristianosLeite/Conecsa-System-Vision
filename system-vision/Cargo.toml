@@ -1,6 +1,6 @@
 [package]
 name = "conecsa-system-vision"
-version = "2026.4.0"
+version = "2026.5.0"
 description = "Conecsa Object Detection Application"
 license = "MIT"
 authors = ["Conecsa Automação"]
@@ -17,6 +17,13 @@ edition = "2024"
 [lib]
 name = "conecsa_system_vision"
 crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["standalone"]
+# The wasm32 `#[wasm_bindgen(start)]` entry point that mounts the app. The
+# user-manual simulator (manual/sim-device) links this crate with
+# `default-features = false` and mounts the UI itself.
+standalone = []
 
 [build-dependencies]
 prost-build = "0.14.4"
@@ -62,6 +69,7 @@ web-sys = { version = "0.3.83", features = [
     "MessageEvent",
     "Element",
     "DomRect",
+    "ResizeObserver",
     "Storage",
     "UrlSearchParams"
 ] }

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import grpc
 import pytest
+from gateway.training import helpers as training_helpers
 from gateway.training import session
 
 
@@ -22,12 +23,21 @@ def events(monkeypatch):
 
 
 def _wire(monkeypatch, resume_result=None, resume_raises=False,
-          unload_raises=False):
-    """Stub the two gRPC surfaces _do_exit touches; returns the call log."""
+          unload_raises=False, job_status="idle"):
+    """Stub the gRPC surfaces _do_exit touches; returns the call log."""
     calls = []
+
+    def get_training(_):
+        calls.append("get_training")
+        return SimpleNamespace(status=job_status)
 
     def unload_sam(_):
         calls.append("unload_sam")
+        if unload_raises:
+            raise FakeRpcError()
+
+    def unload_label_model(_):
+        calls.append("unload_label_model")
         if unload_raises:
             raise FakeRpcError()
 
@@ -37,10 +47,13 @@ def _wire(monkeypatch, resume_result=None, resume_raises=False,
             raise FakeRpcError()
         return resume_result
 
-    monkeypatch.setattr(
-        session, "clients",
-        SimpleNamespace(training=SimpleNamespace(UnloadSam=unload_sam),
-                        management=SimpleNamespace(ResumeRuntime=resume)))
+    fake_clients = SimpleNamespace(
+        training=SimpleNamespace(UnloadSam=unload_sam, GetTraining=get_training),
+        model=SimpleNamespace(UnloadLabelModel=unload_label_model),
+        management=SimpleNamespace(ResumeRuntime=resume))
+    monkeypatch.setattr(session, "clients", fake_clients)
+    # The training-job probe lives in gateway.training.helpers.
+    monkeypatch.setattr(training_helpers, "clients", fake_clients)
     return calls
 
 
@@ -58,8 +71,21 @@ def test_resume_success(monkeypatch, events):
                   resume_result=SimpleNamespace(success=True, message="resumed"))
     ok, message = session._do_exit(resume_detection=True)
     assert (ok, message) == (True, "resumed")
-    assert calls == ["unload_sam", "resume"]
+    assert calls == ["unload_sam", "unload_label_model", "get_training", "resume"]
     assert events == [("detection_state_changed", {"is_running": True})]
+
+
+@pytest.mark.parametrize("job_status", ["preparing", "training", "uploading"])
+def test_resume_is_skipped_while_a_training_job_runs(monkeypatch, events, job_status):
+    # Leaving the training page mid-run must not restart detection on top of
+    # the trainer: the runtime stays released, like the conversion handoff.
+    calls = _wire(monkeypatch, job_status=job_status,
+                  resume_result=SimpleNamespace(success=True, message="resumed"))
+    ok, message = session._do_exit(resume_detection=True)
+    assert ok
+    assert "training" in message
+    assert "resume" not in calls, "the runtime must stay released"
+    assert events == [("detection_state_changed", {"is_running": False})]
 
 
 def test_resume_refusal_reports_failure(monkeypatch, events):
@@ -77,12 +103,13 @@ def test_resume_rpc_error_propagates(monkeypatch, events):
     assert events == []
 
 
-def test_unload_sam_failure_is_best_effort(monkeypatch, events):
+def test_unload_failures_are_best_effort(monkeypatch, events):
     calls = _wire(monkeypatch, unload_raises=True,
                   resume_result=SimpleNamespace(success=True, message="ok"))
     ok, _ = session._do_exit(resume_detection=True)
     assert ok
-    assert calls == ["unload_sam", "resume"], "resume must still run"
+    assert calls == ["unload_sam", "unload_label_model", "get_training", "resume"], \
+        "both unloads are attempted and resume must still run"
 
 
 def test_heartbeat_returns_json_ok():

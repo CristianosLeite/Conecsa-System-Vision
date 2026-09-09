@@ -52,7 +52,8 @@ a gRPC control server + the decode∥infer∥encode pipeline), a privileged
 - **Audit trail**: every action a user takes — on the hub and on its devices —
   is recorded with its actor, origin IP and outcome. Devices buffer their own
   events on disk and the hub drains them over mTLS, so nothing is lost while it
-  is closed. History is kept for a configurable window and exports to CSV
+  is closed; the hub's own events go through a durable on-disk outbox before
+  they reach its database. History is kept for a configurable window and exports to CSV
   (see [Audit trail](docs/services/hub-vision.md#audit-trail))
 - **Secure by default**: the device exposes only a `:443` **mTLS** endpoint; the
   hub acts as a private CA, enrolls devices by a one-click pairing, and is the
@@ -141,9 +142,14 @@ conecsa-object-detection/
 ├── hub-vision/             # Native Tauri fleet hub + security gateway (auth, CA,
 │                           #   mDNS, mTLS pull); built via scripts/build-hub.sh,
 │                           #   NOT in Docker
+├── manual/                 # Interactive user manual (EN/PT-BR/ES): Markdown
+│                           #   content + Leptos shell + simulators running the
+│                           #   real hub/device UI on fixtures (build-manual.sh);
+│                           #   private like hub-vision — only the published
+│                           #   site is public, NOT in the open-source mirror
 ├── scripts/                # init.sh, dev.sh, compile-proto.sh, build.sh,
-│                           #   build-hub.sh, build-hub-jetson.sh,
-│                           #   build-docs.sh, gen-proto-docs.py
+│                           #   build-hub.sh, build-hub-jetson.sh, build-docs.sh,
+│                           #   build-manual.sh, publish-manual.sh, gen-proto-docs.py
 ├── docs/                   # Documentation site (MkDocs config + pages)
 ├── yocto/                  # Lean Yocto host image for the Jetson
 ├── requirements-dev.txt    # Single dev venv (all services + docs toolchain)

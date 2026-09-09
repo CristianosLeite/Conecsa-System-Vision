@@ -184,6 +184,15 @@ committed — the same persist-then-ack contract as the
 device-clock correction, since the hardware has no RTC battery. Delivery is
 at-least-once: duplicates are tolerated, losing a record is not.
 
+Hub-originated events get the same guarantee on the hub side: each one is
+written to a durable on-disk outbox (`audit-outbox/` in the data directory)
+before the action that produced it returns, and a drainer moves them into
+`audit.db` in order, deleting each batch only after its insert committed. An
+event recorded before the store finished opening, or while an insert fails,
+waits there instead of being dropped. The outbox is bounded (10,000 events);
+past that the hub drops and counts, and **Settings → Audit** shows the number
+waiting and the number dropped.
+
 ### Events and language
 
 A row stores a stable event key (`detection.start`, `dataset.deleted`), never a
@@ -379,25 +388,43 @@ The **Training** page (owner/admin only) trains one YOLO model across **every
 paired device** with federated averaging — no central GPU and no
 device-to-device traffic; the hub ferries opaque `.pt` blobs over the existing
 per-device mTLS channel. The operator picks the source device + dataset,
-rounds and epochs per round; a confirmation modal warns that **object
+optionally a base model (a model on the source device that still holds its
+training checkpoint — `has_weights` in the device model list) to fine-tune
+from, rounds and epochs per round; a confirmation modal warns that **object
 detection stops on the whole fleet** (the same gate as the device UI's
 training entry) and lists the participants.
 
 The coordinator (the `src/federated/` module) then drives one job at a time
 through phases the page polls every second:
 
-1. **entering** — GPU handover (`/training/enter`) on every participant.
+1. **entering** — when a base model was chosen, its checkpoint is first
+   fetched from the source device (before any inference stops, so a missing
+   checkpoint costs nothing); then the GPU handover (`/training/enter`) on
+   every participant.
 2. **sharding** — exports N deterministic IID shards from the source device
    and imports one into each participant.
 3. **training / collecting / averaging** (per round) — each device trains E
    local epochs from the shared weights (round 1 starts from the identical
-   baked-in base weights), the hub collects each `last.pt`, ships them to the
-   aggregator (the source device) for CPU averaging, and redistributes the
-   averaged checkpoint.
+   baked-in base weights, or from the chosen base model's checkpoint, which
+   the hub pushes to every participant like an averaged round result), the
+   hub collects each `last.pt`, ships them to the aggregator (the source
+   device) for CPU averaging, and redistributes the averaged checkpoint. A
+   base model with a different class count re-initialises the detection head
+   identically on every device (ultralytics' fixed seed), the same assumption
+   the stock-weights path relies on.
 4. **finalizing** — uploads the final averaged model to **every** participant
-   through the regular model route (pt→onnx→engine conversion), deletes the
-   shard datasets and exits training mode (runtime stays released while the
-   conversion runs, as after a device-local training).
+   through the regular model route (pt→onnx→engine conversion), declaring the
+   training geometry the devices reported (`train_geometry`) so each device
+   records it in the model's settings sidecar and can warn on a `TILING_MODE`
+   mismatch at activation; then deletes the shard datasets and exits training
+   mode (runtime stays released while the conversion runs, as after a
+   device-local training).
+
+Every device trains its shard on the split its own `TRAIN_TILE` produces
+(tile crops by default). The participants must agree: the run fails as soon
+as two devices report different geometries — seconds into the first round,
+before any weights are averaged — because averaging checkpoints trained at
+different scales would silently corrupt the model.
 
 Preflight requires every paired device online (synchronous FedAvg needs all
 participants), at least two of them, and a dataset large enough that each

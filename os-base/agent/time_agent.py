@@ -29,6 +29,8 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
+from conecsa_common.atomic import atomic_write_bytes
+
 logger = logging.getLogger(__name__)
 
 # Shared with conecsa-fake-hwclock.sh on the host (bind-mounted into this
@@ -70,21 +72,10 @@ class TimeAgent:
         Flushed all the way to disk: the whole point of the floor is to survive
         an abrupt power cut, which a write sitting in the page cache would not.
         """
-        directory = os.path.dirname(FLOOR_PATH)
+        line = moment.astimezone(timezone.utc).strftime(FLOOR_FORMAT) + "\n"
         try:
-            os.makedirs(directory, exist_ok=True)
-            tmp = FLOOR_PATH + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(moment.astimezone(timezone.utc).strftime(FLOOR_FORMAT) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, FLOOR_PATH)
-            # Persist the rename itself, so the new name survives too.
-            fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            # conecsa_common.atomic: temp file, fsync, replace, directory fsync.
+            atomic_write_bytes(FLOOR_PATH, line.encode("utf-8"), mode=0o644)
         except OSError as exc:
             logger.warning("clock: could not persist floor to %s (%s)", FLOOR_PATH, exc)
 

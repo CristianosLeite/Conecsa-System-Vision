@@ -9,6 +9,17 @@ if (!process.env.NODE_RED_CREDENTIAL_SECRET) {
   );
 }
 
+// Editor authentication: bearer tokens minted by the api-gateway for the
+// operator the hub vouched for (see admin-token.js). Without it, any local
+// process that could reach the device's /flow could deploy flows.
+const adminAuth = require("./admin-token.js").adminAuth(process.env);
+if (!adminAuth) {
+  console.warn(
+    "[conecsa] Node-RED editor authentication is OFF (FLOW_ADMIN_AUTH=0 or " +
+    "no secret); anyone reaching /flow can edit and deploy flows."
+  );
+}
+
 module.exports = {
   // Listen on all interfaces so the container is reachable
   uiHost: "0.0.0.0",
@@ -20,12 +31,12 @@ module.exports = {
   httpAdminRoot: "/flow",
   httpNodeRoot: "/flow",
 
-  // Disable admin authentication for internal network use
-  // Uncomment and configure if you need authentication:
-  // adminAuth: {
-  //   type: "credentials",
-  //   users: [{ username: "admin", password: "<bcrypt-hash>", permissions: "*" }]
-  // },
+  // Editor/admin API authentication (null = open, development only). The
+  // device UI opens the editor with `?access_token=<gateway token>`; the
+  // editor keeps it in localStorage and sends it as a bearer on every admin
+  // call and on the comms websocket. HTTP-in nodes (httpNodeRoot) are user
+  // flows and stay public.
+  ...(adminAuth ? { adminAuth } : {}),
 
   // HTTP-in nodes are consumed same-origin (through nginx /flow or the hub's
   // reverse proxy); no cross-origin caller exists, so no CORS is granted.

@@ -13,7 +13,7 @@ from .detection import (
     stop_detection,
 )
 from .models import list_models
-from .system import health_check
+from .system import health_check, readiness_check
 
 
 @api_bp.route('/api/status', methods=['GET'])
@@ -58,6 +58,12 @@ def list_models_simple():
 def health_check_simple():
     """GET /api/health — gateway relay."""
     return health_check()
+
+
+@api_bp.route('/api/ready', methods=['GET'])
+def readiness_check_simple():
+    """GET /api/ready — gateway relay."""
+    return readiness_check()
 
 
 @api_bp.route('/api/classes', methods=['GET'])

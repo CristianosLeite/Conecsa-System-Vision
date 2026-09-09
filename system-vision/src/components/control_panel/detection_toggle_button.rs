@@ -10,6 +10,8 @@ pub(super) fn DetectionToggleButton(
     /// True while a model is being converted/optimized — Start is disabled so
     /// detection cannot run on the GPU during the TensorRT build.
     converting: ReadSignal<bool>,
+    /// True while a training job runs — same rule: the trainer owns the GPU.
+    training_active: ReadSignal<bool>,
     on_start: Callback<()>,
     on_stop: Callback<()>,
 ) -> impl IntoView {
@@ -21,6 +23,7 @@ pub(super) fn DetectionToggleButton(
                 let is_running = snapshot.as_ref().map(|s| s.is_running).unwrap_or(false);
                 let no_camera = snapshot.map(|s| !s.camera_connected).unwrap_or(false);
                 let is_converting = converting.get();
+                let is_training = training_active.get();
                 if is_running {
                     view! {
                         <button class="ui-button ui-button-danger ui-button-md w-full" on:click=move |_| on_stop.run(())>
@@ -34,8 +37,10 @@ pub(super) fn DetectionToggleButton(
                     view! {
                         <button
                             class="ui-button ui-button-success ui-button-md w-full disabled:opacity-50 disabled:cursor-not-allowed"
-                            disabled=is_converting || no_camera
-                            title=if is_converting {
+                            disabled=is_training || is_converting || no_camera
+                            title=if is_training {
+                                t_string!(i18n, control_panel::wait_training)
+                            } else if is_converting {
                                 t_string!(i18n, control_panel::wait_conversion)
                             } else if no_camera {
                                 t_string!(i18n, control_panel::camera_disconnected)
@@ -45,7 +50,9 @@ pub(super) fn DetectionToggleButton(
                             <svg class="w-4 h-4 stroke-current" viewBox="0 0 24 24" fill="none">
                                 <polygon points="5 3 19 12 5 21 5 3" stroke-width="2"/>
                             </svg>
-                            {if is_converting {
+                            {if is_training {
+                                t_string!(i18n, control_panel::training_model)
+                            } else if is_converting {
                                 t_string!(i18n, control_panel::converting_model)
                             } else if no_camera {
                                 t_string!(i18n, control_panel::camera_disconnected)

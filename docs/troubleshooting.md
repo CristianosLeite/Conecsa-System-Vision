@@ -13,10 +13,22 @@
   to block detection (`POST /api/v1/start` → 409). Check `CAMERA_INDEX` in
   docker-compose and that `/dev/video*` exists on the host; the server keeps
   retrying every 5s, so a re-plugged camera recovers on its own
+- **"Training model…" / "Converting model…" on the Start button, or
+  `POST /api/v1/start` → 409 with a "training/conversion is in progress"
+  message**: the single GPU is owned by a training job or a TensorRT engine
+  build. Wait for it (`GET /api/v1/training/train/status`,
+  `GET /api/v1/model/conversion`) or cancel the training; Start re-enables
+  by itself when the job ends
 - **Video drops out after a few seconds**: usually insufficient USB power — the
   camera resets off the bus under streaming load
   (`dmesg | grep -i "usb disconnect"`). Use a powered USB hub / shorter cable.
   webcam-server self-recovers once the camera is stable again
+- **A backend container is "healthy" but nothing works**: `GET /api/v1/ready`
+  reports each backend's gRPC health (`inference`, `training`, `hardware`) and
+  answers `503 degraded` while the inference-service is not serving;
+  `/api/v1/health` only proves the gateway process is up. A service whose gRPC
+  port could not be bound now exits non-zero and is restarted by compose
+  (`docker compose logs <service>` shows `could not bind`)
 - **SHM not available**: confirm `ipc: shareable` on webcam-server and
   `ipc: "service:webcam-server"` on inference-service, api-gateway **and**
   training-service. Restart those together — joining a recreated IPC namespace
@@ -42,6 +54,11 @@
   is whatever the hub stamps. Actions taken outside the hub's device proxy are
   recorded anonymously by design; see
   [Audit trail](services/hub-vision.md#audit-trail)
+- **Settings → Audit shows hub events waiting or dropped**: waiting events are
+  in the hub's `audit-outbox/` directory and are written to `audit.db` as soon
+  as it opens or the failing insert recovers (check the hub log for `audit
+  outbox drain failed`). A dropped count means the outbox reached its 10,000
+  event bound while the store was unavailable; those events are gone
 - **Audit rows are missing from the external database**: the mirror is
   best-effort and write-only. While PostgreSQL/SQL Server is unreachable rows
   stay pending in the hub's local `audit.db` and are copied when it returns —

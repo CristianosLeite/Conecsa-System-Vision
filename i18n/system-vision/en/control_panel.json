@@ -4,6 +4,8 @@
   "stop_detection": "Stop Detection",
   "converting_model": "Converting model…",
   "wait_conversion": "Wait for the model conversion to finish",
+  "training_model": "Training model…",
+  "wait_training": "Wait for the model training to finish",
   "camera_disconnected": "Camera not connected",
   "detection_started": "Detection started",
   "detection_stopped": "Detection stopped",

@@ -144,3 +144,46 @@ class TestJobRegistry:
         svc._jobs = {"a": active, "b": done, "c": failed}
         ids = {j.job_id for j in svc.get_active_jobs()}
         assert ids == {"a"}
+
+
+class TestRunJobKeepsTheCheckpoint:
+    """The .pt a conversion starts from becomes the model's weights sidecar."""
+
+    def _run(self, monkeypatch, tmp_path, *, engine_ok=True):
+        import api.services.conversion_service as cs
+
+        def export(pt, onnx, imgsz):
+            open(onnx, "w").close()
+            return []
+
+        def build(onnx, engine):
+            if not engine_ok:
+                raise RuntimeError("no workspace")
+            open(engine, "w").close()
+
+        monkeypatch.setattr(cs, "_convert_pt_to_onnx", export)
+        monkeypatch.setattr(cs, "_build_engine_from_onnx", build)
+        # Enqueue without the worker thread, then run the job body inline.
+        run_job = ConversionService._run_job
+        monkeypatch.setattr(ConversionService, "_run_job", lambda self, job_id: None)
+        svc = ConversionService()
+        pt = tmp_path / "Teste.pt"
+        pt.write_bytes(b"pt")
+        job = svc.start_pt_conversion(str(pt), "Teste.pt", str(tmp_path), imgsz=640)
+        run_job(svc, job.job_id)
+        done = svc.get_job(job.job_id)
+        assert done is not None
+        return done
+
+    def test_pt_moves_into_the_weights_sidecar(self, monkeypatch, tmp_path):
+        job = self._run(monkeypatch, tmp_path)
+        assert job.status == ConversionStatus.DONE, job.error
+        assert (tmp_path / "weights" / "Teste.pt").read_bytes() == b"pt"
+        assert not (tmp_path / "Teste.pt").exists(), "no phantom .pt beside the engine"
+        assert not (tmp_path / "Teste.onnx").exists()
+
+    def test_failed_job_drops_the_pt(self, monkeypatch, tmp_path):
+        job = self._run(monkeypatch, tmp_path, engine_ok=False)
+        assert job.status == ConversionStatus.FAILED
+        assert not (tmp_path / "Teste.pt").exists()
+        assert not (tmp_path / "weights").exists()

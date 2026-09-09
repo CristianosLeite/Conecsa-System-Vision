@@ -99,7 +99,7 @@ class TestGrpcError:
             (grpc.StatusCode.INVALID_ARGUMENT, 400),
             (grpc.StatusCode.RESOURCE_EXHAUSTED, 413),
             (grpc.StatusCode.UNAVAILABLE, 503),
-            (grpc.StatusCode.DEADLINE_EXCEEDED, 503),
+            (grpc.StatusCode.DEADLINE_EXCEEDED, 504),
             (grpc.StatusCode.INTERNAL, 502),
         ],
     )

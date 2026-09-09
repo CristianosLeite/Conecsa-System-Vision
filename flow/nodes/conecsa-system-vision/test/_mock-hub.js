@@ -40,8 +40,8 @@ function tlsMaterial() {
 }
 
 const DEFAULT_DEVICES = [
-  { id: "conecsa-084936", name: "Line 1", ip: "172.29.96.2", online: true, running: true, version: "2026.4", last_seen: "2026-08-22T12:00:00Z" },
-  { id: "conecsa-1a2b3c", name: "Line 2", ip: "172.29.96.3", online: false, running: false, version: "2026.4", last_seen: "2026-08-21T12:00:00Z" },
+  { id: "conecsa-084936", name: "Line 1", ip: "172.29.96.2", online: true, running: true, version: "2026.5", last_seen: "2026-08-22T12:00:00Z" },
+  { id: "conecsa-1a2b3c", name: "Line 2", ip: "172.29.96.3", online: false, running: false, version: "2026.5", last_seen: "2026-08-21T12:00:00Z" },
 ];
 
 /**

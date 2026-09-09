@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "conecsa-system-vision"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "bytes",
  "console_error_panic_hook",

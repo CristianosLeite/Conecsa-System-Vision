@@ -26,6 +26,20 @@ other palettes; the palette labels stay short. Each node ships an in-editor
 help panel (the `data-help-name` block in its `.html` file) that documents its
 configuration fields and message output.
 
+## Editor authentication
+
+The editor and its admin API (`/flow/...`) require a bearer token minted by
+the device's api-gateway (`POST /api/v1/flow/token`, signed with
+`FLOW_ADMIN_TOKEN_SECRET` or, by default, `NODE_RED_CREDENTIAL_SECRET`). The
+device UI requests one when the Flow view opens and loads the editor as
+`/flow/?access_token=<token>`; the editor keeps it in its localStorage and
+sends it on every admin call and on the comms websocket, where
+`flow/admin-token.js` verifies it. Owner and admin operators may edit and
+deploy; a plain user gets a read-only editor; a caller with no token — a local
+process that found the hub's loopback proxy port, say — gets `401` from the
+admin API. HTTP-in nodes are user flows and stay public. The development stack
+sets `FLOW_ADMIN_AUTH=0` because it publishes the editor on the host.
+
 ## Connecting the nodes
 
 Every node has three connection fields, shared through `lib/node-base.js`

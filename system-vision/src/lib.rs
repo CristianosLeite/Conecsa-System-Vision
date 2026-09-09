@@ -30,15 +30,17 @@ pub mod proto;
 
 // ── WASM entry point ──────────────────────────────────────────────────────────
 // Excluded under `cfg(test)`: the wasm-bindgen-test harness provides its own
-// entry point, and two `#[wasm_bindgen(start)]`/`main` symbols collide.
-#[cfg(all(target_arch = "wasm32", not(test)))]
+// entry point, and two `#[wasm_bindgen(start)]`/`main` symbols collide. Also
+// behind the (default) `standalone` feature: the user-manual simulator links
+// this crate as a library and mounts the UI itself.
+#[cfg(all(target_arch = "wasm32", not(test), feature = "standalone"))]
 use app::*;
-#[cfg(all(target_arch = "wasm32", not(test)))]
+#[cfg(all(target_arch = "wasm32", not(test), feature = "standalone"))]
 use leptos::prelude::*;
-#[cfg(all(target_arch = "wasm32", not(test)))]
+#[cfg(all(target_arch = "wasm32", not(test), feature = "standalone"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(all(target_arch = "wasm32", not(test)))]
+#[cfg(all(target_arch = "wasm32", not(test), feature = "standalone"))]
 #[wasm_bindgen(start)]
 pub fn main() {
     console_error_panic_hook::set_once();

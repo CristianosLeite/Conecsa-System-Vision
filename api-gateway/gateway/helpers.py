@@ -163,8 +163,12 @@ def _grpc_error(exc: grpc.RpcError, service: str = "inference") -> Response:
     if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
         return _json_error(detail, 413)
     logger.error("%s RPC failed (%s): %s", service, code, detail)
-    if code in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
+    if code == grpc.StatusCode.UNAVAILABLE:
         return _json_error(f"{service.capitalize()} service unavailable", 503)
+    if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+        # The peer is up but did not answer within its deadline (see
+        # rpc_deadlines.py): a gateway timeout the client may retry.
+        return _json_error(f"{service.capitalize()} service timed out", 504)
     return _json_error(f"{service.capitalize()} service error", 502)
 
 

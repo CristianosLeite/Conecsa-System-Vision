@@ -32,6 +32,14 @@ networks, and connects/forgets saved networks.
     failure): the agent rolls back with a wpa `RECONFIGURE` so a bad password
     cannot lock the device out of its network.
 
+!!! warning "Static IP changes are validated and rolled back"
+    A static configuration is accepted only when the address, the gateway and
+    every DNS server parse as IPv4 addresses and the prefix length is 1–32; the
+    managed `10-conecsa-<iface>.network` file is replaced atomically. If
+    networkd refuses to reload or to reconfigure the link, the previous file is
+    put back and applied again, so a bad request cannot leave the device with a
+    configuration it never confirmed.
+
 ### GPIO
 
 GPIO uses **BOARD numbering** on the Jetson Orin Nano 40-pin header: pin 7 is

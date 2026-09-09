@@ -57,4 +57,6 @@ class ModelInfo:
     size: int
     modified: float
     is_active: bool = False
+    # A training checkpoint sidecar (the .pt the engine was built from) exists.
+    has_weights: bool = False
 

@@ -118,6 +118,13 @@ message ModelInfo {
   uint64 size = 3;
   double modified = 4;
   bool is_active = 5;
+  // The model keeps its training checkpoint (the .pt it was converted from —
+  // an on-device run's best.pt, a manual or federated .pt upload) as a
+  // sidecar. Such a model can seed a fine-tune and act as a labeling
+  // assistant in the training-service (DownloadModelWeights). Engines
+  // uploaded as .onnx/.engine, and models converted before the sidecar
+  // existed, have none.
+  bool has_weights = 6;
 }
 message ModelList { repeated ModelInfo models = 1; }
 
@@ -168,6 +175,38 @@ message ConversionJob {
 message ConversionList { repeated ConversionJob jobs = 1; }
 message ConversionId { string job_id = 1; }
 
+// ── Model-assisted labeling ──────────────────────────────────────────────────
+// An existing engine on the device pre-labels dataset images for the training
+// page, on the same TensorRT runtime, preprocessing (TILING_MODE) and decode
+// path live detection uses — so the suggestions are exactly what the device
+// would detect. The engine runs on a private worker (TENSORRT_LABEL_WORKER_PORT)
+// so it never displaces the live model; ReleaseRuntime unloads it with the rest.
+
+message LabelModelStatus {
+  bool loaded = 1;                  // private worker holds the engine
+  string model_name = 2;            // ListModels name of the loaded engine ("" = none)
+  repeated string class_names = 3;  // the engine's classes sidecar, by index
+  string message = 4;
+}
+message LabelDetectRequest {
+  bytes jpeg = 1;                   // the dataset image, as stored
+  float threshold = 2;              // confidence gate 0..1 (0 → 0.5)
+}
+message LabelDetection {
+  uint32 class_id = 1;              // the ENGINE's class index
+  string class_name = 2;            // resolved through its classes sidecar
+  float score = 3;
+  float x1 = 4;                     // normalized corners 0..1 on the image
+  float y1 = 5;
+  float x2 = 6;
+  float y2 = 7;
+}
+message LabelDetectResult {
+  bool success = 1;
+  string message = 2;
+  repeated LabelDetection detections = 3;
+}
+
 service ModelControl {
   rpc ListModels(Empty) returns (ModelList);
   rpc SelectModel(ModelName) returns (Result);     // activate_model: reloads the live detector
@@ -176,6 +215,15 @@ service ModelControl {
   rpc GetConversion(ConversionId) returns (ConversionJob);
   rpc UploadModel(stream ModelChunk) returns (UploadResult);
   rpc DownloadModel(ModelName) returns (stream ModelFileChunk);
+  // The model's training checkpoint sidecar (see ModelInfo.has_weights);
+  // NOT_FOUND when the model has none.
+  rpc DownloadModelWeights(ModelName) returns (stream ModelFileChunk);
+
+  // Model-assisted labeling on a private TensorRT worker
+  rpc GetLabelModelStatus(Empty) returns (LabelModelStatus);
+  rpc LoadLabelModel(ModelName) returns (Result);    // any ListModels engine (.engine/.plan)
+  rpc UnloadLabelModel(Empty) returns (Result);
+  rpc LabelDetect(LabelDetectRequest) returns (LabelDetectResult);
 }
 
 // ── Classes + detection areas (per-model state consumed by the live detector) ──

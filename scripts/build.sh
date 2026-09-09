@@ -18,20 +18,9 @@ cd "$PROJECT_ROOT"
 
 # Build CSS with Tailwind
 echo "Building CSS..."
+# Pinned + checksum-verified (scripts/tailwind.pin); re-downloads on mismatch.
 TAILWIND_BIN="$PROJECT_ROOT/bin/tailwindcss"
-if [ ! -f "$TAILWIND_BIN" ]; then
-    echo "Tailwind binary not found, downloading..."
-    mkdir -p "$PROJECT_ROOT/bin"
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64)  TAILWIND_ASSET="tailwindcss-linux-x64" ;;
-        aarch64) TAILWIND_ASSET="tailwindcss-linux-arm64" ;;
-        *)       echo "Unsupported architecture: $ARCH"; exit 1 ;;
-    esac
-    curl -fsSL -o "$TAILWIND_BIN" \
-        "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/${TAILWIND_ASSET}"
-    chmod +x "$TAILWIND_BIN"
-fi
+"$PROJECT_ROOT/scripts/fetch-tailwind.sh"
 "$TAILWIND_BIN" -i ./styles/input.css -o ./system-vision/styles.css --minify
 
 # Compile protobuf files

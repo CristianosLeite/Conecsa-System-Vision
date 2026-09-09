@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Extensions that require async conversion before they can be used
 _PT_EXTENSIONS = {'.pt'}
+# Subdirectory of the model directory holding each model's training checkpoint.
+WEIGHTS_SUBDIR = "weights"
 _ONNX_EXTENSIONS = {'.onnx'}
 
 
@@ -87,6 +89,23 @@ class ModelService:
         base, _ = os.path.splitext(model_path)
         return f"{base}.settings.json"
 
+    @staticmethod
+    def weights_file_for_model(model_path: str) -> str:
+        """Return the per-model training-checkpoint sidecar path.
+
+        The .pt a conversion started from is kept under a ``weights/``
+        subdirectory rather than beside the engine: ``list_models`` matches
+        files by extension in the model directory itself, so a sibling
+        ``.pt`` would show up as a second, unselectable model. The
+        training-service fetches it to fine-tune from the model or to run it
+        as a labeling assistant.
+
+        Example: /data/models/weights.engine -> /data/models/weights/weights.pt
+        """
+        directory, filename = os.path.split(model_path)
+        base, _ = os.path.splitext(filename)
+        return os.path.join(directory, WEIGHTS_SUBDIR, f"{base}.pt")
+
     @classmethod
     def model_artifacts(cls, model_path: str) -> List[str]:
         """Every file a model owns: the binary plus its sidecars.
@@ -94,13 +113,15 @@ class ModelService:
         Deletion must remove the whole set — sidecars are found by basename,
         so a leftover .txt/.areas.json/.settings.json would be silently
         adopted by a later model uploaded under the same name (wrong labels
-        on live detections).
+        on live detections), and a stale weights sidecar would let a fine-tune
+        start from a model that no longer exists.
         """
         return [
             model_path,
             cls.classes_file_for_model(model_path),
             cls.areas_file_for_model(model_path),
             cls.settings_file_for_model(model_path),
+            cls.weights_file_for_model(model_path),
         ]
 
     def attach_detection_service(self, detection_service) -> None:
@@ -176,7 +197,8 @@ class ModelService:
                         path=file_path,
                         size=os.path.getsize(file_path),
                         modified=os.path.getmtime(file_path),
-                        is_active=(filename == self.current_model)
+                        is_active=(filename == self.current_model),
+                        has_weights=os.path.isfile(self.weights_file_for_model(file_path)),
                     ))
                 except Exception as ex:
                     logger.warning(f"Error reading model file {filename}: {ex}")
@@ -195,6 +217,17 @@ class ModelService:
         if error:
             return ""
         return path if os.path.isfile(path) else ""
+
+    def weights_file_path(self, model_name: str) -> str:
+        """Resolve a model name to its training-checkpoint sidecar for download.
+
+        Returns "" when the name is invalid or the model has no sidecar.
+        """
+        path, error = validate_model_filename(model_name, self.model_directory)
+        if error:
+            return ""
+        weights = self.weights_file_for_model(path)
+        return weights if os.path.isfile(weights) else ""
 
     def save_model(self, filename: str, file_data) -> Tuple[bool, str, str]:
         """
@@ -223,10 +256,28 @@ class ModelService:
             try:
                 file_data.save(model_path)
                 logger.info(f"Model saved successfully: {model_path}")
+                # An engine/ONNX replacing a model that was converted from a
+                # .pt must not inherit that checkpoint: has_weights would then
+                # point a fine-tune at weights the new engine never came from.
+                # A .pt upload keeps it until its own conversion replaces it.
+                if os.path.splitext(filename)[1].lower() not in _PT_EXTENSIONS:
+                    self._discard_weights_sidecar(model_path)
                 return True, model_path, ""
             except Exception as ex:
                 logger.error(f"Error saving model: {ex}")
                 return False, "", str(ex)
+
+    @classmethod
+    def _discard_weights_sidecar(cls, model_path: str) -> None:
+        """Remove the model's training-checkpoint sidecar, if any (best-effort)."""
+        weights = cls.weights_file_for_model(model_path)
+        try:
+            os.remove(weights)
+            logger.info(f"Dropped stale training checkpoint {weights}")
+        except FileNotFoundError:
+            pass
+        except OSError as ex:
+            logger.warning(f"Could not remove stale training checkpoint {weights}: {ex}")
 
     def process_upload(self, filename: str, file_data, imgsz: int = 640,
                        train_geometry: Optional[str] = None) -> Tuple[dict, int]:

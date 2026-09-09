@@ -19,6 +19,7 @@ from . import (  # noqa: E402,F401
     camera,
     classes,
     detection,
+    flow,
     gpio,
     models,
     network,

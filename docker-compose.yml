@@ -296,7 +296,7 @@ services:
       - GATEWAY_PORT=5000
       # Device software version, surfaced on /api/v1/status + /api/v1/health for
       # the conecsa-hub-vision hub to display.
-      - DEVICE_VERSION=2026.4-LTS
+      - DEVICE_VERSION=2026.5-LTS
       # Thread-per-connection: above the worst-case concurrent MJPEG + SSE
       # streams (per web tab: processed video + unified SSE; plus Node-RED).
       - WAITRESS_THREADS=32
@@ -316,6 +316,10 @@ services:
       # DEVICE_PAIR_TOKEN only to require a shared pairing secret.
       - CONECSA_CERT_DIR=/etc/conecsa/certs
       - DEVICE_PAIR_TOKEN=${DEVICE_PAIR_TOKEN:-}
+      # Signs the Node-RED editor tokens (gateway/flow_token.py); Node-RED
+      # verifies them with the same value (flow/admin-token.js).
+      - NODE_RED_CREDENTIAL_SECRET=${NODE_RED_CREDENTIAL_SECRET:?set a unique per-deployment secret in .env}
+      - FLOW_ADMIN_TOKEN_SECRET=${FLOW_ADMIN_TOKEN_SECRET:-}
       # Audit trail: every mutating request is appended here and drained by the
       # hub over mTLS. Needs its own writable volume (see `volumes:` below).
       - AUDIT_DIR=/data/audit
@@ -339,7 +343,7 @@ services:
     networks:
       - conecsa-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/api/v1/health')"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/api/v1/health', timeout=5).raise_for_status()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -508,6 +512,9 @@ services:
       # refuses to start without it (see flow/settings.js). Changing it
       # invalidates credentials already stored in flows.
       - NODE_RED_CREDENTIAL_SECRET=${NODE_RED_CREDENTIAL_SECRET:?set a unique per-deployment secret in .env}
+      # Optional dedicated secret for the editor tokens (defaults to the
+      # credential secret in both the gateway and Node-RED).
+      - FLOW_ADMIN_TOKEN_SECRET=${FLOW_ADMIN_TOKEN_SECRET:-}
     # No published ports: Node-RED is reached only via the device's nginx /flow
     # proxy. It still listens on :1880 inside the container.
     volumes:
@@ -518,8 +525,9 @@ services:
     networks:
       - conecsa-network
     healthcheck:
-      # Node-RED serves under /flow (httpAdminRoot); "/" returns 404.
-      test: ["CMD", "wget", "-qO-", "http://localhost:1880/flow/"]
+      # Node-RED serves under /flow (httpAdminRoot); "/" returns 404. The
+      # login-options route stays public with adminAuth on.
+      test: ["CMD", "wget", "-qO-", "http://localhost:1880/flow/auth/login"]
       interval: 30s
       timeout: 10s
       retries: 3

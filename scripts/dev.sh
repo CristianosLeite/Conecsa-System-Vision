@@ -167,23 +167,12 @@ run_svc() {
 }
 
 # ---------------------------------------------------------------------------
-# Frontend prerequisite: Tailwind CLI (downloaded on first run).
+# Frontend prerequisite: Tailwind CLI (pinned; verified on every run).
 # ---------------------------------------------------------------------------
 if [ "$RUN_APP" -eq 1 ]; then
+    # Pinned + checksum-verified (scripts/tailwind.pin); re-downloads on mismatch.
     TAILWIND_BIN="$PROJECT_ROOT/bin/tailwindcss"
-    if [ ! -f "$TAILWIND_BIN" ]; then
-        echo "Tailwind binary not found, downloading..."
-        mkdir -p "$PROJECT_ROOT/bin"
-        ARCH=$(uname -m)
-        case "$ARCH" in
-            x86_64)  TAILWIND_ASSET="tailwindcss-linux-x64" ;;
-            aarch64) TAILWIND_ASSET="tailwindcss-linux-arm64" ;;
-            *)       echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
-        esac
-        curl -fsSL -o "$TAILWIND_BIN" \
-            "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/${TAILWIND_ASSET}"
-        chmod +x "$TAILWIND_BIN"
-    fi
+    "$PROJECT_ROOT/scripts/fetch-tailwind.sh"
 fi
 
 # ---------------------------------------------------------------------------

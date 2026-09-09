@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "webcam-server"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "env_logger",
  "libc",

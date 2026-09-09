@@ -2,6 +2,7 @@
 
 use crate::api::get_system_metrics;
 use crate::i18n::*;
+use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -14,6 +15,15 @@ pub fn StatusComponent() -> impl IntoView {
     let i18n = use_i18n();
     let (status, set_status) = signal(SystemMetrics::default());
     let (is_loading, set_is_loading) = signal(true);
+
+    // The poll interval is owned by the component: dropping it on cleanup
+    // cancels the timer, so a remount cannot leave a second poller behind.
+    let interval = StoredValue::new_local(None::<Interval>);
+    on_cleanup(move || {
+        interval.update_value(|slot| {
+            slot.take();
+        });
+    });
 
     // Update system status every 2 seconds
     Effect::new(move |_| {
@@ -35,13 +45,11 @@ pub fn StatusComponent() -> impl IntoView {
         // Initial fetch
         update_status();
 
-        // Set up interval for subsequent fetches
-        let interval = gloo_timers::callback::Interval::new(2000, move || {
+        // Set up interval for subsequent fetches; replacing a previous one
+        // drops (cancels) it.
+        interval.set_value(Some(Interval::new(2000, move || {
             update_status();
-        });
-
-        // Keep interval alive by forgetting it
-        interval.forget();
+        })));
     });
 
     view! {

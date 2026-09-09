@@ -99,12 +99,37 @@ if [[ "${SKIP_RUST:-0}" != "1" ]]; then
 
   # hub-vision lives only in the private monorepo; the public mirror exported by
   # scripts/export-mirror.sh ships this same test.sh without the crate.
+  # --lib, as in CI (.github/workflows/test.yml): every test lives in the lib
+  # target, and src/main.rs is a shim calling conecsa_hub_vision_lib::run(), so
+  # a plain `cargo test` also emits the cdylib and links the whole Tauri binary
+  # for nothing. Drop the flag in BOTH places if hub-vision ever gains
+  # tests/*.rs, a src/bin or doctests.
   if [[ -f hub-vision/Cargo.toml ]]; then
     echo "==> cargo test: hub-vision"
-    cargo test --manifest-path hub-vision/Cargo.toml
+    cargo test --manifest-path hub-vision/Cargo.toml --lib
+    # The Jetson builder image (hub-vision/Dockerfile.hub-builder) uses its own
+    # one-member workspace manifest and only the paths its .dockerignore
+    # whitelists; prove that layout still resolves (seconds here, half an hour
+    # on the device).
+    echo "==> hub builder workspace layout"
+    scripts/check-hub-builder.sh
   else
     echo "!! hub-vision not present in this checkout — skipping its suite"
   fi
+fi
+
+# ── 3b. Rust (wasm-only manual crates: clippy + host unit tests) ───────────────
+# manual/{shell,sim-hub,sim-device} are private (they link hub-vision) and only
+# exist for wasm32; a host-target build sees empty binaries plus the pure
+# `guard` modules (postMessage origin/source decisions), whose unit tests run
+# natively. The gate for the app code is the wasm32 clippy. Skipped with
+# SKIP_RUST like the other cargo suites.
+if [[ "${SKIP_RUST:-0}" != "1" && -d manual/shell ]]; then
+  echo "==> clippy (wasm32): manual shell + simulators"
+  cargo clippy -p conecsa-manual-shell -p conecsa-manual-sim-hub -p conecsa-manual-sim-device \
+    --target wasm32-unknown-unknown -- -D warnings
+  echo "==> cargo test (host): manual shell + simulators"
+  cargo test -p conecsa-manual-shell -p conecsa-manual-sim-hub -p conecsa-manual-sim-device
 fi
 
 # ── 4. Rust (wasm, system-vision) ───────────────────────────────────────────────

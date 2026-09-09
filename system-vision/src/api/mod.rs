@@ -21,9 +21,10 @@ pub use wasm32::services::detection::{
 };
 
 pub use wasm32::services::model::{
-    delete_model, get_conversion_status, list_active_conversions, model_download_url,
-    select_model, upload_model_dialog, upload_model_file, ActiveConversionsResponse,
-    ConversionStatusResponse, UploadModelResponse,
+    delete_model, get_conversion_status, list_active_conversions, list_training_models,
+    model_download_url, model_stem, select_model, upload_model_dialog, upload_model_file,
+    ActiveConversionsResponse, ConversionStatusResponse, TrainingModelLists,
+    UploadModelResponse,
 };
 
 pub use wasm32::services::classes::{
@@ -59,14 +60,15 @@ pub use wasm32::services::event_stream::{subscribe_app_events, AppEvent, AppEven
 
 pub use wasm32::services::training::{
     add_training_class, cancel_training, capture_training_image, create_dataset, delete_dataset,
-    delete_training_image, finish_training, get_sam_status, get_training_classes, get_training_dataset,
-    get_training_labels, get_training_status, list_datasets, list_training_images, load_sam,
+    delete_training_image, finish_training, get_label_model_status, get_sam_status,
+    get_training_classes, get_training_dataset, get_training_labels, get_training_status,
+    label_detect, list_datasets, list_training_images, load_label_model, load_sam,
     remove_training_class, rename_dataset, rename_training_class, replicate_training_image,
-    sam_segment, set_dataset_cover,
-    set_training_labels, start_training, training_dataset_export_url, training_enter,
-    training_exit, training_heartbeat, training_image_url, training_preview_url,
-    upload_dataset_zip, DatasetSummary,
-    LabelBox, SamStatusResponse, TrainingDatasetInfo, TrainingImageInfo, TrainingJobStatus,
+    sam_segment, set_dataset_cover, set_training_labels, start_training,
+    training_dataset_export_url, training_enter, training_exit, training_heartbeat,
+    training_image_url, training_preview_url, unload_label_model, upload_dataset_zip,
+    DatasetSummary, LabelBox, LabelDetectResponse, LabelModelStatusResponse,
+    SamStatusResponse, TrainingDatasetInfo, TrainingImageInfo, TrainingJobStatus,
 };
 
 #[cfg(test)]

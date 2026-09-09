@@ -10,6 +10,7 @@ from .detection_service import DetectionService
 from .event_service import EventService
 from .frame_codec import FrameCodecService
 from .gpio_service import GPIOService
+from .labeling_service import LabelingService
 from .model_service import ModelService
 from .model_settings_service import ModelSettingsService
 from .processing_pipeline import ProcessingPipelineService
@@ -29,6 +30,7 @@ __all__ = [
     'ConversionService',
     'ConversionStatus',
     'GPIOService',
+    'LabelingService',
     'DetectionAreaService',
     'ModelSettingsService',
     'ConfigService',

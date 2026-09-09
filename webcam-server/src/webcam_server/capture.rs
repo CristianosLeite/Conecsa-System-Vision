@@ -7,6 +7,9 @@ mod controls;
 mod formats;
 mod v4l2;
 
+#[cfg(test)]
+mod tests;
+
 use nokhwa::{
     pixel_format::RgbFormat,
     utils::{
@@ -20,7 +23,95 @@ use std::sync::Arc;
 use super::shm::{self, ShmProducer};
 use super::{CameraConfig, WebcamServer};
 
+/// Consecutive `cam.frame()` failures after which the nokhwa fallback loops
+/// give the camera up and return to the outer open/backoff loop. At the
+/// 10 ms pause per failure this is ~300 ms of a dead stream — long enough to
+/// ride out a single dropped frame, short enough that a disconnected camera
+/// is noticed at once.
+pub(crate) const MAX_CONSECUTIVE_FRAME_ERRORS: u32 = 30;
+/// After the first failure, log every Nth so a dead camera cannot flood the
+/// journal at frame rate.
+const FRAME_ERROR_LOG_EVERY: u32 = 100;
+/// Pause after a failed `cam.frame()` so a failing camera does not spin a core.
+const FRAME_ERROR_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// What the capture loop should do after a `cam.frame()` failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameErrorAction {
+    /// Log this failure (the first one, then every `FRAME_ERROR_LOG_EVERY`th).
+    pub log: bool,
+    /// Give the camera up: publish `no_camera` and leave the loop.
+    pub give_up: bool,
+}
+
+/// Counts consecutive frame failures for the nokhwa fallback loops.
+///
+/// Those loops used to be `if let Ok(frame) = cam.frame() { ... }` with no
+/// `else`: a camera that disconnected mid-stream spun a core at 100 %, kept
+/// the `capturing` health published, and never returned to the outer loop
+/// that would have re-opened it. The direct V4L2 loops propagate the error
+/// with `?` and never had this problem.
+#[derive(Debug, Default)]
+pub(crate) struct FrameErrorTracker {
+    consecutive: u32,
+}
+
+impl FrameErrorTracker {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// A frame arrived: the streak is over.
+    pub(crate) fn on_ok(&mut self) {
+        self.consecutive = 0;
+    }
+
+    /// A frame failed: say whether to log it and whether to give up.
+    pub(crate) fn on_error(&mut self) -> FrameErrorAction {
+        self.consecutive = self.consecutive.saturating_add(1);
+        FrameErrorAction {
+            log: self.consecutive == 1 || self.consecutive.is_multiple_of(FRAME_ERROR_LOG_EVERY),
+            give_up: self.consecutive >= MAX_CONSECUTIVE_FRAME_ERRORS,
+        }
+    }
+
+    pub(crate) fn consecutive(&self) -> u32 {
+        self.consecutive
+    }
+}
+
 impl WebcamServer {
+    /// Handle one `cam.frame()` failure in a nokhwa loop: pause, log at the
+    /// tracker's cadence, and after `MAX_CONSECUTIVE_FRAME_ERRORS` publish
+    /// `no_camera` and return `true` so the caller leaves the loop (the outer
+    /// loop then re-tries V4L2, nokhwa, and finally the 5 s `no_camera` backoff).
+    fn frame_failed(
+        tracker: &mut FrameErrorTracker,
+        err: &dyn std::fmt::Display,
+        shm: &ShmProducer,
+        cfg: &CameraConfig,
+    ) -> bool {
+        let action = tracker.on_error();
+        if action.log {
+            eprintln!(
+                "[webcam] Camera {} frame error #{}: {err}",
+                cfg.camera_index,
+                tracker.consecutive()
+            );
+        }
+        if action.give_up {
+            eprintln!(
+                "[webcam] Camera {} gave no frame {} times in a row; re-opening",
+                cfg.camera_index,
+                tracker.consecutive()
+            );
+            Self::publish_health(shm, cfg, "no_camera");
+            return true;
+        }
+        std::thread::sleep(FRAME_ERROR_PAUSE);
+        false
+    }
+
     pub(crate) fn try_open_camera(cfg: &CameraConfig) -> Result<Camera, Box<dyn std::error::Error>> {
         let index = CameraIndex::Index(cfg.camera_index);
         let resolution = Resolution::new(cfg.width, cfg.height);
@@ -172,6 +263,7 @@ impl WebcamServer {
 
                     Self::publish_health(&shm, &cfg, "capturing");
 
+                    let mut errors = FrameErrorTracker::new();
                     if is_mjpeg && !use_software_rgb {
                         // MJPEG passthrough — publish JPEG directly to SHM.
                         loop {
@@ -188,9 +280,17 @@ impl WebcamServer {
                                     &rgb_hardware_supported,
                                 );
                             }
-                            if let Ok(frame) = cam.frame() {
-                                let buf = frame.buffer();
-                                shm.publish_frame_jpeg(&buf[..Self::jpeg_payload_len(buf)]);
+                            match cam.frame() {
+                                Ok(frame) => {
+                                    errors.on_ok();
+                                    let buf = frame.buffer();
+                                    shm.publish_frame_jpeg(&buf[..Self::jpeg_payload_len(buf)]);
+                                }
+                                Err(e) => {
+                                    if Self::frame_failed(&mut errors, &e, &shm, &cfg) {
+                                        break;
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -213,21 +313,33 @@ impl WebcamServer {
                             let current_cfg = config_arc.lock().unwrap().clone();
                             let use_software_rgb = current_cfg.has_non_neutral_rgb_levels()
                                 && !rgb_hardware_supported.load(Ordering::Relaxed);
-                            if let Ok(frame) = cam.frame()
-                                && let Ok(img) = frame.decode_image::<RgbFormat>() {
-                                    let w = img.width();
-                                    let h = img.height();
-                                    let mut raw = img.into_raw();
-                                    if use_software_rgb {
-                                        Self::apply_software_rgb_levels(
-                                            &mut raw,
-                                            current_cfg.rgb_red,
-                                            current_cfg.rgb_green,
-                                            current_cfg.rgb_blue,
-                                        );
+                            let frame = match cam.frame() {
+                                Ok(frame) => frame,
+                                Err(e) => {
+                                    if Self::frame_failed(&mut errors, &e, &shm, &cfg) {
+                                        break;
                                     }
-                                    shm.publish_frame_rgb(&raw, w, h);
+                                    continue;
                                 }
+                            };
+                            // `cam.frame()` succeeded, so the camera is alive and the
+                            // failure streak ends here. A frame that will not decode
+                            // is a bad frame, not a dead camera: skip it.
+                            errors.on_ok();
+                            if let Ok(img) = frame.decode_image::<RgbFormat>() {
+                                let w = img.width();
+                                let h = img.height();
+                                let mut raw = img.into_raw();
+                                if use_software_rgb {
+                                    Self::apply_software_rgb_levels(
+                                        &mut raw,
+                                        current_cfg.rgb_red,
+                                        current_cfg.rgb_green,
+                                        current_cfg.rgb_blue,
+                                    );
+                                }
+                                shm.publish_frame_rgb(&raw, w, h);
+                            }
                         }
                     }
                 }
