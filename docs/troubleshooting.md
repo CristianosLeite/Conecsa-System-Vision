@@ -2,8 +2,8 @@
 
 - **API does not connect**: verify the `api-gateway` is up on port 5000 and can
   reach inference over gRPC (`inference-service:50061`). On a fresh start the
-  gateway logs a few "connection refused" retries during the inference TensorRT
-  warm-up (~60s), then self-heals
+  gateway logs a few "connection refused" retries while the inference-service
+  starts, then self-heals
 - **Stream has no video**: verify permissions on `/dev/video0` and that the
   webcam-server is publishing frames to SHM
   (`ls /dev/shm/conecsa_frame_shm`)
@@ -13,6 +13,19 @@
   to block detection (`POST /api/v1/start` → 409). Check `CAMERA_INDEX` in
   docker-compose and that `/dev/video*` exists on the host; the server keeps
   retrying every 5s, so a re-plugged camera recovers on its own
+- **The remote camera is not capturing**: `camera_detail` in
+  `GET /api/v1/camera/devices` (and the Camera Status line) says why —
+  `unauthorized` is the token, `unreachable` the address/port or a phone that
+  left the network, `stalled` or `bad_stream` the app itself; the server
+  retries at 1 s, 2 s, then every 5 s and never falls back to the local
+  camera. See [remote camera](remote-camera.md)
+- **The access point will not start, or is gone**: a refused start answers
+  with the reason in `message` (no wired link, subnet overlap, blocked
+  channel, no `/run/systemd/network` mount, …) and a failed one leaves the
+  radio back in station mode; an agent restart or a reboot always stops it.
+  While it is up the hub reaches the device over the cable only, and a Wi-Fi
+  change answers `409`. See the
+  [hardware agent](services/os-hardware-agent.md#wi-fi-access-point)
 - **"Training model…" / "Converting model…" on the Start button, or
   `POST /api/v1/start` → 409 with a "training/conversion is in progress"
   message**: the single GPU is owned by a training job or a TensorRT engine
@@ -27,24 +40,22 @@
   reports each backend's gRPC health (`inference`, `training`, `hardware`) and
   answers `503 degraded` while the inference-service is not serving;
   `/api/v1/health` only proves the gateway process is up. A service whose gRPC
-  port could not be bound now exits non-zero and is restarted by compose
+  port could not be bound exits non-zero and is restarted by compose
   (`docker compose logs <service>` shows `could not bind`)
 - **SHM not available**: confirm `ipc: shareable` on webcam-server and
   `ipc: "service:webcam-server"` on inference-service, api-gateway **and**
   training-service. Restart those together — joining a recreated IPC namespace
   requires it, so restarting webcam-server alone strands the others' `/dev/shm`
-- **TensorRT not available**: the runtime requires an NVIDIA GPU + JetPack;
-  since the application runs in TensorRT-only mode, detection cannot start
-  without a working TensorRT
+- **TensorRT not available**: inference runs on TensorRT, which needs an
+  NVIDIA GPU (JetPack on the device); detection cannot start without it
 - **WASM build fails**: check `rustup target list --installed | grep wasm32`
 - **Protobuf incompatibility**: run `scripts/compile-proto.sh` or rebuild
   the Docker containers (protos are compiled at build time)
-- **Legacy dependencies**: the TFLite/LiteRT/PyTorch runtimes were removed;
-  only TensorRT is supported
-- **Flow does not open**: check `http://localhost:1880`; confirm the
-  service is up with `docker compose logs flow`
-- **TensorRT cold-start is slow**: normal on first use (~30s); the worker
-  is pre-warmed in the background on the next startup
+- **Flow does not open**: in the dev stack check `http://localhost:1880`;
+  confirm the service is up with `docker compose logs flow`
+- **TensorRT cold start is slow**: starting the TensorRT worker takes about
+  30 s. The inference-service starts it in the background at boot, so only a
+  request that arrives before it is ready waits
 - **Audit rows never reach the hub**: the backlog routes answer the paired hub
   only. A `403` means the request did not arrive through the mTLS terminator —
   check pairing and that nginx is in enforcing mode. Confirm the gateway has a
@@ -66,8 +77,8 @@
 
 ## Running on the custom Yocto image (Jetson Orin Nano)
 
-When the host is the lean Yocto image (see [Yocto build](yocto-build.md) and the
-flashing runbook in `yocto/FLASHING.md`), and **not** the stock
+When the host is the lean Yocto image (see [Yocto build](yocto-build.md) and
+[Flashing](yocto-build.md#flashing-the-jetson-orin-nano)), and **not** the stock
 JetPack/Ubuntu, there are differences that affect `docker-compose.yml`:
 
 - **NVIDIA libraries in `/usr/lib/`, not `/usr/lib/aarch64-linux-gnu/`**:
@@ -91,10 +102,10 @@ JetPack/Ubuntu, there are differences that affect `docker-compose.yml`:
   `hub-vision` Weston kiosk (empty compositor background until the hub binary
   is deployed with `scripts/build-hub-jetson.sh`); there is no getty on
   `tty0`. Administer via the serial console (root, no password) or SSH.
-  **SSH is key-only** (no passwords) and restricted to permitted hosts — the
-  root key is provisioned over serial after flashing (see "SSH hardening" in
-  [Yocto build](yocto-build.md)). Until then SSH refuses logins; serial is the
-  provisioning channel.
+  **SSH is key-only** (no passwords), optionally limited per key with
+  `from=` — the root key is provisioned over serial after flashing (see
+  [SSH hardening](yocto-build.md#ssh-hardening-key-only-permitted-hosts)).
+  Until then SSH refuses logins; serial is the provisioning channel.
 - **Kiosk troubleshooting** (blank webview, weston/seatd failures, slow boot
   from `wait-online`): see the Troubleshooting section of
   [Yocto build](yocto-build.md#troubleshooting).

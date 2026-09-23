@@ -1,10 +1,15 @@
 #!/bin/bash
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Ensure bin/trunk is the pinned prebuilt Trunk release.
 #
-# Mirrors scripts/fetch-tailwind.sh for Trunk: the Dockerfiles already download
-# the pinned tarball and verify it, but the host-side manual build
-# (scripts/build-manual.sh) and CI had no equivalent — and `cargo install trunk`
-# is forbidden (.agents/knowledge/ops/builds.md). Reads scripts/trunk.pin,
+# The scripts/fetch-tailwind.sh counterpart for Trunk, used by the host-side
+# manual build (scripts/build-manual.sh) and CI; the Dockerfiles verify the
+# same pin. Never `cargo install trunk` (.agents/knowledge/ops/builds.md).
+# Reads scripts/trunk.pin,
 # checks the cached binary reports the pinned version, and otherwise downloads
 # the tarball, verifies its SHA256 for this architecture and extracts it.
 # Prints nothing on the happy path; exits non-zero on a checksum mismatch.

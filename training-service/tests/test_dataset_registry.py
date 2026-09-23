@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for DatasetRegistry lifecycle (create/list/get/delete)."""
 import pytest
 from service.config import Config
@@ -117,8 +121,9 @@ class TestGeometry:
 
         seen = {}
 
-        def fake_import(zip_path, dest_dir, img_size=640, max_total_mb=512):
+        def fake_import(zip_path, dest_dir, img_size=640, max_total_mb=512, task="detect"):
             seen["img_size"] = img_size
+            seen["task"] = task
             import os
             os.makedirs(os.path.join(dest_dir, "images"), exist_ok=True)
             os.makedirs(os.path.join(dest_dir, "labels"), exist_ok=True)
@@ -141,7 +146,7 @@ class TestGeometry:
 
 
 class TestFreezeDeleteRace:
-    """One lock owns the frozen transition (REFACTORING.md M4): a delete can
+    """One lock owns the frozen transition: a delete can
     never interleave between a job validating a dataset and freezing it."""
 
     def test_a_frozen_dataset_cannot_be_deleted(self, registry):

@@ -1,16 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unified event bus + telemetry relay for the gateway's SSE stream.
 
-``EventService`` is the same thread-safe in-process bus the monolith used (one
-SSE connection per client, invalidation events + a multiplexed latest-value stats
-channel). The gateway owns it now. Two background relays feed it from the
-headless inference-service:
+``EventService`` is a thread-safe in-process bus (one SSE connection per client,
+invalidation events + a multiplexed latest-value stats channel). Background
+relays feed it from the headless services:
 
   - ``StreamEvents`` → re-published as invalidation events (conversion progress,
     model-changed, and any other pipeline-originated events).
   - ``StreamStats``  → pushed onto the latest-value stats channel.
 
 User-initiated invalidations (start/stop/threshold/…) are published directly by
-the route handlers, exactly as the monolith's routes did.
+the route handlers.
 """
 import json
 import logging
@@ -123,6 +126,7 @@ class EventService:
                 "gpio",
                 "trigger",
                 "areas",
+                "application",
             ],
             "data": {},
         }
@@ -180,6 +184,13 @@ def _relay_stats() -> None:
                     "inference_time": s.inference_time,
                     "detections": s.detections,
                     "frames_with_detections": s.frames_with_detections,
+                    # Pipeline service times (benchmark protocol).
+                    "finish_mean_ms": s.finish_mean_ms,
+                    "finish_p95_ms": s.finish_p95_ms,
+                    "finish_p99_ms": s.finish_p99_ms,
+                    "encode_mean_ms": s.encode_mean_ms,
+                    "encode_p95_ms": s.encode_p95_ms,
+                    "frame_age_p95_ms": s.frame_age_p95_ms,
                 })
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)

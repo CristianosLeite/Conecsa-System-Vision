@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Power-cut-safe file persistence.
 
 The device has no battery: a power cut can land between any two writes. A

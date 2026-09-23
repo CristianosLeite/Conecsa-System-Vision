@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for TRAIN_OVERRIDES parsing (allowlist, typing, reserved keys)."""
 import pytest
 from service.train_overrides import (

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Environment-driven configuration for the training-service."""
 import os
 from typing import Optional, Union
@@ -127,6 +131,18 @@ class Config:
     # once per epoch, so this must exceed the slowest plausible epoch.
     TRAIN_STALL_TIMEOUT_SEC = _env_int("TRAIN_STALL_TIMEOUT_SEC", 3600)
     BASE_WEIGHTS = os.environ.get("TRAIN_BASE_WEIGHTS", "/app/training-service/assets/yolo26s.pt")
+    # Classification datasets: the ImageNet-pretrained
+    # YOLO26s-cls checkpoint (committed beside yolo26s.pt) and ultralytics'
+    # default classification input size. The best.pt upload declares the same
+    # size, so the exported engine matches the trained resolution.
+    BASE_WEIGHTS_CLS = os.environ.get("TRAIN_BASE_WEIGHTS_CLS",
+                                      "/app/training-service/assets/yolo26s-cls.pt")
+    IMG_SIZE_CLS = _env_int("TRAIN_IMG_SIZE_CLS", 224)
+    # Segmentation datasets: the COCO-pretrained YOLO26s-seg checkpoint
+    # (committed beside yolo26s.pt). It trains at TRAIN_IMG_SIZE on the same
+    # tile crops as detection.
+    BASE_WEIGHTS_SEG = os.environ.get("TRAIN_BASE_WEIGHTS_SEG",
+                                      "/app/training-service/assets/yolo26s-seg.pt")
 
     # Where finished models go (the gateway relays to the inference-service,
     # which owns conversion + activation).
@@ -164,3 +180,33 @@ class Config:
         # Checkpoints of existing device models fetched through the gateway to
         # fine-tune from (StartTraining.base_model).
         return os.path.join(self.DATA_DIR, "base")
+
+
+def base_weights_for(config, task: str) -> str:
+    """The starting checkpoint for a dataset of ``task`` (each task has its own).
+
+    ``YOLO(weights)`` infers the task from the checkpoint, so picking the
+    weights is all it takes to train a classifier or a segmentation model.
+    """
+    if task == "classify":
+        return getattr(config, "BASE_WEIGHTS_CLS", Config.BASE_WEIGHTS_CLS)
+    if task == "segment":
+        return getattr(config, "BASE_WEIGHTS_SEG", Config.BASE_WEIGHTS_SEG)
+    return config.BASE_WEIGHTS
+
+
+#: Input size of the bundled YuNet face detector (a fixed 640×640 graph).
+FACE_IMG_SIZE = 640
+
+
+def img_size_for(config, task: str) -> int:
+    """The trainer and upload input size for a dataset of ``task``.
+
+    A face model is not trained: its detector is the bundled YuNet graph,
+    fixed at :data:`FACE_IMG_SIZE` whatever ``TRAIN_IMG_SIZE`` says.
+    """
+    if task == "face":
+        return FACE_IMG_SIZE
+    if task == "classify":
+        return int(getattr(config, "IMG_SIZE_CLS", Config.IMG_SIZE_CLS))
+    return int(config.IMG_SIZE)

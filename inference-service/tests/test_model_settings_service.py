@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for ModelSettingsService (per-model settings JSON sidecar)."""
 import json
 from types import SimpleNamespace
@@ -17,7 +21,7 @@ class FakeVideo:
         self.applied_camera = []
         self.applied_stereo = []
 
-    def get_current_camera_config(self):
+    def get_model_camera_config(self):
         return self._camera
 
     def get_stereo_config(self):
@@ -59,6 +63,90 @@ class TestSave:
 
         data = json.loads(path.read_text())
         assert set(data) == {"thresholds"}
+
+    def test_a_single_field_save_keeps_everything_else_on_disk(self, config, tmp_path):
+        # Regression: an overlay/instance-limit change also persisted the live
+        # confidence threshold that SetThreshold keeps in memory only.
+        path = tmp_path / "weights.settings.json"
+        path.write_text(json.dumps({
+            "thresholds": {"confidence": 0.4, "overlay": 0.5},
+            "camera": {"gain": 10}, "task": "segment",
+        }))
+        config.CONFIDENCE_THRESHOLD = 0.9
+        config.OVERLAY_THRESHOLD = 0.3
+        config.SEGMENT_MAX_INSTANCES = 12
+        svc = ModelSettingsService(config, video_service=FakeVideo(camera={"gain": 99}))
+        svc._settings_path = str(path)
+
+        assert svc.save(only="OVERLAY_THRESHOLD")
+        assert svc.save(only="SEGMENT_MAX_INSTANCES")
+
+        assert json.loads(path.read_text()) == {
+            "thresholds": {"confidence": 0.4, "overlay": 0.3},
+            "camera": {"gain": 10}, "task": "segment",
+            "segment": {"max_instances": 12},
+        }
+
+    def test_a_single_field_save_without_a_file_writes_the_full_snapshot(self, config, tmp_path):
+        path = tmp_path / "weights.settings.json"
+        svc = ModelSettingsService(config)
+        svc._settings_path = str(path)
+        assert svc.save(only="OVERLAY_THRESHOLD")
+        assert json.loads(path.read_text())["thresholds"] == {"confidence": 0.5, "overlay": 0.5}
+
+
+class TestSegmentLimit:
+    def test_save_writes_the_limit_only_once_set(self, config, tmp_path):
+        svc = ModelSettingsService(config)
+        path = tmp_path / "seg.settings.json"
+        svc.switch_model(str(path))
+        assert "segment" not in json.loads(path.read_text())
+        config.SEGMENT_MAX_INSTANCES = 12
+        svc.save()
+        assert json.loads(path.read_text())["segment"] == {"max_instances": 12}
+
+    def test_load_applies_a_valid_limit_and_resets_to_the_defaults_otherwise(
+            self, config, tmp_path):
+        svc = ModelSettingsService(config)
+        path = tmp_path / "seg.settings.json"
+        svc.switch_model(str(path))
+        cases = (({"max_instances": 8}, 8), ({"max_instances": 0}, None),
+                 ({"max_instances": "8"}, None), ({"max_instances": True}, None), (None, None))
+        for stored, expected in cases:
+            payload: dict = {"thresholds": {"confidence": 0.5, "overlay": 0.5}}
+            if stored is not None:
+                payload["segment"] = stored
+            path.write_text(json.dumps(payload))
+            config.SEGMENT_MAX_INSTANCES = 99
+            svc.load_and_apply()
+            assert config.SEGMENT_MAX_INSTANCES == expected, stored
+
+    def test_a_model_without_settings_does_not_inherit_the_previous_limit(
+            self, config, tmp_path):
+        svc = ModelSettingsService(config)
+        tuned = tmp_path / "tuned.settings.json"
+        svc.switch_model(str(tuned))
+        config.SEGMENT_MAX_INSTANCES = 12
+        svc.save()
+
+        fresh = tmp_path / "fresh.settings.json"
+        svc.switch_model(str(fresh))
+        assert config.SEGMENT_MAX_INSTANCES is None
+        assert "segment" not in json.loads(fresh.read_text())
+        assert json.loads(tuned.read_text())["segment"] == {"max_instances": 12}
+
+    def test_save_reports_a_write_failure(self, config, tmp_path, monkeypatch):
+        import api.services.model_settings_service as module
+
+        svc = ModelSettingsService(config)
+        assert svc.save() is True  # no model scoped: nothing to write
+        svc.switch_model(str(tmp_path / "seg.settings.json"))
+
+        def fail(*_args, **_kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(module, "atomic_write_json", fail)
+        assert svc.save() is False
 
 
 class TestSwitchModel:

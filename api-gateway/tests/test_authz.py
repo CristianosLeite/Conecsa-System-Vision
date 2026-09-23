@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tests for the server-side role policy on mutating routes (gateway/authz.py).
 
 The exhaustive url_map walk is the load-bearing test: it fails the moment a
@@ -39,7 +43,7 @@ class CountingStub(UnavailableStub):
 @pytest.fixture
 def unavailable_backends(monkeypatch):
     stub = UnavailableStub()
-    for name in ("detection", "models", "training", "hardware"):
+    for name in ("detection", "model", "management", "training", "hardware"):
         if hasattr(grpc_clients.clients, name):
             monkeypatch.setattr(grpc_clients.clients, name, stub)
     return stub
@@ -131,6 +135,22 @@ class TestRoleMatrix:
             "/api/v1/stats/reset",
             headers={"X-Conecsa-Role": "user"})
         assert resp.status_code == 200
+
+    def test_only_an_admin_changes_the_application_type(self, real_app,
+                                                       unavailable_backends):
+        client = real_app.test_client()
+        resp = client.put("/api/v1/application", json={"task": "detect"},
+                          **hub_request(role="user"))
+        assert resp.status_code == 403
+        # Past authz the strict GPU probes cannot answer: fail-closed 503.
+        resp = client.put("/api/v1/application", json={"task": "detect"},
+                          **hub_request(role="admin"))
+        assert resp.status_code == 503
+
+    def test_any_role_reads_the_application_type(self, real_app, unavailable_backends):
+        resp = real_app.test_client().get("/api/v1/application",
+                                          **hub_request(role="user"))
+        assert resp.status_code != 403
 
     def test_reads_are_never_role_gated(self, real_app,
                                         unavailable_backends):

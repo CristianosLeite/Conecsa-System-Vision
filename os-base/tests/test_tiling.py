@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tests for conecsa_common.tiling — SAHI-style tile geometry and NMS merge.
 
 Pure host-side: numpy only, no GPU, no cv2. The grid tests brute-force a
@@ -13,10 +17,12 @@ from conecsa_common.tiling import (
     clip_box,
     iou_matrix,
     merge_tiles,
+    merge_tiles_grouped,
     shift_boxes,
     tile_crop,
     tile_grid,
     tile_label_rows,
+    tile_overlap,
 )
 
 FRAME_SIZES = [(1280, 720), (640, 360), (1920, 1080), (500, 500)]
@@ -343,3 +349,112 @@ class TestTileLabelRows:
             tile_label_rows([0, 1], [[0, 0, 1, 1]], Tile(0, 0, 10, 10))
         with pytest.raises(ValueError):
             tile_label_rows([0], [[0, 0, 1, 1]], Tile(0, 0, 10, 10), min_visible=0.0)
+
+
+class TestTileOverlap:
+    def test_band_of_a_k2_grid(self):
+        left, right = tile_grid(1280, 720, 720)
+        assert tile_overlap(left, right) == Tile(560, 0, 720, 720)
+
+    def test_disjoint_tiles(self):
+        assert tile_overlap(Tile(0, 0, 10, 10), Tile(10, 0, 20, 10)) is None
+
+
+class TestMergeTilesGrouped:
+    """Fragments of one object across tiles group; distinct objects never do."""
+
+    K2 = tile_grid(1280, 720, 720)  # band x 560..720
+
+    def _group(self, boxes, scores, classes, tile_ids, tiles=None, **kw):
+        return merge_tiles_grouped(
+            np.asarray(boxes, dtype=np.float64), np.asarray(scores), np.asarray(classes),
+            tile_ids, tiles or self.K2, **kw,
+        )
+
+    def test_low_iou_complementary_fragments_group_through_ios(self):
+        # One object x 500..900 cut by both tile edges: IoU 0.29, IoS 0.73.
+        boxes = [[500, 100, 720, 300], [560, 100, 900, 300]]
+        assert iou_matrix(np.asarray(boxes[:1], float), np.asarray(boxes[1:], float))[0, 0] < 0.5
+        assert self._group(boxes, [0.9, 0.8], [0, 0], [0, 1]) == [[0, 1]]
+
+    def test_long_object_across_the_seam_groups(self):
+        # x 200..1000: fragments 200..720 and 560..1000, whole-box IoS only 0.36.
+        boxes = [[200, 100, 720, 300], [560, 100, 1000, 300]]
+        assert self._group(boxes, [0.9, 0.8], [0, 0], [0, 1]) == [[0, 1]]
+
+    def test_neighbours_touching_inside_the_band_stay_separate(self):
+        # A ends at 600 (seen cut by tile 1 as 560..600); B starts at 590.
+        boxes = [[560, 100, 600, 300], [590, 100, 900, 300]]
+        assert self._group(boxes, [0.9, 0.8], [0, 0], [1, 0]) == [[0], [1]]
+
+    def test_ios_threshold_gates_the_fragment_rule(self):
+        # Vertically offset: inside the band the smaller part is 75 % covered.
+        boxes = [[500, 100, 720, 300], [560, 150, 900, 350]]
+        assert self._group(boxes, [0.9, 0.8], [0, 0], [0, 1]) == [[0, 1]]
+        assert self._group(boxes, [0.9, 0.8], [0, 0], [0, 1], ios_threshold=0.9) == [[0], [1]]
+
+    def test_two_nearby_same_class_objects_stay_separate(self):
+        # A at x 400..600 and B at 650..850, each seen whole by one tile and cut by the other.
+        boxes = [[400, 100, 600, 300], [650, 100, 720, 300], [560, 100, 600, 300],
+                 [650, 100, 850, 300]]
+        groups = self._group(boxes, [0.9, 0.8, 0.7, 0.85], [0, 0, 0, 0], [0, 0, 1, 1])
+        assert sorted(sorted(g) for g in groups) == [[0, 2], [1, 3]]
+        assert [g[0] for g in groups] == [0, 3]  # survivors are the best scores
+
+    def test_same_tile_detections_never_group(self):
+        boxes = [[600, 100, 700, 300], [610, 100, 710, 300]]
+        assert self._group(boxes, [0.9, 0.8], [0, 0], [0, 0]) == [[0], [1]]
+
+    def test_different_classes_never_group(self):
+        boxes = [[600, 100, 700, 300], [600, 100, 700, 300]]
+        assert self._group(boxes, [0.9, 0.8], [0, 1], [0, 1]) == [[0], [1]]
+
+    def test_boxes_outside_the_band_never_group(self):
+        # Overlapping boxes but one lies left of the band (x < 560).
+        boxes = [[300, 100, 550, 300], [320, 100, 560, 300]]
+        assert self._group(boxes, [0.9, 0.8], [0, 0], [0, 1]) == [[0], [1]]
+
+    def test_candidate_matching_two_survivors_joins_the_highest_scoring(self):
+        tiles = [Tile(0, 0, 100, 100), Tile(50, 0, 150, 100), Tile(0, 50, 100, 150)]
+        boxes = [[60, 10, 90, 40], [55, 60, 95, 90], [60, 55, 90, 85]]
+        # 0 (tile 0) and 1 (tile 0) are distinct; 2 (tile 1) overlaps both bands.
+        groups = self._group(boxes, [0.7, 0.9, 0.8], [0, 0, 0], [0, 0, 1], tiles=tiles)
+        assert groups == [[1, 2], [0]]
+
+    def test_object_spanning_three_tiles_is_one_group(self):
+        tiles = tile_grid(1920, 540, 540, overlap=0.2)  # three columns
+        assert len(tiles) >= 3
+        a, b, c = tiles[:3]
+        # The fragments seen by each tile of a bar running across all three.
+        boxes = [[300, 200, a.x1, 260], [b.x0, 200, b.x1, 260], [c.x0, 200, c.x0 + 200, 260]]
+        groups = self._group(boxes, [0.8, 0.9, 0.7], [0, 0, 0], [0, 1, 2], tiles=tiles)
+        assert groups == [[1, 0, 2]]
+
+    def test_a_low_scoring_middle_fragment_bridges_two_groups(self):
+        tiles = tile_grid(1920, 540, 540, overlap=0.2)
+        a, b, c = tiles[:3]
+        boxes = [[300, 200, a.x1, 260], [b.x0, 200, b.x1, 260], [c.x0, 200, c.x0 + 200, 260]]
+        # The outer fragments arrive first and cannot match each other.
+        groups = self._group(boxes, [0.9, 0.7, 0.8], [0, 0, 0], [0, 1, 2], tiles=tiles)
+        assert groups == [[0, 1, 2]]
+
+    def test_a_bridge_never_joins_two_members_of_one_tile(self):
+        tiles = tile_grid(1920, 540, 540, overlap=0.2)
+        a, b, _ = tiles[:3]
+        # 0 and 2 are two distinct predictions of tile 0; 1 (tile 1) matches both.
+        boxes = [[300, 200, a.x1, 260], [b.x0, 200, b.x1, 260], [300, 200, a.x1, 262]]
+        groups = self._group(boxes, [0.9, 0.7, 0.8], [0, 0, 0], [0, 1, 0], tiles=tiles)
+        assert groups == [[0, 1], [2]]
+
+    def test_is_deterministic_on_ties(self):
+        boxes = [[600, 100, 700, 300], [600, 100, 700, 300]]
+        assert self._group(boxes, [0.5, 0.5], [0, 0], [1, 0]) == [[0, 1]]
+
+    def test_empty_and_bad_inputs(self):
+        assert self._group(np.empty((0, 4)), [], [], []) == []
+        with pytest.raises(ValueError):
+            self._group([[0, 0, 1, 1]], [0.5], [0], [5])
+        with pytest.raises(ValueError):
+            self._group([[0, 0, 1, 1]], [0.5, 0.4], [0], [0])
+        with pytest.raises(ValueError):
+            self._group([[0, 0, 1, 1]], [0.5], [0], [0], iou_threshold=1.5)

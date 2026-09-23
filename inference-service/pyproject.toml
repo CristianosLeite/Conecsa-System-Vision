@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Project metadata for the headless inference-service.
 #
 # Runtime dependencies are NOT declared here — they are baked into the
@@ -8,9 +12,10 @@
 # [build-system] table — the service is run, not pip-installed.
 [project]
 name = "conecsa-inference-service"
-version = "2026.5-LTS"
+version = "2026.6-LTS"
 description = "Headless TensorRT inference service (gRPC control + decode∥infer∥encode pipeline)."
 requires-python = ">=3.10"
+license = "AGPL-3.0-only"
 
 # Host-side unit tests (pure logic + in-memory/tmp_path services). Run `pytest`
 # from this directory, or all suites at once via `scripts/test.sh`. `pythonpath`

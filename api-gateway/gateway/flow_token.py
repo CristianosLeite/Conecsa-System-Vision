@@ -1,9 +1,13 @@
-"""Short-lived admin tokens for the embedded Node-RED editor (review L2).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Short-lived admin tokens for the embedded Node-RED editor.
 
 Node-RED's editor and admin API live under ``/flow`` on the device, and
-``adminAuth`` used to be off: any local process that could reach the hub's
-loopback proxy port (or the device's plaintext network) could deploy flows
-with no capability at all. The iframe cannot carry the hub's capability
+``adminAuth`` guards them: without it, any local process that could reach the
+hub's loopback proxy port (or the device's plaintext network) could deploy
+flows with no capability at all. The iframe cannot carry the hub's capability
 header, but the Node-RED editor has its own token transport: it reads
 ``?access_token=`` from its URL into localStorage and sends
 ``Authorization: Bearer`` on every admin call and on the comms websocket.

@@ -1,6 +1,9 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::app::ModelInfo;
+use crate::components::application_select::use_application;
 use crate::i18n::*;
 use leptos::prelude::*;
 
@@ -19,9 +22,17 @@ pub(super) fn ModelList(
     set_error_msg: WriteSignal<String>,
 ) -> impl IntoView {
     let i18n = use_i18n();
+    let application = use_application();
     view! {
         {move || {
-            let model_list = models.get();
+            // Only the models this application can run (the backend refuses
+            // the others); every model while the application is not known.
+            let task = application.task();
+            let model_list: Vec<ModelInfo> = models
+                .get()
+                .into_iter()
+                .filter(|m| task.is_none_or(|t| m.task == t.id()))
+                .collect();
             let should_scroll = model_list.len() >= 3;
             if model_list.is_empty() {
                 view! {

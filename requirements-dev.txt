@@ -57,7 +57,9 @@
 # Imported directly by our code but otherwise reaching the venv only as
 # ultralytics' transitive deps — pinned here so dropping or bumping ultralytics
 # cannot silently break them. matplotlib: docs/communication-diagram.py.
-# pillow: training-service/service/_sam_worker.py.
+# pillow: training-service/service/_sam_worker.py and the classification
+# preprocess in inference-service/api/model_manager.py (the CI pytest job
+# installs the same pin).
 matplotlib==3.10.9
 pillow==12.3.0
 
@@ -76,3 +78,8 @@ pytest-cov==7.1.0
 # whose venvPath/venv point here: without that it would resolve imports against the
 # system Python and report numpy/cv2 as missing.
 pyright==1.1.411
+
+# License compliance: `reuse lint` checks that every file declares its copyright
+# and SPDX license (headers, or REUSE.toml for files that cannot hold comments);
+# scripts/check-licenses.sh runs it.
+reuse==6.2.0

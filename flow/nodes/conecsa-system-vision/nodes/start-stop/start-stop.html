@@ -59,7 +59,7 @@
 
 <script type="text/html" data-help-name="conecsa-start-stop">
   <p>
-    Starts or stops object detection on the inference service.
+    Starts or stops object detection on the device.
   </p>
   <h3>Connection</h3>
   <p>
@@ -91,7 +91,7 @@
   <h3>Output</h3>
   <p>
     Emits <code>{ payload: { is_running: boolean } }</code> every time
-    the detection state changes on the inference service, no matter
+    the detection state changes on the device, no matter
     which client triggered the change (this node, the web UI, another
     flow, curl). The initial state at flow start is NOT emitted — only
     real transitions. Input-driven start/stop calls do not emit on

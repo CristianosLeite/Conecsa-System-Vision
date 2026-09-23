@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Client for the TensorRT runtime worker subprocess.
 """
@@ -12,7 +16,9 @@ from threading import RLock
 from typing import Any, Dict, List, Optional
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import numpy as np  # ships in conecsa-os-base:base
+
+from .tensor_shm import TensorBuffer, create_fd
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +84,11 @@ class WorkerClient:
     load-model/inference/details calls to it over the connection. Shared and
     cached across ModelManagers (a process singleton per port) — never closed
     per-ModelManager.
+
+    Tensors travel through a shared-memory buffer the client creates at spawn
+    (``tensor_shm``) whenever the platform and the loaded
+    engine allow it; otherwise, and as the fallback of a failed shared-buffer
+    request, over the connection.
     """
 
     def __init__(self, port: int) -> None:
@@ -96,6 +107,10 @@ class WorkerClient:
         # requests; otherwise the worker would answer "model not loaded" until
         # something explicitly reloaded it.
         self._model_path: Optional[str] = None
+        # The shared tensor file handed to the current worker process, and the
+        # client's views over it once a load has laid the engine out in it.
+        self._shm_fd: Optional[int] = None
+        self._shm: Optional[TensorBuffer] = None
 
     def _start(self) -> None:
         """Start the worker process and establish connection."""
@@ -112,20 +127,27 @@ class WorkerClient:
 
         logger.info("Starting TensorRT worker on port %s, logs: %s", self.port, log_file_path)
 
+        args = [
+            python_bin,
+            "-m",
+            "api.runtime_management.worker_server",
+            "--host",
+            DEFAULT_HOST,
+            "--port",
+            str(self.port),
+        ]
+        # One shared tensor file per worker process; a restart gets a new one.
+        self._shm_fd = create_fd(f"conecsa-trt-{self.port}")
+        if self._shm_fd is not None:
+            args += ["--shm-fd", str(self._shm_fd)]
+
         self._process = subprocess.Popen(
-            [
-                python_bin,
-                "-m",
-                "api.runtime_management.worker_server",
-                "--host",
-                DEFAULT_HOST,
-                "--port",
-                str(self.port),
-            ],
+            args,
             env=env,
             start_new_session=True,
             stdout=self._log_file,
             stderr=self._log_file,
+            pass_fds=(self._shm_fd,) if self._shm_fd is not None else (),
         )
 
         # Wait for worker to be ready
@@ -153,6 +175,7 @@ class WorkerClient:
             _validate_response(resp, "Failed to reload model after worker restart")
             self._input_details = resp.get("input_details")
             self._output_details = resp.get("output_details")
+            self._map_shm(resp.get("shm_layout"))
             logger.info(
                 "Reloaded model on %s worker (port %s) after restart: %s",
                 WORKER_NAME, self.port, self._model_path,
@@ -162,6 +185,23 @@ class WorkerClient:
                 "Failed to reload model on %s worker (port %s) after restart: %s",
                 WORKER_NAME, self.port, e,
             )
+
+    def _map_shm(self, layout: Optional[Dict[str, Any]]) -> None:
+        """Map the worker's announced tensor layout; ``None`` keeps the connection path."""
+        self._unmap_shm()
+        if layout is None or self._shm_fd is None:
+            return
+        try:
+            self._shm = TensorBuffer(self._shm_fd, layout)
+        except (OSError, ValueError) as e:
+            logger.warning("Shared tensor buffer on port %s unavailable: %s", self.port, e)
+            self._shm = None
+
+    def _unmap_shm(self) -> None:
+        """Drop the client's views over the shared tensor buffer."""
+        if self._shm is not None:
+            self._shm.close()
+            self._shm = None
 
     def _wait_for_connection(self, max_attempts: int = 50) -> None:
         """
@@ -237,6 +277,17 @@ class WorkerClient:
                     logger.exception("Failed to kill worker process")
             finally:
                 self._process = None
+
+        # The shared tensor file belonged to that process; the next start makes
+        # a new one.
+        self._unmap_shm()
+        if self._shm_fd is not None:
+            try:
+                os.close(self._shm_fd)
+            except OSError as e:
+                logger.warning("Error closing shared tensor file: %s", e)
+            finally:
+                self._shm_fd = None
 
         # Close log file
         if self._log_file is not None:
@@ -342,19 +393,28 @@ class WorkerClient:
         Args:
             model_path: Path to the model file
         """
-        resp = self._request({"cmd": "load", "model_path": model_path})
-        _validate_response(resp, "Failed to load model")
-        # Remember the path only after a successful load so a later transparent
-        # (re)start re-loads it. Setting it after avoids _start's self-heal
-        # double-loading during this very call (the lazy start inside _request
-        # would otherwise both reload and then load again).
-        self._model_path = model_path
-        self._input_details = resp.get("input_details")
-        self._output_details = resp.get("output_details")
+        with self._lock:
+            # The worker re-lays the buffer for the new engine; never write through
+            # the previous layout meanwhile.
+            self._unmap_shm()
+            resp = self._request({"cmd": "load", "model_path": model_path})
+            _validate_response(resp, "Failed to load model")
+            # Remember the path only after a successful load so a later transparent
+            # (re)start re-loads it. Setting it after avoids _start's self-heal
+            # double-loading during this very call (the lazy start inside _request
+            # would otherwise both reload and then load again).
+            self._model_path = model_path
+            self._input_details = resp.get("input_details")
+            self._output_details = resp.get("output_details")
+            self._map_shm(resp.get("shm_layout"))
 
     def infer(self, input_data: np.ndarray) -> List[np.ndarray]:
         """
         Run inference on input data.
+
+        Through the shared buffer, the returned arrays are views of the output
+        slots: valid until this client's next inference or load, so a caller
+        keeping them longer copies them (``ModelManager._invoke`` does).
 
         Args:
             input_data: Input numpy array
@@ -362,13 +422,30 @@ class WorkerClient:
         Returns:
             List of output numpy arrays
         """
-        payload = {
-            "cmd": "infer",
-            "input": _serialize_input(input_data),
-        }
-        resp = self._request(payload)
-        _validate_response(resp, "Inference failed")
-        return _deserialize_outputs(resp.get("outputs", []))
+        with self._lock:
+            buffer = self._shm
+            if buffer is not None and self._conn is not None and buffer.fits_input(input_data):
+                np.copyto(buffer.input, input_data.reshape(buffer.input.shape))
+                try:
+                    resp = self._request({"cmd": "infer_shm"}, retry_on_fail=False)
+                    _validate_response(resp, "Inference failed")
+                except (OSError, TimeoutError, RuntimeError) as e:
+                    # A failed request restarted the worker (a new buffer comes with
+                    # the self-healing reload); this frame goes over the connection.
+                    logger.warning("Shared-buffer inference on port %s failed, "
+                                   "retrying over the connection: %s", self.port, e)
+                else:
+                    if resp.get("shm"):
+                        return list(buffer.outputs)
+                    return _deserialize_outputs(resp.get("outputs", []))
+
+            payload = {
+                "cmd": "infer",
+                "input": _serialize_input(input_data),
+            }
+            resp = self._request(payload)
+            _validate_response(resp, "Inference failed")
+            return _deserialize_outputs(resp.get("outputs", []))
 
     def build_engine(self, onnx_path: str, engine_path: str, workspace_mb: int = 256) -> None:
         """

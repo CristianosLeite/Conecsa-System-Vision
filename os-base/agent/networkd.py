@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Thin blocking client for systemd-networkd over the system D-Bus.
 
@@ -77,6 +81,23 @@ def _bytes_to_ipv4(addr: Any) -> str | None:
     except Exception:  # noqa: BLE001 - defensive parse
         pass
     return None
+
+
+def ipv4_addresses(link: dict) -> list[tuple[str, int]]:
+    """Every IPv4 (address, prefix) on a DescribeLink dict, link-local included.
+
+    `parse_ipv4` skips 169.254/16 because a link-local address is not a
+    configuration; whether a link *has* an address is a different question,
+    and on a direct cable a link-local one is all there is.
+    """
+    out: list[tuple[str, int]] = []
+    for entry in link.get("Addresses", []) or []:
+        if entry.get("Family") != _AF_INET:
+            continue
+        ip = _bytes_to_ipv4(entry.get("Address"))
+        if ip:
+            out.append((ip, int(entry.get("PrefixLength", 32) or 32)))
+    return out
 
 
 def parse_ipv4(link: dict) -> dict:

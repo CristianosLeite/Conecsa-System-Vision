@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Trigger/counter controller: the detection trigger switch and the detection
 counter."""
 import grpc

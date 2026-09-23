@@ -1,8 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 [package]
 name = "conecsa-system-vision"
-version = "2026.5.0"
-description = "Conecsa Object Detection Application"
-license = "MIT"
+version = "2026.6.0"
+description = "Conecsa System Vision device UI"
+license = "AGPL-3.0-only"
 authors = ["Conecsa Automação"]
 edition = "2024"
 
@@ -53,6 +57,7 @@ console_error_panic_hook = "0.1.7"
 gloo-timers = { version = "0.4", features = ["futures"] }
 web-sys = { version = "0.3.83", features = [
     "Window",
+    "Performance",
     "Location",
     "Request",
     "RequestInit",
@@ -71,7 +76,12 @@ web-sys = { version = "0.3.83", features = [
     "DomRect",
     "ResizeObserver",
     "Storage",
-    "UrlSearchParams"
+    "UrlSearchParams",
+    "Document",
+    "HtmlElement",
+    "KeyboardEvent",
+    "Node",
+    "NodeList"
 ] }
 
 # Host-side unit tests run in a headless browser (the crate is wasm32-only), via

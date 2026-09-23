@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Federated-weights routes (hub-orchestrated FedAvg): checkpoint upload,
 download, deletion and CPU-side averaging."""
 import logging
@@ -18,10 +22,13 @@ def training_weights_upload():
     if "file" not in request.files:
         return _json_error("No file provided")
     file = request.files["file"]
+    # The task the checkpoint was trained for (optional): a job started from
+    # it refuses a dataset of another task.
+    task = (request.form.get("task") or "").strip()
 
     def stream():
         """Yield WeightsChunk messages (metadata first, then .pt chunks)."""
-        yield trn.WeightsChunk(meta=trn.WeightsUploadMeta(name=file.filename or ""))
+        yield trn.WeightsChunk(meta=trn.WeightsUploadMeta(name=file.filename or "", task=task))
         while True:
             chunk = file.stream.read(1 << 20)
             if not chunk:

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Dockerfile for building and serving the Rust WASM frontend with Trunk and Nginx
 
 # Stage 1: Build WASM frontend with Trunk
@@ -12,7 +16,6 @@ WORKDIR /app
 RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
     && ! grep -rq 'http://' /etc/apt/sources.list.d/
 
-# Install system dependencies including binaryen
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
@@ -23,15 +26,11 @@ RUN apt-get update && apt-get install -y \
     binaryen \
     && rm -rf /var/lib/apt/lists/*
 
-# Install wasm32 target
 RUN rustup target add wasm32-unknown-unknown
 
-# Install trunk from the prebuilt release binary (same version as local dev).
-# Building it from source with `cargo install --locked` pins an old lightningcss
-# that newer rustc releases reject (E0659), and takes ~5 min on the Jetson.
-# trunk downloads the wasm-bindgen-cli matching Cargo.lock by itself.
-# The tarball is downloaded to a file and checked against the SHA256 pinned
-# per architecture (from the release's .sha256 assets) before it is extracted.
+# Prebuilt trunk, SHA256-pinned per architecture (scripts/trunk.pin). Building
+# it with `cargo install` fails on current rustc (lightningcss E0659). trunk
+# fetches the wasm-bindgen-cli matching Cargo.lock itself.
 ARG TRUNK_VERSION=0.21.14
 ARG TRUNK_SHA256_X86_64=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
 ARG TRUNK_SHA256_AARCH64=b1d8e60e454f7fc182d9a4d95d1506ffbae947d8ba90f8f6f02da93b60f980f9
@@ -48,16 +47,13 @@ RUN set -eu; arch="$(uname -m)"; \
     rm -f /tmp/trunk.tar.gz; \
     trunk --version
 
-# Copy workspace Cargo files
 COPY Cargo.toml Cargo.lock /app/
 
-# Copy system-vision crate (contains build.rs, src/, Cargo.toml, index.html)
 COPY system-vision/ ./system-vision/
 
 # Shared design system (Tailwind input) used by system-vision + hub-vision
 COPY styles/ ./styles/
 
-# Copy proto files for compilation
 COPY proto/ ./proto/
 
 # Shared translation catalogs (read by build.rs via ../i18n/system-vision)
@@ -94,7 +90,6 @@ FROM nginx:alpine-slim
 # TLS block before the device is paired.
 RUN apk add --no-cache openssl
 
-# Copy built WASM app to nginx
 COPY --from=frontend-builder /app/dist/ /usr/share/nginx/html/
 
 # :80 server (plaintext, transition) + the websocket-upgrade map.

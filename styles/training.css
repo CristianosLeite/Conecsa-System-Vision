@@ -1,0 +1,185 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Training pages (device UI): dataset list and dataset editor layout. */
+
+@layer components {
+  /* ── Top bars ──────────────────────────────────────────────────────────── */
+  /* Colors come from `.ui-topbar`; this only lays the bar out. Both halves
+     wrap, so a long dataset name or a localized counter never collides with
+     the actions on a narrow screen. */
+  .ui-training-topbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    padding: 0.75rem 1rem;
+  }
+
+  /* ── Label editor toolbar ─────────────────────────────────────────────── */
+  /* Wraps on a narrow viewport like the top bars, but its content never
+     changes width with the selection: the selected-label controls are always
+     rendered, the class select has a fixed width and the loading hint keeps
+     its slot, so selecting a label does not move the canvas below. */
+  .ui-label-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .ui-label-toolbar-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .ui-label-toolbar-class {
+    width: 10rem;
+    text-overflow: ellipsis;
+  }
+
+  .ui-label-toolbar-hint-idle {
+    visibility: hidden;
+  }
+
+  .ui-training-topbar-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    min-width: 0;
+  }
+
+  .ui-training-topbar-title {
+    min-width: 0;
+    font-size: 1.125rem;
+    line-height: 1.75rem;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  /* A card header whose actions drop under the title when they don't fit. */
+  .ui-training-panel-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .ui-training-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* ── Dataset editor ────────────────────────────────────────────────────── */
+  /* Mobile-first: below 768 px the capture/classes column, the editor and the
+     gallery stack and `.app-main` scrolls the page. */
+  .ui-training-editor {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+    width: 100%;
+  }
+
+  .ui-training-side {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .ui-class-name {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .ui-class-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Stacked below the editor the gallery is as wide as the page, so more
+     thumbnails fit a row; in a side column it keeps two. */
+  .ui-training-thumbs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+    padding-right: 0.25rem;
+  }
+
+  @media (min-width: 640px) {
+    .ui-training-thumbs {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+
+  /* From 768 px the page fills the viewport (the app shell does not scroll)
+     and each panel scrolls on its own: the editor on the right, the capture
+     and classes panels over the gallery on the left. */
+  @media (min-width: 768px) {
+    .ui-training-editor {
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+      height: 100%;
+      min-height: 0;
+    }
+
+    .ui-training-side,
+    .ui-training-work,
+    .ui-training-gallery {
+      min-height: 0;
+      max-height: 100%;
+      overflow-y: auto;
+    }
+
+    .ui-training-side {
+      grid-column: 1 / span 4;
+      grid-row: 1;
+    }
+
+    .ui-training-work {
+      grid-column: 5 / span 8;
+      grid-row: 1 / span 2;
+    }
+
+    .ui-training-gallery {
+      grid-column: 1 / span 4;
+      grid-row: 2;
+    }
+
+    .ui-training-thumbs {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  /* From 1280 px: three full-height columns, the gallery on the right. */
+  @media (min-width: 1280px) {
+    .ui-training-editor {
+      grid-template-rows: minmax(0, 1fr);
+    }
+
+    .ui-training-side {
+      grid-column: 1 / span 3;
+    }
+
+    .ui-training-work {
+      grid-column: 4 / span 6;
+      grid-row: 1;
+    }
+
+    .ui-training-gallery {
+      grid-column: 10 / span 3;
+      grid-row: 1;
+    }
+  }
+}

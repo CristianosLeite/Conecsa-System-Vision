@@ -1,8 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """conecsa_shm — shared POSIX shared-memory ring helpers.
 
-Installed into the `conecsa-os:base` image so every `FROM base` service
-(inference-service, api-gateway) imports ONE implementation of the camera and
-processed-frame ring layouts instead of duplicating the header parsing.
+Installed into the `conecsa-os-base:base` image so every service built on it
+(inference-service, api-gateway, training-service) imports one implementation
+of the camera and processed-frame ring layouts.
 
 - ``camera_ring.CameraRingReader``    — reads the webcam-server camera ring.
 - ``processed_ring.ProcessedFrameWriter`` / ``ProcessedFrameReader`` — the

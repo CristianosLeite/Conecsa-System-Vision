@@ -1,22 +1,17 @@
-# Conecsa Object Detection System
+# Conecsa System Vision
 
-Real-time object detection system built with a Rust web frontend (Leptos/WASM),
-a Rust camera server and a Python inference backend. Designed for the **NVIDIA
-Jetson Orin Nano** embedded hardware (ARM64, JetPack 6.2.2 / L4T R36.5.0,
-CUDA 12.6), with
-**TensorRT-only** inference. A separate native **`hub-vision`** desktop app is the
-single authenticated, secure entry point to a fleet: it logs operators in,
-discovers devices over mDNS, and reaches each one **only over mutual TLS**,
-pulling their detections and their audit trails (off-device, not in the compose
-stack).
+Real-time computer vision — object detection, image classification and instance
+segmentation — built with a Rust web frontend (Leptos/WASM), a Rust camera
+server and Python backend services. Designed for the **NVIDIA
+Jetson Orin Nano** (ARM64, JetPack 6.2.2 / L4T R36.5.0, CUDA 12.6), with
+**TensorRT** inference. A separate native **`hub-vision`** desktop app is the
+authenticated entry point to a fleet of devices (see
+[Architecture](docs/architecture.md#fleet-hub-hub-vision)).
 
-The backend follows an **`app → api → service`** split: a thin **api-gateway**
-owns the entire external HTTP/SSE/MJPEG contract, while the heavy work runs in
-independent services it reaches over **gRPC** (control/config) or **POSIX shared
-memory** (per-frame media). The **inference-service is headless** (no HTTP — only
-a gRPC control server + the decode∥infer∥encode pipeline), a privileged
-**`os-base` hardware agent** owns host network/Wi-Fi/GPIO over gRPC, and a headless
-**training-service** owns datasets, SAM3-assisted labeling and YOLO training.
+A thin **api-gateway** owns the entire external HTTP/SSE/MJPEG contract; the
+headless inference-service, training-service and `os-base` hardware agent sit
+behind it on **gRPC** (control) and **POSIX shared memory** (frames) — see
+[docs/architecture.md](docs/architecture.md).
 
 ![Communication diagram](docs/communication.png)
 
@@ -40,20 +35,21 @@ a gRPC control server + the decode∥infer∥encode pipeline), a privileged
   both frontends (`leptos_i18n`, compile-time catalogs under `i18n/`). The
   language is chosen in the hub's **Settings** and propagates to embedded
   device pages via `?lang=` (persisted in the device UI's localStorage)
-- **Fleet hub & security gateway**: a separate native (Tauri) `hub-vision` app is
-  the single authenticated entry point — it logs operators in, discovers devices
-  over mDNS, and reaches each device only over **mutual TLS**, pulling their
-  detections (off-device; built with `scripts/build-hub.sh`)
-- **No detection is lost while the hub is offline**: each device buffers
-  detection records on disk (SQLite ring, survives reboots) whenever the hub
-  stops polling, and the hub drains the backlog on reconnect — deleting the
-  device copy only after its own store confirms the write, with timestamps
+- **Fleet hub**: a separate native (Tauri) `hub-vision` app logs operators in,
+  discovers devices over mDNS and pulls their detections over **mutual TLS**
+  (off-device; built with `scripts/build-hub.sh`)
+- **Detections buffered while the hub is offline**: each device buffers
+  detection records on disk whenever the hub stops polling, in a SQLite ring
+  that survives reboots and is capped at 5 000 records / 1 GB (the oldest are
+  evicted first). The hub drains the backlog on reconnect, deleting the device
+  copy only after its own store confirms the write, with timestamps
   reconstructed to the real detection time
-- **Audit trail**: every action a user takes — on the hub and on its devices —
-  is recorded with its actor, origin IP and outcome. Devices buffer their own
-  events on disk and the hub drains them over mTLS, so nothing is lost while it
-  is closed; the hub's own events go through a durable on-disk outbox before
-  they reach its database. History is kept for a configurable window and exports to CSV
+- **Audit trail**: user actions on the hub and on its devices are recorded
+  with their actor, origin IP and outcome. Devices buffer their own events in
+  a bounded on-disk ring that the hub drains over mTLS, and the hub's own
+  events go through a bounded on-disk outbox (overflow is counted and shown in
+  Settings) before they reach its database. History is kept for a configurable
+  window and exports to CSV
   (see [Audit trail](docs/services/hub-vision.md#audit-trail))
 - **Secure by default**: the device exposes only a `:443` **mTLS** endpoint; the
   hub acts as a private CA, enrolls devices by a one-click pairing, and is the
@@ -76,15 +72,15 @@ the hub (one click on the trusted LAN); mTLS then locks it to that hub.
 
 **On an x86_64 workstation with an NVIDIA GPU (local dev):** the root
 `docker-compose.yml` is Jetson-specific (aarch64 wheels, Tegra host-library
-bind-mounts, GPIO). Use the dev stack, which mirrors production and substitutes
-only the Jetson-exclusive parts (x86 `tensorrt-cu12`/`pycuda`, x86 Tailwind).
+bind-mounts, GPIO). Use the dev stack, which matches production except for the
+Jetson-specific parts (x86 `tensorrt-cu12`/`pycuda`, x86 Tailwind).
 Requires the [NVIDIA Container Toolkit](docs/getting-started.md#prerequisite-nvidia-container-toolkit):
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d --build
 ```
 
-After startup the dev stack keeps the plaintext ports open for convenience: web
+After startup the dev stack also publishes the plaintext ports: web
 app on `http://localhost:80`, api-gateway on `http://localhost:5000`, Flow on
 `http://localhost:1880` — plus the `:443` mTLS terminator for testing enrollment
 and the hub.
@@ -108,7 +104,7 @@ Full documentation lives under [`docs/`](docs/index.md) and is published as a
 | inference-service | [docs/services/inference-service.md](docs/services/inference-service.md) |
 | api-gateway | [docs/services/api-gateway.md](docs/services/api-gateway.md) |
 | webcam-server | [docs/services/webcam-server.md](docs/services/webcam-server.md) |
-| os hardware agent | [docs/services/os-hardware-agent.md](docs/services/os-hardware-agent.md) |
+| `os-base` hardware agent | [docs/services/os-hardware-agent.md](docs/services/os-hardware-agent.md) |
 | training-service | [docs/services/training-service.md](docs/services/training-service.md) |
 | Flow nodes | [docs/services/flow.md](docs/services/flow.md) |
 | Fleet hub (hub-vision) | [docs/services/hub-vision.md](docs/services/hub-vision.md) |
@@ -127,36 +123,41 @@ scripts/build-docs.sh
 ## Project structure
 
 ```
-conecsa-object-detection/
+system-vision/
 ├── proto/                  # Protocol Buffers (single source): detection, shm,
 │                           #   inference, hardware, training
 ├── i18n/                   # Shared translation catalogs (en/pt-BR/es) for
 │                           #   system-vision + hub-vision (see i18n/README.md)
-├── os-base/                     # Base CUDA/ML image + privileged hardware agent + SHM helpers
+├── styles/                 # Shared Tailwind v4 design system (entry styles/input.css)
+├── os-base/                # Base CUDA/ML image + privileged hardware agent + SHM helpers
 ├── system-vision/          # Rust web frontend (Leptos WASM, served by Nginx)
 ├── webcam-server/          # Camera server (Rust) — camera SHM producer
 ├── api-gateway/            # Public HTTP↔gRPC/SHM interface (Python, no ML stack)
 ├── inference-service/      # Headless TensorRT inference backend (Python)
 ├── training-service/       # Headless dataset/labeling/training backend (Python)
 ├── flow/                   # Flow automation (Node-RED) + Conecsa custom nodes
-├── hub-vision/             # Native Tauri fleet hub + security gateway (auth, CA,
-│                           #   mDNS, mTLS pull); built via scripts/build-hub.sh,
-│                           #   NOT in Docker
+├── hub-vision/             # Native Tauri fleet hub (auth, CA, mDNS, mTLS pull);
+│                           #   built via scripts/build-hub.sh, not in Docker
 ├── manual/                 # Interactive user manual (EN/PT-BR/ES): Markdown
 │                           #   content + Leptos shell + simulators running the
 │                           #   real hub/device UI on fixtures (build-manual.sh);
 │                           #   private like hub-vision — only the published
 │                           #   site is public, NOT in the open-source mirror
-├── scripts/                # init.sh, dev.sh, compile-proto.sh, build.sh,
+├── scripts/                # init.sh, dev.sh, test.sh, compile-proto.sh, build.sh,
 │                           #   build-hub.sh, build-hub-jetson.sh, build-docs.sh,
-│                           #   build-manual.sh, publish-manual.sh, gen-proto-docs.py
+│                           #   build-manual.sh, publish-manual.sh, gen-proto-docs.py,
+│                           #   export-mirror.sh, pin/fetch helpers (check-pins.sh,
+│                           #   fetch-tailwind.sh, fetch-trunk.sh)
 ├── docs/                   # Documentation site (MkDocs config + pages)
-├── yocto/                  # Lean Yocto host image for the Jetson
+├── yocto/                  # Lean Yocto host image for the Jetson (see yocto/README.md)
 ├── requirements-dev.txt    # Single dev venv (all services + docs toolchain)
 ├── pyrightconfig.json      # Pyright/Pylance: type checking (editor + CI)
 ├── docker-compose.yml      # Production stack (Jetson)
 └── docker-compose.dev.yml  # Local dev stack (x86_64 + NVIDIA GPU)
 ```
+
+> Each service directory has a `README.md` with its layout and its run and test
+> commands.
 
 > Each service builds from its own `Dockerfile.<service>`; the dev stack reuses
 > them and only swaps `os-base/Dockerfile.os-base.dev` (x86 GPU wheels) and
@@ -169,4 +170,20 @@ conecsa-object-detection/
 
 ## License
 
-See repository metadata.
+Conecsa System Vision is licensed in layers, and every file declares its own
+license with an SPDX header or an annotation in [`REUSE.toml`](REUSE.toml)
+([REUSE](https://reuse.software/) compliant; `scripts/check-licenses.sh` checks it):
+
+- **Apache-2.0**: the gRPC contracts (`proto/`), the design system (`styles/`),
+  the translation catalogs (`i18n/`), the shared Python libraries
+  (`os-base/conecsa_shm`, `os-base/conecsa_common`), the Node-RED node package
+  (`flow/nodes/conecsa-system-vision`), `scripts/`, `yocto/` and `docs/`. These
+  never import AGPL code.
+- **AGPL-3.0-only**: the application stack, which is everything else, including
+  the services, the device web UI and the webcam server ([LICENSE](LICENSE)).
+
+License texts live in [`LICENSES/`](LICENSES); Apache-2.0 directories also carry
+their own `LICENSE` file. Third-party dependencies are listed in
+`os-base/THIRD-PARTY-NOTICES.md` and `api-gateway/THIRD-PARTY-NOTICES.md`.
+The Conecsa names and logo are covered by [TRADEMARKS.md](TRADEMARKS.md), not by
+these licenses.

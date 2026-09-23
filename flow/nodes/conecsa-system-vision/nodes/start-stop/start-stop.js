@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file start-stop node — starts/stops/toggles the detection engine. Subscribes
  *   to `/api/v1/events/stream` so the badge reflects `is_running` in real time
@@ -52,9 +56,9 @@ module.exports = function (RED) {
       }, { source: nodeSource });
     }
 
-    // Subscribe to the unified inference-service event stream so the badge —
+    // Subscribe to the api-gateway's unified event stream so the badge —
     // AND the node's output — react on every is_running change, regardless of
-    // whether the change was triggered by this node, the web UI, another flow,
+    // whether the change was triggered by this node, the device UI, another flow,
     // or curl. State changes arrive as `detection_state_changed` events; the
     // stream also carries invalidation/stats traffic which we ignore here.
     const stream = subscribeSSE(node.target, "/api/v1/events/stream", {

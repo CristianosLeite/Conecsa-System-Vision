@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Processed-frame shared-memory ring (inference-service → api-gateway).
 
 The inference pipeline produces ONE encoded JPEG per processed camera frame

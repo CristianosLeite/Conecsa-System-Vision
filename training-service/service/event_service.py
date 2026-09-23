@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Training-service event bus.
 
 A facade over ``conecsa_common.events.EventBus`` (shared with the

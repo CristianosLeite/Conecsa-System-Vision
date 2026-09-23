@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Non-AI editor actions: image selection and autosave, capture / delete /
 //! cover, replication, classes, training controls and leaving the editor.
 //!
@@ -8,13 +12,39 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use crate::api::{self, LabelBox};
+use crate::api::{self, LabelBox, LabelPolygon};
 use crate::i18n::*;
+use crate::models::Task;
 
 use super::logic;
 use super::state::{EditorState, I18n};
 
 // ── shared async steps ────────────────────────────────────────────────────────
+
+/// Write an image's labels in the dataset's kind: `boxes` for detection,
+/// `polygons` for segmentation, the `image_class` for classification and for
+/// face recognition (the class is the person).
+pub(super) async fn write_labels(
+    st: EditorState,
+    ds: &str,
+    image_id: &str,
+    boxes: &[LabelBox],
+    polygons: &[LabelPolygon],
+    image_class: Option<u32>,
+) -> Result<(), String> {
+    match st.task {
+        Task::Classify | Task::Face => {
+            api::set_training_image_class(ds, image_id, image_class).await?;
+        }
+        Task::Segment => {
+            api::set_training_polygons(ds, image_id, polygons).await?;
+        }
+        Task::Detect => {
+            api::set_training_labels(ds, image_id, boxes).await?;
+        }
+    }
+    Ok(())
+}
 
 /// Re-read the image list (labeled flags, counts). Silent on failure; callers
 /// that want the toast use [`reload_images_or_report`].
@@ -41,8 +71,9 @@ pub(super) fn refresh_images(st: EditorState, i18n: I18n) {
     });
 }
 
-/// Persist `boxes` as `image_id`'s labels, then refresh the gallery counts.
-/// `notify` shows the "labels saved" toast on success.
+/// Persist `boxes` (or, for a segmentation / classification dataset, the open
+/// image's polygons / class) as `image_id`'s labels, then refresh the gallery
+/// counts. `notify` shows the "labels saved" toast on success.
 pub(super) async fn persist_labels(
     st: EditorState,
     locale: Locale,
@@ -51,7 +82,9 @@ pub(super) async fn persist_labels(
     boxes: &[LabelBox],
     notify: bool,
 ) {
-    match api::set_training_labels(ds, image_id, boxes).await {
+    let image_class = st.images.image_class.try_get_untracked().flatten();
+    let polygons = st.images.polygons.try_get_untracked().unwrap_or_default();
+    match write_labels(st, ds, image_id, boxes, &polygons, image_class).await {
         Ok(_) => {
             if notify {
                 st.notices
@@ -80,6 +113,12 @@ pub(super) fn select_image(st: EditorState, i18n: I18n) -> Callback<String> {
         let Some(prev_boxes) = st.images.boxes.try_get_untracked() else {
             return;
         };
+        let Some(prev_polygons) = st.images.polygons.try_get_untracked() else {
+            return;
+        };
+        let Some(prev_class) = st.images.image_class.try_get_untracked() else {
+            return;
+        };
         st.ai.clear_suggestions();
         let _ = st.images.selected.try_set(Some(id.clone()));
         let locale = i18n.get_locale_untracked();
@@ -88,7 +127,9 @@ pub(super) fn select_image(st: EditorState, i18n: I18n) -> Callback<String> {
                 return;
             };
             if let Some(prev_id) = prev {
-                if let Err(e) = api::set_training_labels(&ds, &prev_id, &prev_boxes).await {
+                if let Err(e) =
+                    write_labels(st, &ds, &prev_id, &prev_boxes, &prev_polygons, prev_class).await
+                {
                     st.notices
                         .error(td_string!(locale, training::failed_save_labels, err = e));
                 }
@@ -96,6 +137,8 @@ pub(super) fn select_image(st: EditorState, i18n: I18n) -> Callback<String> {
             match api::get_training_labels(&ds, &id).await {
                 Ok(r) => {
                     let _ = st.images.boxes.try_set(r.boxes);
+                    let _ = st.images.polygons.try_set(r.polygons);
+                    let _ = st.images.image_class.try_set(r.image_class);
                 }
                 Err(e) => {
                     st.notices
@@ -103,6 +146,28 @@ pub(super) fn select_image(st: EditorState, i18n: I18n) -> Callback<String> {
                 }
             }
             let _ = reload_images(st, &ds).await;
+        });
+    })
+}
+
+/// Set (or, with `None`, clear) the open image's class and save it at once:
+/// in a classification dataset one pick is one completed labeling gesture.
+pub(super) fn pick_class(st: EditorState, i18n: I18n) -> Callback<Option<u32>> {
+    Callback::new(move |class_id: Option<u32>| {
+        // Also reached after an await (accepting a suggestion): disposal-safe.
+        let Some(Some(id)) = st.images.selected.try_get_untracked() else {
+            st.notices
+                .error(t_string!(i18n, training::select_image_first).to_string());
+            return;
+        };
+        let _ = st.images.image_class.try_set(class_id);
+        st.ai.clear_suggestions();
+        let locale = i18n.get_locale_untracked();
+        spawn_local(async move {
+            let Some(ds) = st.dataset_id.try_get_value() else {
+                return;
+            };
+            persist_labels(st, locale, &ds, &id, &[], false).await;
         });
     })
 }
@@ -159,6 +224,7 @@ pub(super) fn delete_image(st: EditorState, i18n: I18n) -> Callback<String> {
                     if still_selected {
                         let _ = st.images.selected.try_set(None);
                         let _ = st.images.boxes.try_set(Vec::new());
+                        let _ = st.images.polygons.try_set(Vec::new());
                         st.ai.clear_suggestions();
                     }
                     reload_images_or_report(st, locale, &ds).await;
@@ -291,6 +357,8 @@ pub(super) fn class_remove(st: EditorState, i18n: I18n) -> Callback<usize> {
                     if let Some(id) = st.images.selected.try_get_untracked().flatten() {
                         if let Ok(r) = api::get_training_labels(&ds, &id).await {
                             let _ = st.images.boxes.try_set(r.boxes);
+                            let _ = st.images.polygons.try_set(r.polygons);
+                            let _ = st.images.image_class.try_set(r.image_class);
                         }
                     }
                     reload_images_or_report(st, locale, &ds).await;
@@ -314,7 +382,9 @@ pub(super) fn train_request(st: EditorState, save_labels: Callback<bool>) -> Cal
     })
 }
 
-/// `(name, epochs, batch, patience, base_model)` from the Train modal.
+/// `(name, epochs, batch, patience, base_model)` from the Train modal. A face
+/// dataset sends the defaults with them: the device builds a gallery, and the
+/// training-service ignores the YOLO parameters and the base model.
 pub(super) fn train_start(
     st: EditorState,
     i18n: I18n,
@@ -387,12 +457,14 @@ pub(super) fn back(st: EditorState, i18n: I18n, on_back: Callback<()>) -> Callba
         }
         let prev = st.images.selected.get_untracked();
         let prev_boxes = st.images.boxes.get_untracked();
+        let prev_polygons = st.images.polygons.get_untracked();
+        let prev_class = st.images.image_class.get_untracked();
         spawn_local(async move {
             let ds = st.dataset_id.get_value();
             // Autosave the open image's labels; stay in training mode (the
             // gallery is still part of the training page).
             if let Some(id) = prev {
-                let _ = api::set_training_labels(&ds, &id, &prev_boxes).await;
+                let _ = write_labels(st, &ds, &id, &prev_boxes, &prev_polygons, prev_class).await;
             }
             on_back.run(());
         });

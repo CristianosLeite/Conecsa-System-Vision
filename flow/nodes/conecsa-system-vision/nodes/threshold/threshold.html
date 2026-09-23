@@ -59,7 +59,9 @@
 
 <script type="text/html" data-help-name="conecsa-threshold">
   <p>
-    Sets the confidence or overlay threshold on the inference service.
+    Sets the confidence or overlay threshold of a device through its
+    api-gateway. The overlay threshold is the IoU above which overlapping boxes
+    are suppressed (non-maximum suppression).
   </p>
   <h3>Connection</h3>
   <p>
@@ -89,7 +91,7 @@
   <dl class="message-properties">
     <dt>payload <span class="property-type">object</span></dt>
     <dd>
-      Response from the inference service, e.g.
+      Response from the api-gateway, e.g.
       <code>{ success: true, threshold: 0.5 }</code>.
     </dd>
   </dl>

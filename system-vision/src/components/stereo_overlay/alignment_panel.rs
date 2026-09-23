@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The stereo overlay alignment panel (blend + horizontal/vertical offset).
 
 use super::range_control::StereoRangeControl;

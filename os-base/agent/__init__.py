@@ -1,6 +1,10 @@
-"""Conecsa hardware-management agent.
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
 
-Runs inside the privileged `os` container and owns all host hardware access:
-network/Wi-Fi configuration today; GPIO in a later migration. Exposes a gRPC
-`HardwareService` (see proto/hardware.proto) consumed by `inference-service`.
+"""The `os-base` hardware agent.
+
+Runs inside the privileged `os-base` container and owns all host hardware
+access: network/Wi-Fi, GPIO, system metrics and the system clock. Exposes the
+gRPC `HardwareService` (see proto/hardware.proto) consumed by the api-gateway.
 """

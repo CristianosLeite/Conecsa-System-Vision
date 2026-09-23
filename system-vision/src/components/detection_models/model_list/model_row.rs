@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::app::{format_size, ModelInfo};
 use crate::i18n::*;
@@ -17,11 +19,15 @@ pub(super) fn ModelRow(
     set_error_msg: WriteSignal<String>,
 ) -> impl IntoView {
     let i18n = use_i18n();
-    // Role gating: deleting models (context menu) is admin-only.
+    // Role gating: selecting and deleting models are admin-only, as the gateway
+    // enforces (`POST /api/v1/model/select` answers 403 for the user role).
     let privileged = crate::components::access::privileged();
     let model_name_for_context = model.name.clone();
     let model_name_for_select = model.name.clone();
     let is_active = model.is_active;
+    // A package under construction (or left by an interrupted build) is not
+    // a model to select: the device refuses it, so offer nothing but delete.
+    let building = model.is_enrollment_package();
 
     view! {
         <div
@@ -60,10 +66,24 @@ pub(super) fn ModelRow(
                         {t!(i18n, models::active)}
                     </span>
                 }.into_any()
+            } else if building {
+                view! {
+                    <span class="ui-badge">
+                        {t!(i18n, models::building_gallery)}
+                    </span>
+                }.into_any()
             } else {
                 view! {
                     <button
-                        class="ui-button ui-button-primary ui-button-xs"
+                        class="ui-button ui-button-primary ui-button-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled=!privileged
+                        title=move || {
+                            if privileged {
+                                ""
+                            } else {
+                                t_string!(i18n, common::restricted_to_admins)
+                            }
+                        }
                         on:click=move |_| {
                             on_select.run(model_name_for_select.clone());
                         }

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Smoke tests for the assembled gateway app (``gateway.app``).
 
 Every other suite builds a bare per-blueprint Flask app, which never installs

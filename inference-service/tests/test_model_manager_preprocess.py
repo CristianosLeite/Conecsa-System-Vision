@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Host-side tests for ModelManager preprocessing (no TensorRT interpreter).
 
 ``ModelManager.__init__`` creates a TensorRT interpreter (and, with
@@ -5,11 +9,15 @@ TENSORRT_CONTEXTS>1, worker subprocesses), so the manager is built with
 ``__new__`` + ``_configure_preprocessing`` and fake ``input_details``, which is
 all ``preprocess_image`` depends on.
 """
+import pathlib
+
 import cv2
 import numpy as np
 import pytest
 from api.model_manager import (
     ModelManager,
+    center_crop_offsets,
+    classify_resize_size,
     input_size_from_shape,
     letterbox_pad_from_env,
     letterbox_to_square,
@@ -20,9 +28,9 @@ from api.model_manager import (
 )
 
 
-def _manager(size: int, dtype: type = np.float32):
+def _manager(size: int, dtype: type = np.float32, task: str = "detect"):
     mm = ModelManager.__new__(ModelManager)
-    mm._configure_preprocessing()
+    mm._configure_preprocessing(task)
     mm.input_details = [{"index": 0, "name": "images", "shape": (1, 3, size, size),
                          "dtype": dtype}]
     mm.input_size = input_size_from_shape(mm.input_details[0]["shape"])
@@ -292,3 +300,75 @@ class TestPreprocessTiles:
         assert len(tensors) == 1
         meta = metas[0]
         assert (meta.ox, meta.oy, meta.width, meta.height) == (0, 0, 640, 360)
+
+
+FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+#: ultralytics 8.4.92 ``classify_transforms(32)`` on ``_parity_frame()`` (CHW, 0..1),
+#: computed once on the workstation; CI has Pillow but no torch.
+PARITY_FIXTURE = FIXTURES / "classify_preprocess_90x163_32.npy"
+
+
+def _parity_frame():
+    """The seeded 90x163 BGR noise frame the parity fixture was computed from.
+
+    Noise is the worst case for a resize filter mismatch, and the 25 px crop
+    excess exercises torchvision's half-to-even rounding (12.5 → 12).
+    """
+    return np.random.RandomState(7).randint(0, 256, size=(90, 163, 3), dtype=np.uint8)
+
+
+class TestClassifyPreprocess:
+    """Classification input = ultralytics ``classify_transforms``."""
+
+    @pytest.mark.parametrize("w, h, size, expected", [
+        (1280, 720, 224, (398, 224)),
+        (720, 1280, 224, (224, 398)),
+        (500, 500, 224, (224, 224)),
+        (163, 90, 32, (57, 32)),
+        (224, 224, 224, (224, 224)),
+    ])
+    def test_the_short_side_becomes_the_input_size(self, w, h, size, expected):
+        assert classify_resize_size(w, h, size) == expected
+
+    @pytest.mark.parametrize("excess, offset", [
+        (0, 0), (1, 0), (2, 1), (3, 2), (5, 2), (25, 12), (174, 87),
+    ])
+    def test_crop_offsets_round_half_to_even_like_torchvision(self, excess, offset):
+        assert center_crop_offsets(224 + excess, 224, 224) == (offset, 0)
+        assert center_crop_offsets(224, 224 + excess, 224) == (0, offset)
+
+    def test_matches_the_pinned_ultralytics_transform(self):
+        mm = _manager(32, task="classify")
+        tensor, scale, border_top, size = mm.preprocess_image(_parity_frame())
+        assert tensor.shape == (1, 3, 32, 32) and tensor.dtype == np.float32
+        assert (scale, border_top, size) == (1.0, 0, 32)
+        np.testing.assert_allclose(tensor[0], np.load(PARITY_FIXTURE), atol=1e-6)
+
+    def test_the_fixture_still_matches_the_installed_ultralytics(self):
+        pytest.importorskip("torchvision")
+        augment = pytest.importorskip("ultralytics.data.augment")
+        from PIL import Image
+
+        rgb = cv2.cvtColor(_parity_frame(), cv2.COLOR_BGR2RGB)
+        reference = augment.classify_transforms(32)(Image.fromarray(rgb)).numpy()
+        np.testing.assert_allclose(np.load(PARITY_FIXTURE), reference, atol=1e-6)
+
+    def test_a_720p_frame_is_center_cropped_not_letterboxed(self):
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        frame[:, :100] = 255  # a band the center crop (from x=87 of 398) cuts away
+        tensor, _, border_top, _ = _manager(224, task="classify").preprocess_image(frame)
+        assert tensor.shape == (1, 3, 224, 224) and border_top == 0
+        assert float(tensor.max()) == 0.0
+
+    def test_classification_is_never_tiled(self, monkeypatch):
+        monkeypatch.setenv("TILING_MODE", "grid")
+        mm = _manager(224, task="classify")
+        assert mm.tiling_active is False
+        tensors, metas = mm.preprocess_tiles(_frame(720, 1280))
+        assert len(tensors) == 1
+        # The trailing 0 is border_left: only the face path pads the X axis.
+        assert metas[0] == (1.0, 0, 224, 0, 0, 1280, 720, 0)
+
+    def test_detection_keeps_the_letterbox(self):
+        _, _, border_top, _ = _manager(640).preprocess_image(_frame(360, 640))
+        assert border_top == 140

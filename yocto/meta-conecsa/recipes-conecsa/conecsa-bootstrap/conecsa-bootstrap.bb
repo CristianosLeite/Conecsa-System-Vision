@@ -1,7 +1,9 @@
-SUMMARY = "Conecsa boot configuration: docker daemon, udev gpio, tmpfiles SHM"
-DESCRIPTION = "Installs /etc/docker/daemon.json with the nvidia runtime, the \
-udev rule for /dev/gpiochip*, tmpfiles.d for /dev/shm, and enables the systemd \
-services the docker-compose stack expects to find running at boot."
+SUMMARY = "Conecsa host configuration for the docker-compose stack"
+DESCRIPTION = "Installs the Docker daemon config with the nvidia runtime, the \
+GPIO udev rule, tmpfiles.d for /dev/shm, systemd-networkd and Wi-Fi config, \
+NTP servers, the SSH hardening drop-in, the host mDNS advertisement, the \
+unique-hostname and clock-floor units, and zram/sysctl memory tuning, and \
+enables the services the stack expects to find running at boot."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
@@ -56,10 +58,9 @@ do_install() {
     install -m 0644 ${WORKDIR}/20-wired.network \
         ${D}${sysconfdir}/systemd/network/20-wired.network
 
-    # systemd-timesyncd: pin a public NTP server since the local LAN
-    # advertises an NTP server via DHCP option 42 that is unreachable
-    # (8.0.160.200:123 times out). The .network file above disables use of
-    # the DHCP NTP option; this conf overrides the server list.
+    # systemd-timesyncd: pin public NTP servers. The .network files ignore
+    # DHCP-advertised NTP servers, which can be unreachable on site LANs and
+    # would keep timesyncd from falling back to public ones.
     install -d ${D}${sysconfdir}/systemd/timesyncd.conf.d
     install -m 0644 ${WORKDIR}/00-conecsa-ntp.conf \
         ${D}${sysconfdir}/systemd/timesyncd.conf.d/00-conecsa-ntp.conf
@@ -135,7 +136,7 @@ do_install() {
     # Clock persistence. The board has no RTC battery and the sites have no
     # reachable NTP server, so without a saved floor the clock returns to the
     # epoch on every power cut — and a clock older than the hub CA's not_before
-    # makes the device reject every hub call over mTLS. The `os` agent writes
+    # makes the device reject every hub call over mTLS. The os-base hardware agent writes
     # the same state file when it accepts a time from the hub
     # (os-base/agent/time_agent.py).
     install -m 0755 ${WORKDIR}/conecsa-fake-hwclock.sh \
@@ -172,12 +173,10 @@ FILES:${PN} = " \
     /root/.ssh \
     "
 
-# Services that must be active at boot. nvargus-daemon comes from
-# nvidia-l4t-camera (ARGUS camera daemon). nv-tee-supplicant comes from the
-# OP-TEE BSP. weston IS enabled at boot (weston-init auto-enables its units;
-# the image sets SYSTEMD_DEFAULT_TARGET=graphical.target) and runs the
-# hub-vision kiosk via [autolaunch] — see conecsa-hub-kiosk and the
-# weston-init bbappend in this layer.
+# SYSTEMD_SERVICE stays empty: every unit this recipe needs at boot, its own
+# and the ones owned by other packages, is enabled in pkg_postinst below.
+# weston is enabled by weston-init and started through graphical.target (see
+# conecsa-image.bb and the weston-init bbappend in this layer).
 SYSTEMD_SERVICE:${PN} = " "
 SYSTEMD_AUTO_ENABLE:${PN} = "disable"
 

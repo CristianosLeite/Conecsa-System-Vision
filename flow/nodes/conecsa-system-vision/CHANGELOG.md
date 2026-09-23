@@ -1,8 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- **examples**: new `face-access.json` — two-factor access control on a face
+  recognition device: a badge reader (an **inject** node standing in for it)
+  and the **detection** node (polled every second) both feed a function node that
+  releases only when the badge holder's face is recognized above a minimum
+  similarity within a few seconds of the badge → a core **trigger** node
+  pulsing → the **gpio** node on pin 29. Import it from Import → Examples.
+  Face recognition has no liveness check, so a face alone opens nothing.
+- **detection**: the help and README document face recognition devices — the
+  payload's `task` value `face`, one item per face whose `class_name` is the
+  person's name (or `unknown`) and whose `confidence` is the similarity to
+  that person, and `total` counting the faces in the frame. Passed through
+  as-is; no code changes.
+
+- **detection**: the help and README document classification devices — the
+  payload's `task`, the single frame-class item without `bbox`, and the top-k
+  under `candidates`. The node already passed them through; no code changes.
+- **detection**: the help and README document segmentation devices — each
+  item's `polygons` (its outline as rings of normalized vertices) and the
+  payload's `polygons_truncated`. Passed through as-is; no code changes.
+
+## 1.1.3 — 2026-09-22
+
+- Require a badge beside the face in the access example.
+
 ## 1.1.2 — 2026-09-03
 
-- The bundled `NOTICE` now names the scoped package
+- The bundled `NOTICE` now names the scoped packageeq
   `@conecsa/node-red-contrib-conecsa-system-vision`. No functional changes.
 
 ## 1.1.1 — 2026-08-22

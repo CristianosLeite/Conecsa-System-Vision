@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -118,9 +120,9 @@ pub fn TrainingView(
                         None => view! {
                             <div class="flex flex-col h-full min-h-0">
                                 // ── top bar ─────────────────────────────────
-                                <div class="ui-topbar flex items-center justify-between px-4 py-3">
-                                    <div class="flex items-center gap-3">
-                                        <h1 class="text-lg font-semibold">
+                                <div class="ui-topbar ui-training-topbar">
+                                    <div class="ui-training-topbar-group">
+                                        <h1 class="ui-training-topbar-title">
                                             {t_string!(i18n, training::page_title)}
                                         </h1>
                                     </div>

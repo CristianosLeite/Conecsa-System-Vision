@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 GPIO hardware backend — a small typed interface over the 40-pin header.
 
@@ -27,7 +31,7 @@ class GpioBackend(ABC):
     @property
     @abstractmethod
     def available(self) -> bool:
-        """True when backed by real, initialised GPIO hardware."""
+        """True when backed by real, initialized GPIO hardware."""
 
     @abstractmethod
     def setup_input(self, pin: int) -> None:

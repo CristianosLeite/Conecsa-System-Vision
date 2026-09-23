@@ -7,9 +7,9 @@ LinkLocalAddressing=ipv4
 
 [DHCPv4]
 UseDomains=yes
-# Don't accept DHCP-pushed NTP servers — the LAN here advertises an
-# unreachable NTP host (8.0.160.200) via option 42, which blocks
-# systemd-timesyncd from ever falling back to public servers.
+# Don't accept DHCP-pushed NTP servers: a site LAN can advertise an
+# unreachable one (option 42), which keeps systemd-timesyncd from ever
+# falling back to the public servers pinned in timesyncd.conf.d.
 UseNTP=no
 
 [DHCPv6]

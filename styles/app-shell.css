@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /* App shell: viewport frame, header, brand, status pills. */
 
 @layer components {
@@ -44,8 +50,8 @@
     max-width: 1920px;
     margin: 0 auto;
     padding: 0.75rem 1.25rem;
-    display: grid;
-    grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
+    display: flex;
+    justify-content: space-between;
     align-items: center;
     gap: 1rem;
   }

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Remote runtime proxy backed by the TensorRT worker subprocess."""
 from typing import Dict, List, Optional
 

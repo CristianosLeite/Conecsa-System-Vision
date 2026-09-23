@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Standalone SAM3 segmentation worker (subprocess).
 
 Owns the SAM3 model on the GPU so the long-lived gRPC parent never imports
@@ -216,8 +220,13 @@ class _Sam3Session:
         text_prompt: str,
         points: List[Dict[str, Any]],
         threshold: Optional[float] = None,
-    ) -> Tuple[List[Dict[str, float]], List[float]]:
-        """Segment."""
+    ) -> Tuple[List[Dict[str, float]], List[float], List[List[List[List[float]]]]]:
+        """Boxes (normalized YOLO), scores and, per box, its mask as rings.
+
+        The rings are the mask's exterior outlines normalized on the image
+        (``conecsa_common.polygons.mask_rings``); a box without a mask gets
+        none.
+        """
         from PIL import Image
 
         image = Image.open(image_path).convert("RGB")
@@ -243,15 +252,20 @@ class _Sam3Session:
 
         boxes = _to_list(output.get("boxes"))
         scores = [float(s) for s in _to_list(output.get("scores"))]
-        masks = output.get("masks")
+        raw_masks = output.get("masks")
+        masks = _mask_arrays(raw_masks) if raw_masks is not None else []
 
-        if not boxes and masks is not None:
-            boxes = [_mask_to_xyxy(m) for m in _to_list(masks)]
-            boxes = [b for b in boxes if b is not None]
+        if not boxes and masks:
+            pairs = [(_mask_to_xyxy(m), m) for m in masks]
+            pairs = [(b, m) for b, m in pairs if b is not None]
+            boxes = [b for b, _ in pairs]
+            masks = [m for _, m in pairs]
             scores = scores or [1.0] * len(boxes)
 
         norm = [_xyxy_to_yolo(b, width, height) for b in boxes]
-        return norm, scores[: len(norm)]
+        polygons = [_mask_rings(masks[i], width, height) if i < len(masks) else []
+                    for i in range(len(norm))]
+        return norm, scores[: len(norm)], polygons
 
     def _point_prompt(self, state, points, width, height):
         """Click prompts. The SAM3 interactive API name varies between
@@ -279,6 +293,35 @@ def _to_list(value) -> List:
     # ``value`` is a duck-typed tensor/ndarray, so its tolist() is untyped.
     raw: Any = tolist() if callable(tolist) else value
     return list(raw)
+
+
+def _mask_arrays(value) -> List:
+    """One numpy array per mask of a ``(N, …)`` tensor or array (no Python lists)."""
+    import numpy as np
+
+    # ``value`` is a duck-typed torch tensor or numpy array.
+    detach: Any = getattr(value, "detach", None)
+    if detach is not None:
+        value = detach().float().cpu().numpy()
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        return []
+    return [arr[i] for i in range(arr.shape[0])]
+
+
+def _mask_rings(mask, width: int, height: int) -> List[List[List[float]]]:
+    """A mask as normalized exterior rings on the ``width``×``height`` image."""
+    import numpy as np
+    from conecsa_common.polygons import mask_rings
+
+    arr = (np.asarray(mask, dtype=np.float32).squeeze() > 0.5).astype(np.uint8)
+    if arr.ndim != 2:
+        return []
+    if arr.shape != (height, width):
+        import cv2
+
+        arr = cv2.resize(arr, (width, height), interpolation=cv2.INTER_NEAREST)
+    return mask_rings(arr, width, height)
 
 
 def _mask_to_xyxy(mask) -> Optional[List[float]]:
@@ -324,13 +367,14 @@ def run_server(host: str, port: int, checkpoint: str) -> None:
                         if session is None:
                             conn.send({"status": "error", "error": "model not loaded"})
                             continue
-                        boxes, scores = session.segment(
+                        boxes, scores, polygons = session.segment(
                             msg.get("image_path", ""),
                             msg.get("text_prompt", ""),
                             msg.get("points", []) or [],
                             msg.get("threshold"),
                         )
-                        conn.send({"status": "ok", "boxes": boxes, "scores": scores})
+                        conn.send({"status": "ok", "boxes": boxes, "scores": scores,
+                                   "polygons": polygons})
                     elif cmd == "close":
                         conn.send({"status": "ok"})
                         conn.close()

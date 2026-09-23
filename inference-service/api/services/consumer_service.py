@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Consumer service - owns the shared-memory transport with the webcam-server.
 
@@ -6,18 +10,14 @@ the latest frame (cheap: just stores the JPEG bytes + a monotonically increasing
 sequence number; no decode here). The processing pipeline reads from this
 latest-frame slot, so the capture is consumed once regardless of how many
 pipeline lanes are attached.
-
-This used to live inside ``VideoService``; it was extracted so the SHM
-read/transport is an independent service (and so the heavy decode/inference work
-moves to the processing pipeline's own threads).
 """
 import logging
 import threading
 import time
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import numpy as np  # ships in conecsa-os-base:base
 from conecsa_shm.camera_ring import CameraRingReader
 
 # api/proto is created by Dockerfile.inference-service (and shimmed onto sys.path by
@@ -33,7 +33,7 @@ class ConsumerService:
 
     def __init__(self, shm_name: str):
         # writable=True: the camera config/health channel writes back through the
-        # same segment (CameraRingReader replaces the old in-house ShmConsumer).
+        # same segment.
         self._shm = CameraRingReader(shm_name, writable=True)
 
         # Shared latest frame — written by the background reader, read by the
@@ -43,15 +43,17 @@ class ConsumerService:
         self._seq = 0  # monotonically increasing
         self._cond = threading.Condition(threading.Lock())
 
+        # Called from the reader thread whenever the segment is (re)mapped.
+        self._on_attach: Optional[Callable[[], None]] = None
+        self._attach_seen = 0
+
         self._thread = threading.Thread(
             target=self._reader, daemon=True, name="webcam-reader"
         )
         self._thread.start()
         logger.info("[ConsumerService] Background camera reader started (/%s)", shm_name)
 
-    # ------------------------------------------------------------------
-    # Background reader
-    # ------------------------------------------------------------------
+    # ── Background reader ──
 
     def _reader(self) -> None:
         """Poll the SHM segment for new frames and publish the latest."""
@@ -62,6 +64,7 @@ class ConsumerService:
                 self._shm.open()
                 continue
 
+            self._notify_attach()
             result = self._shm.get_latest_frame(last_cam_seq)
             if result is not None:
                 frame_data, last_cam_seq = result
@@ -87,9 +90,26 @@ class ConsumerService:
             else:
                 time.sleep(0.001)  # 1 ms poll interval
 
-    # ------------------------------------------------------------------
-    # Latest-frame access (fan-out)
-    # ------------------------------------------------------------------
+    def set_on_attach(self, callback: Callable[[], None]) -> None:
+        """Register the hook run whenever the camera segment is (re)mapped.
+
+        The webcam-server recreates its segment on every start, and the fresh
+        one carries no config: the hook lets the config owner publish again.
+        A mapping made before the hook was registered is reported too.
+        """
+        self._on_attach = callback
+
+    def _notify_attach(self) -> None:
+        generation = self._shm.attach_generation
+        if self._on_attach is None or generation == self._attach_seen:
+            return
+        self._attach_seen = generation
+        try:
+            self._on_attach()
+        except Exception:  # noqa: BLE001 - the reader thread must survive the hook
+            logger.exception("[ConsumerService] camera segment attach hook failed")
+
+    # ── Latest-frame access (fan-out) ──
 
     def wait_for(
         self, last_seq: int, timeout: float = 5.0
@@ -105,17 +125,18 @@ class ConsumerService:
                 return self._seq, self._latest_jpg, self._latest_npy
             return last_seq, None, None
 
-    # ------------------------------------------------------------------
-    # Config / health passthrough (same SHM segment)
-    # ------------------------------------------------------------------
+    # ── Config / health passthrough (same SHM segment) ──
 
     def is_available(self) -> bool:
         """True once the camera SHM segment is mapped."""
         return self._shm.is_available()
 
-    def write_config(self, config) -> None:
-        """Write a CameraConfig back into the SHM header for the webcam-server."""
-        self._shm.write_config_bytes(config.SerializeToString())
+    def write_config(self, config) -> bool:
+        """Write a CameraConfig back into the SHM header for the webcam-server.
+
+        Returns whether it reached the segment (``False`` while none is mapped).
+        """
+        return self._shm.write_config_bytes(config.SerializeToString())
 
     def read_health(self):
         """Return the webcam-server's HealthStatus from SHM, or ``None``."""

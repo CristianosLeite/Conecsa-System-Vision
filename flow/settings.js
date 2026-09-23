@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Credential-encryption secret: REQUIRED. Third-party credentials stored in
 // flows are encrypted with it; a source-known fallback would make them
 // recoverable from any deployment, so startup fails loudly instead. Note:

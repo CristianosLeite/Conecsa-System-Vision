@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Headless training-service entry point.
 
 Wires the services (composition root) and starts the TrainingControl gRPC

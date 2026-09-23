@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! POSIX shared-memory producer: a double-buffered frame region plus
 //! protobuf-encoded config/health regions in the header (the camera SHM ring
 //! consumed by the inference-service and api-gateway).
@@ -34,7 +38,7 @@ const CONFIG_PAYLOAD_MAX: usize = 128;
 const HEALTH_PAYLOAD_MAX: usize = 64;
 const SHM_SLOT_MIN_BYTES_DEFAULT: usize = 8 * 1024 * 1024;
 
-/// Offsets into the SHM header (see plan for full layout).
+/// Offsets into the SHM header; must match `os-base/conecsa_shm/camera_ring.py`.
 mod off {
     pub const MAGIC: usize = 0;
     pub const VERSION: usize = 4;
@@ -92,7 +96,6 @@ unsafe impl Send for ShmProducer {}
 unsafe impl Sync for ShmProducer {}
 
 impl ShmProducer {
-    /// Read slot min bytes.
     fn read_slot_min_bytes() -> usize {
         std::env::var("SHM_SLOT_MIN_BYTES")
             .ok()
@@ -162,10 +165,8 @@ impl ShmProducer {
 
             let ptr = ptr as *mut u8;
 
-            // Zero the entire region.
             std::ptr::write_bytes(ptr, 0, total_size);
 
-            // Write header fields.
             Self::write_u32(ptr, off::MAGIC, SHM_MAGIC);
             Self::write_u32(ptr, off::VERSION, SHM_VERSION);
             Self::write_u32(ptr, off::WIDTH, width);
@@ -184,9 +185,14 @@ impl ShmProducer {
         }
     }
 
+    /// Largest frame one slot holds, in bytes. The network source uses it to
+    /// refuse an oversized part before buffering it.
+    pub fn slot_size(&self) -> usize {
+        self.slot_size
+    }
+
     /// Frames refused because they exceeded the slot (RAW and JPEG alike).
-    /// A diagnostic counter: read by the tests today, and the natural hook
-    /// for a health field later.
+    /// A diagnostic counter, read by the tests.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn dropped_frames(&self) -> u64 {
         self.dropped_frames.load(Ordering::Relaxed)
@@ -195,10 +201,9 @@ impl ShmProducer {
     /// Whether a frame of `len` bytes fits one slot; counts and (rate-limited)
     /// logs the drop otherwise.
     ///
-    /// A JPEG used to be clamped to the slot and published as a complete
-    /// frame of `slot_size` bytes — a truncated, invalid image the consumer
-    /// accepted (its only check is `size <= slot_size`). A clear drop is the
-    /// honest outcome; `SHM_SLOT_MIN_BYTES` is the knob when it happens.
+    /// An oversized JPEG is dropped, never truncated: the consumer only checks
+    /// `size <= slot_size` and would accept a clipped, invalid image. Raise
+    /// `SHM_SLOT_MIN_BYTES` when drops happen.
     fn fits_slot(&self, len: usize, what: &str, dims: Option<(u32, u32)>) -> bool {
         if len <= self.slot_size {
             return true;
@@ -277,7 +282,7 @@ impl ShmProducer {
     /// Check whether the consumer has written a new config.  Returns the
     /// deserialized `CameraConfig` if the sequence counter advanced.
     /// Takes `&self`: the polling cursor is atomic, so no exclusive reference
-    /// (and none of the old `Arc::as_ptr` → `&mut` casts) is needed.
+    /// is needed.
     pub fn poll_config(&self) -> Option<proto::CameraConfig> {
         unsafe {
             let seq = self.atomic_u32(off::CONFIG_WRITE_SEQ).load(Ordering::Acquire);
@@ -294,6 +299,24 @@ impl ShmProducer {
             let payload =
                 std::slice::from_raw_parts(self.ptr.add(off::CONFIG_PAYLOAD), size);
             proto::CameraConfig::decode(payload).ok()
+        }
+    }
+
+    /// What the consumer does in `CameraRingReader.write_config_bytes`:
+    /// payload, then size, then the sequence bump. Tests only.
+    #[cfg(test)]
+    pub(crate) fn write_config_for_test(&self, cfg: &proto::CameraConfig) {
+        let buf = cfg.encode_to_vec();
+        assert!(buf.len() <= CONFIG_PAYLOAD_MAX, "test config exceeds the region");
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                self.ptr.add(off::CONFIG_PAYLOAD),
+                buf.len(),
+            );
+            Self::write_u32(self.ptr, off::CONFIG_SIZE, buf.len() as u32);
+            self.atomic_u32(off::CONFIG_WRITE_SEQ)
+                .fetch_add(1, Ordering::Release);
         }
     }
 
@@ -335,7 +358,6 @@ impl ShmProducer {
 }
 
 impl Drop for ShmProducer {
-    /// Drop.
     fn drop(&mut self) {
         unsafe {
             libc::munmap(self.ptr as *mut libc::c_void, self.total_size);
@@ -379,8 +401,7 @@ mod tests {
 
     #[test]
     fn an_oversized_jpeg_is_dropped_not_truncated() {
-        // A JPEG larger than the slot used to be clamped and published as a
-        // complete frame: a corrupt image instead of a clear drop.
+        // A JPEG larger than the slot is dropped, never published truncated.
         let name = format!("conecsa-shm-oversize-test-{}", std::process::id());
         let shm = ShmProducer::new(&name, 64, 64).expect("create segment");
         let seq_at = |shm: &ShmProducer| unsafe {
@@ -396,6 +417,116 @@ mod tests {
         shm.publish_frame_jpeg(&too_big[..shm.slot_size]);
         assert_eq!(seq_at(&shm), 2);
         assert_eq!(shm.dropped_frames(), 2);
+    }
+
+    #[test]
+    fn a_jpeg_frame_leaves_the_header_dimensions_unset() {
+        // Consumers decode a JPEG's size from its bytes, so a remote camera
+        // may change resolution freely: only a RAW frame writes the header
+        // dimensions, and a JPEG leaves whatever they were.
+        let name = format!("conecsa-shm-jpeg-dims-test-{}", std::process::id());
+        let shm = ShmProducer::new(&name, 64, 48).expect("create segment");
+        let dims = |shm: &ShmProducer| unsafe {
+            (
+                ShmProducer::read_u32(shm.ptr, off::WIDTH),
+                ShmProducer::read_u32(shm.ptr, off::HEIGHT),
+            )
+        };
+        assert_eq!(dims(&shm), (64, 48), "the creation size until a RAW frame says otherwise");
+        shm.publish_frame_jpeg(b"\xff\xd8a-1920x1080-jpeg\xff\xd9");
+        assert_eq!(dims(&shm), (64, 48));
+        shm.publish_frame_rgb(&[0u8; 32 * 16 * 3], 32, 16);
+        assert_eq!(dims(&shm), (32, 16));
+        shm.publish_frame_jpeg(b"\xff\xd8another-jpeg\xff\xd9");
+        assert_eq!(dims(&shm), (32, 16), "a JPEG never touches the dimensions");
+    }
+
+    #[test]
+    fn a_config_written_the_consumer_way_is_polled_once() {
+        // The test writer mirrors camera_ring.py; poll_config sees it exactly once.
+        let name = format!("conecsa-shm-config-test-{}", std::process::id());
+        let shm = ShmProducer::new(&name, 64, 64).expect("create segment");
+        let cfg = proto::CameraConfig {
+            source: Some(proto::CameraSource::Network as i32),
+            network_host: "192.0.2.7".to_string(),
+            network_port: 8080,
+            ..Default::default()
+        };
+        shm.write_config_for_test(&cfg);
+        assert_eq!(shm.poll_config(), Some(cfg));
+        assert_eq!(shm.poll_config(), None);
+    }
+
+    /// Fields 1-11 at `max`, no source or network fields.
+    fn config_with_numbers_at(max: u32) -> proto::CameraConfig {
+        proto::CameraConfig {
+            camera_index: max,
+            width: max,
+            height: max,
+            framerate: max,
+            auto_exposure: true,
+            exposure_time: max,
+            rgb_red: max,
+            rgb_green: max,
+            rgb_blue: max,
+            gamma: max,
+            gain: max,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_config_at_its_validated_maxima_takes_exactly_119_bytes() {
+        // Mirrored by inference-service/tests/test_shm_config_payload.py.
+        let cfg = proto::CameraConfig {
+            source: Some(proto::CameraSource::Network as i32),
+            network_host: "255.255.255.255".to_string(),
+            network_port: 65_535,
+            network_token: "Z".repeat(32),
+            ..config_with_numbers_at(u32::MAX)
+        };
+        assert_eq!(cfg.encode_to_vec().len(), 119);
+    }
+
+    #[test]
+    fn a_config_with_every_number_at_u32_max_still_fits_the_region() {
+        // The worst case a writer can produce leaves 3 bytes, and tag 16
+        // onward costs a two-byte tag: the next CameraConfig field does not
+        // fit. It needs a larger region — a layout change and an SHM_VERSION
+        // bump, deployed to all four SHM-sharing containers together.
+        let cfg = proto::CameraConfig {
+            source: Some(i32::MAX),
+            network_host: "255.255.255.255".to_string(),
+            network_port: u32::MAX,
+            network_token: "Z".repeat(32),
+            ..config_with_numbers_at(u32::MAX)
+        };
+        assert_eq!(cfg.encode_to_vec().len(), 125);
+        assert!(cfg.encode_to_vec().len() <= CONFIG_PAYLOAD_MAX);
+    }
+
+    #[test]
+    fn a_negative_source_value_would_not_fit_so_writers_must_validate_it() {
+        // A negative enum is a 10-byte varint. poll_config drops the message;
+        // the size check is the backstop, enum validation is the rule.
+        let cfg = proto::CameraConfig {
+            source: Some(-1),
+            network_host: "255.255.255.255".to_string(),
+            network_port: u32::MAX,
+            network_token: "Z".repeat(32),
+            ..config_with_numbers_at(u32::MAX)
+        };
+        assert_eq!(cfg.encode_to_vec().len(), 130);
+        assert!(cfg.encode_to_vec().len() > CONFIG_PAYLOAD_MAX);
+    }
+
+    #[test]
+    fn health_with_a_detail_fits_its_region() {
+        let health = proto::HealthStatus {
+            status: "no_camera".to_string(),
+            detail: proto::CameraHealthDetail::BadStream as i32,
+        };
+        assert!(health.encode_to_vec().len() <= HEALTH_PAYLOAD_MAX);
     }
 
     #[test]

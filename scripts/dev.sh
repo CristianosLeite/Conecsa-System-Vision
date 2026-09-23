@@ -1,4 +1,9 @@
 #!/bin/bash
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # dev.sh — local full-stack dev launcher.
 #

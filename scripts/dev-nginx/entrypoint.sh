@@ -1,4 +1,9 @@
 #!/bin/sh
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Dev twin of system-vision/config/entrypoint.sh: flips the :443 TLS block
 # between enrollment (self-signed, /enroll only) and enforcing (mTLS) based on
 # whether the hub-signed cert + CA are present in the shared certs dir, and

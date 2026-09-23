@@ -1,15 +1,16 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 syntax = "proto3";
 
 package inference;
 
 // Control + telemetry contract between the API gateway (client) and the
-// headless inference-service (server). The per-frame media (raw + processed
-// JPEG) does NOT travel over gRPC — it crosses via POSIX shared memory. Only
-// infrequent control calls and low-rate event/stats streams use this service.
-//
-// This mirrors the existing REST surface (/start /stop /threshold /status
-// /trigger/* /counter/* /stats* /events/stream /detections/snapshot) so the
-// gateway can translate HTTP↔gRPC without changing the external contract.
+// headless inference-service (server). Per-frame media (raw + processed JPEG)
+// crosses via POSIX shared memory, never gRPC; this service carries control
+// calls and low-rate event/stats streams, which the gateway exposes as its
+// REST/SSE routes.
 
 message Empty {}
 
@@ -25,10 +26,22 @@ message Stats {
   float inference_time = 2;        // milliseconds
   uint32 detections = 3;
   uint64 frames_with_detections = 4;
+  // Pipeline service times in milliseconds over the last few hundred frames.
+  // "finish" is the postprocess stage (postprocess + overlay), "encode" the
+  // encode stage (JPEG encode + publish); both are single-threaded, so their
+  // service time bounds the frame rate. Frame age runs from the prepare
+  // stage's pickup off the camera ring to publication (the ring carries no
+  // capture timestamp). 0 until enough frames were processed.
+  float finish_mean_ms = 5;
+  float finish_p95_ms = 6;
+  float finish_p99_ms = 7;
+  float encode_mean_ms = 8;
+  float encode_p95_ms = 9;
+  float frame_age_p95_ms = 10;
 }
 
 message StatusResponse {
-  reserved 5;  // was: bool using_npu (Jetson Orin Nano has no NPU)
+  reserved 5;  // was using_npu
   bool is_running = 1;
   string model = 2;
   float confidence_threshold = 3;
@@ -38,15 +51,45 @@ message StatusResponse {
   bool trigger_enabled = 8;
   uint32 detection_count = 9;
   Stats stats = 10;
-  // webcam-server SHM health == "capturing". `optional` on purpose: a plain
-  // proto3 bool is indistinguishable from "absent", so an inference-service
-  // that predates this field would decode as false and make the gateway refuse
-  // every Start (409) during a rolling upgrade. Unset means "producer has no
-  // camera gate" → treat as connected, which is how it behaved before the gate.
+  // webcam-server SHM health == "capturing". Unset means older firmware with
+  // no camera gate: treat it as connected, so Start is not refused.
   optional bool camera_connected = 11;
+  // Application type of the device (see ApplicationInfo.task): "detect",
+  // "classify" or "segment"; empty while no application has been chosen.
+  // Unset means older firmware without application types, never "none
+  // chosen".
+  optional string task = 12;
+  // Segmentation instance limit in effect: at most this many instances per
+  // frame (and per tile) get a mask, highest scores first. The operator's
+  // per-model setting (SetSegmentMaxInstances) or, without one, the
+  // SEGMENT_MAX_MASKS default. Unset on older firmware.
+  optional uint32 segment_max_instances = 13;
+  // Face recognition settings in effect for the active model (SetFaceSettings
+  // or, without one, the FACE_* defaults). Unset on older firmware.
+  // The cosine similarity a face must exceed to take an enrolled person's name.
+  optional float face_match_threshold = 14;
+  // The smallest face side, in frame pixels, that is recognized.
+  optional uint32 face_min_size_px = 15;
+  // At most this many faces per frame are recognized, largest first.
+  optional uint32 face_max_faces = 16;
 }
 
 message ThresholdRequest { float threshold = 1; }
+
+// Segmentation instance limit (1..255), applied to the per-frame and per-tile
+// caps together and saved with the active model's settings.
+message SegmentMaxInstancesRequest { uint32 max_instances = 1; }
+
+// Face recognition settings, saved with the active model's settings. Each
+// field is optional: only the ones present change.
+message FaceSettingsRequest {
+  // Cosine similarity (0..1) a face must exceed to be named.
+  optional float match_threshold = 1;
+  // Smallest recognized face side in pixels (0..1024).
+  optional uint32 min_size_px = 2;
+  // Faces recognized per frame (1..20), largest first.
+  optional uint32 max_faces = 3;
+}
 
 message CounterResponse {
   uint32 count = 1;
@@ -78,7 +121,7 @@ message BacklogAckRequest {
   repeated int64 ids = 1;          // buffered-record ids persisted by the hub; delete is idempotent
 }
 
-// ── Model activation (driven by model-service once it is extracted) ──────────
+// ── Model activation (reserved: the RPCs answer UNIMPLEMENTED) ───────────────
 
 message ReloadModelRequest {
   string model_path = 1;
@@ -88,7 +131,7 @@ message ReloadModelRequest {
 }
 
 message DetectionArea {
-  string json = 1;                 // opaque area JSON (schema owned by model-service)
+  string json = 1;                 // opaque area JSON (schema owned by DetectionAreaService)
 }
 message SetDetectionAreasRequest { repeated DetectionArea areas = 1; }
 message SetSettingsRequest { string json = 1; }
@@ -109,8 +152,7 @@ message StatsUpdate {
   Stats stats = 2;
 }
 
-// ── Model management (stays inference-side: activation reloads the live
-//    detector, so it cannot leave the process that owns the pipeline) ─────────
+// ── Model management (activation reloads the live detector) ─────────────────
 
 message ModelInfo {
   string name = 1;
@@ -122,21 +164,25 @@ message ModelInfo {
   // an on-device run's best.pt, a manual or federated .pt upload) as a
   // sidecar. Such a model can seed a fine-tune and act as a labeling
   // assistant in the training-service (DownloadModelWeights). Engines
-  // uploaded as .onnx/.engine, and models converted before the sidecar
-  // existed, have none.
+  // uploaded as .onnx/.engine, and models converted by older firmware, have
+  // none.
   bool has_weights = 6;
+  // Task the model was built for ("detect", "classify", "segment", "face"), read from
+  // its settings sidecar; models recorded before application types existed
+  // report "detect". A model can only be activated on a device whose
+  // application has the same task.
+  string task = 7;
 }
 message ModelList { repeated ModelInfo models = 1; }
 
 message ModelName { string name = 1; }
 
 // Client-streaming upload: first message carries the metadata, the rest carry
-// file bytes (mirrors the legacy detection.proto ModelChunk pattern). The
-// reply carries a JSON blob the gateway relays verbatim (ModelService owns the
+// file bytes. The reply carries a JSON blob the gateway relays verbatim (ModelService owns the
 // schema), plus the intended HTTP status so the gateway stays a pure relay.
 message ModelUploadMeta {
   string filename = 1;
-  uint32 imgsz = 2;             // image size for .pt conversion (0 → service default 640)
+  uint32 imgsz = 2;             // image size for .pt conversion (0 → the size the checkpoint was trained at, else the task default: 224 classify, 640 otherwise)
   // Geometry the weights were trained on, recorded in the model's settings
   // sidecar so activation can warn when it disagrees with TILING_MODE:
   // "frames" (whole images), "tiles:auto" (square crops spanning the image's
@@ -144,6 +190,13 @@ message ModelUploadMeta {
   // unknown (browser uploads, federated results): recorded as nothing, never
   // warned about.
   string train_geometry = 3;
+  // Task the uploaded model is declared for ("detect", "classify",
+  // "segment"). Empty = the device's current application task; refused when
+  // the device has no application yet. A .pt/.onnx whose discovered task
+  // disagrees fails its conversion; an .engine/.plan is verified against the
+  // declaration when it is activated. Tasks the running build does not
+  // support (ApplicationInfo.supported_tasks) are refused at upload.
+  string task = 4;
 }
 message ModelChunk {
   oneof data {
@@ -187,6 +240,9 @@ message LabelModelStatus {
   string model_name = 2;            // ListModels name of the loaded engine ("" = none)
   repeated string class_names = 3;  // the engine's classes sidecar, by index
   string message = 4;
+  // Task of the loaded engine ("" = none). Suggestions are only valid for a
+  // dataset of the same task; the gateway refuses a mismatch.
+  string task = 5;
 }
 message LabelDetectRequest {
   bytes jpeg = 1;                   // the dataset image, as stored
@@ -200,11 +256,32 @@ message LabelDetection {
   float y1 = 5;
   float x2 = 6;
   float y2 = 7;
+  // The instance mask of a segmentation engine as exterior rings (empty for
+  // a detection engine); corners above are the rings' bounding rectangle.
+  repeated Ring rings = 8;
 }
+// One exterior ring: the flat list x1, y1, x2, y2, … of at least 3 vertices,
+// normalized 0..1 on the image, clockwise and implicitly closed.
+message Ring {
+  repeated float points = 1;
+}
+// One whole-image class suggestion of a classification engine.
+message LabelClass {
+  uint32 class_id = 1;              // the ENGINE's class index
+  string class_name = 2;            // resolved through its classes sidecar
+  float score = 3;                  // probability 0..1
+}
+// Suggestions for one image. A detection engine fills `detections` (a
+// segmentation engine also fills each detection's `rings`); a
+// classification engine fills `image_class` (the top-1 when its probability
+// is above the threshold, unset otherwise) and `candidates` (the top-k,
+// highest first).
 message LabelDetectResult {
   bool success = 1;
   string message = 2;
   repeated LabelDetection detections = 3;
+  LabelClass image_class = 4;
+  repeated LabelClass candidates = 5;
 }
 
 service ModelControl {
@@ -230,8 +307,8 @@ service ModelControl {
 
 message ClassList { repeated string classes = 1; }
 
-// Area ops return the full areas state (JSON: {"areas":[...]}) so the gateway
-// can relay it verbatim, matching the REST controller's state response.
+// Area ops return the full areas state (JSON: {"areas":[...]}), which the
+// gateway relays verbatim.
 message AreaResult {
   bool ok = 1;
   string state_json = 2;
@@ -243,6 +320,38 @@ message AreaCommandRequest { string area_id = 1; string action = 2; }
 // Config blobs are variadic dicts; carried as JSON so the gateway relays the
 // HTTP body/response verbatim (still gRPC, just not field-by-field typed).
 message ConfigJson { string json = 1; }
+
+// ── Application type ─────────────────────────────────────────────────────────
+// The device runs exactly one application: object detection, image
+// classification or instance segmentation. The choice is persisted by the
+// inference-service (/data/models/application.json) and every model, dataset
+// and detection record carries the task it belongs to.
+
+message ApplicationInfo {
+  // "detect", "classify", "segment" or "face"; empty while no application has been
+  // chosen (a blank device shows the selection screen).
+  string task = 1;
+  // Tasks the running build can serve — the postprocess strategies it
+  // registers. SetApplication and model uploads refuse any other task.
+  repeated string supported_tasks = 2;
+  // True when the task was set automatically to object detection for a
+  // device that already held models before application types existed; false
+  // when an administrator chose it.
+  bool migrated = 3;
+}
+
+message SetApplicationRequest {
+  string task = 1;                 // one of ApplicationInfo.supported_tasks
+}
+
+// Options of ResumeRuntime. An empty request re-activates the current model
+// and restarts detection.
+message ResumeRuntimeRequest {
+  // End the GPU handover without re-activating the model or restarting
+  // detection, so a finished training's model conversion keeps the GPU. The
+  // application type can change again either way.
+  bool keep_detection_stopped = 1;
+}
 
 service ManagementControl {
   rpc GetClasses(Empty) returns (ClassList);
@@ -264,15 +373,22 @@ service ManagementControl {
   rpc SetAreaShape(AreaShape) returns (AreaResult);
   rpc AreaCommand(AreaCommandRequest) returns (AreaResult);
 
-  // GPU handover for the training-service: ReleaseRuntime stops detection and
-  // terminates the TensorRT worker subprocesses so their CUDA memory returns
-  // to the system (the WorkerClient cache survives — workers self-heal and
-  // reload the engine on the next request). ResumeRuntime re-activates the
-  // current model and restarts detection. Both are idempotent. ReleaseRuntime
-  // refuses while a model conversion is running (the engine build needs the
-  // worker).
+  // GPU handover for the training-service. ReleaseRuntime stops detection and
+  // terminates the TensorRT workers so their CUDA memory is freed; it refuses
+  // while a model conversion runs. ResumeRuntime (or an explicit Start) ends
+  // the handover. The application type cannot change while the GPU is handed
+  // over. Both are idempotent.
   rpc ReleaseRuntime(Empty) returns (Result);
-  rpc ResumeRuntime(Empty) returns (Result);
+  rpc ResumeRuntime(ResumeRuntimeRequest) returns (Result);
+
+  // Application type. SetApplication stops detection, persists the new task,
+  // deselects an active model of another task (its files are kept) and
+  // publishes `application_changed`; detection is not restarted. Choosing the
+  // current task is a no-op. It fails with INVALID_ARGUMENT for an unknown
+  // task and FAILED_PRECONDITION for a task this build does not support or
+  // while the GPU is handed over to training or a model conversion runs.
+  rpc GetApplication(Empty) returns (ApplicationInfo);
+  rpc SetApplication(SetApplicationRequest) returns (ApplicationInfo);
 }
 
 service DetectionControl {
@@ -284,6 +400,8 @@ service DetectionControl {
   // Tuning
   rpc SetThreshold(ThresholdRequest) returns (Result);
   rpc SetOverlayThreshold(ThresholdRequest) returns (Result);
+  rpc SetSegmentMaxInstances(SegmentMaxInstancesRequest) returns (Result);
+  rpc SetFaceSettings(FaceSettingsRequest) returns (Result);
 
   // Trigger / counter
   rpc EnableTrigger(Empty) returns (Result);
@@ -299,7 +417,7 @@ service DetectionControl {
   rpc ListBacklog(BacklogRequest) returns (BacklogResponse);
   rpc AckBacklog(BacklogAckRequest) returns (Result);
 
-  // Model activation (driven by the model-service migration).
+  // Reserved: answer UNIMPLEMENTED.
   rpc ReloadModel(ReloadModelRequest) returns (Result);
   rpc SetDetectionAreas(SetDetectionAreasRequest) returns (Result);
   rpc SetSettings(SetSettingsRequest) returns (Result);

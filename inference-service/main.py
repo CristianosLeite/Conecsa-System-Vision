@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Headless inference-service entry point.
 
@@ -39,8 +43,8 @@ except Exception as ex:  # noqa: BLE001 - report and exit non-zero
 if __name__ == "__main__":
     # Headless inference: the processing pipeline and the gRPC control server
     # (proto/inference.proto on :50061) are already running from the module-level
-    # startup above. The api-gateway is the only HTTP surface now — there is no
-    # Flask/waitress here. Block on the server so the process lives exactly as
-    # long as its listener (docker stop's SIGTERM interrupts the wait and exits).
+    # startup above. The api-gateway owns HTTP; this service has none. Block on
+    # the server so the process lives exactly as long as its listener (docker
+    # stop's SIGTERM interrupts the wait and exits).
     logger.info("Inference running headless (gRPC + pipeline; no Flask/HTTP).")
     grpc_server.wait_for_termination()

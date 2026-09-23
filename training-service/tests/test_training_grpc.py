@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the TrainingControl servicer's GetImage dimension reporting.
 
 The servicer is built over a fake application whose dataset registry hands
@@ -7,6 +11,7 @@ involved.
 from types import SimpleNamespace
 
 import cv2
+import grpc
 import numpy as np
 import pytest
 import training_pb2 as pb
@@ -82,4 +87,40 @@ class TestGetImage:
         assert ctx.code is None
         assert reply.jpeg == b"not a jpeg"
         assert (reply.width, reply.height) == (0, 0)
+
+
+class FakeRegistry:
+    def __init__(self):
+        self.created = []
+
+    def create(self, name, task="detect"):
+        self.created.append((name, task))
+        return {"dataset_id": "d1", "name": name, "created_at": 1.0, "cover_image_id": "",
+                "image_count": 0, "labeled_count": 0, "class_count": 0, "task": task}
+
+
+class TestCreateDataset:
+    def _create(self, name, task=""):
+        registry = FakeRegistry()
+        servicer = TrainingControlServicer(SimpleNamespace(dataset_registry=registry))
+        ctx = FakeContext()
+        reply = servicer.CreateDataset(pb.DatasetName(name=name, task=task), ctx)
+        return reply, ctx, registry
+
+    def test_an_empty_task_is_detect(self):
+        # A gateway that predates application types sends no task.
+        reply, ctx, registry = self._create("Parts")
+        assert ctx.code is None
+        assert reply.task == "detect"
+        assert registry.created == [("Parts", "detect")]
+
+    def test_the_task_is_passed_through(self):
+        reply, _, registry = self._create("Kinds", "classify")
+        assert reply.task == "classify"
+        assert registry.created == [("Kinds", "classify")]
+
+    def test_an_unknown_task_is_invalid(self):
+        reply, ctx, registry = self._create("Poses", "pose")
+        assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+        assert registry.created == []
 

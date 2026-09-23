@@ -1,11 +1,12 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
 use super::alert_message::{AlertKind, AlertMessage};
 use super::stream_info_message::StreamInfoMessage;
 
-/// Setup auto close.
 fn setup_auto_close(msg_signal: ReadSignal<String>, set_msg_signal: WriteSignal<String>) {
     Effect::new(move |_| {
         let msg = msg_signal.get();
@@ -24,7 +25,6 @@ fn setup_auto_close(msg_signal: ReadSignal<String>, set_msg_signal: WriteSignal<
     });
 }
 
-/// The `PopupMessages` view component.
 #[component]
 pub fn PopupMessages(
     error_msg: ReadSignal<String>,

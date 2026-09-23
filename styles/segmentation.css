@@ -1,0 +1,61 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Segmentation result under the live video: the objects of the latest frame
+   grouped by class. Every chip names its class in text — the swatch only adds
+   colour — with its instance count; chips wrap, and long pt-BR/es labels or
+   class names wrap, never truncate. */
+
+@layer components {
+  .ui-segment-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+    background: var(--surface-panel-raised);
+  }
+
+  .ui-segment-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .ui-segment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    max-width: 100%;
+    padding: 0.125rem 0.625rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    color: var(--text-strong);
+    font-size: 0.875rem;
+    overflow-wrap: anywhere;
+  }
+
+  .ui-segment-swatch {
+    flex: 0 0 auto;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 0.1875rem;
+  }
+
+  .ui-segment-count {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ui-segment-muted {
+    color: var(--text-muted);
+  }
+}

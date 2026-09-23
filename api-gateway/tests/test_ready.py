@@ -1,4 +1,8 @@
-"""GET /api/v1/ready reflects the backends' gRPC health (review H4)."""
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""GET /api/v1/ready reflects the backends' gRPC health."""
 from types import SimpleNamespace
 
 import grpc

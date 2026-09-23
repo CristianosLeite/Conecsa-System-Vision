@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api;
 use crate::app::{refresh_status, SystemStatus};
@@ -10,7 +12,6 @@ use leptos::task::spawn_local;
 use super::detection_toggle_button::DetectionToggleButton;
 use super::status_summary::StatusSummary;
 
-/// The `ControlPanel` view component.
 #[component]
 pub fn ControlPanel(
     status: ReadSignal<Option<SystemStatus>>,

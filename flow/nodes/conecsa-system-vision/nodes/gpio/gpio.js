@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file gpio node — drives a single GPIO output pin HIGH/LOW. The pin and the
  *   action (high/low/toggle/payload) are configured on the node. It subscribes
@@ -124,7 +128,6 @@ module.exports = function (RED) {
         return;
       }
 
-      // "high" / "low"
       setPin(action === "high", msg);
     });
 

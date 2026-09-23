@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Model-assisted labeling routes: an existing engine on the device, loaded
 into the inference-service's private TensorRT labeling worker, and per-image
 detection for label suggestions. The image itself comes from the
@@ -10,7 +14,7 @@ from flask import request
 
 from ..grpc_clients import clients, inf, trn
 from . import training_bp
-from .helpers import _grpc_error, _json, _json_error, _result
+from .helpers import _grpc_error, _json, _json_error, _pairs, _result
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +26,14 @@ def _status_dict(s) -> dict:
         "model_name": s.model_name,
         "class_names": list(s.class_names),
         "message": s.message,
+        # The loaded engine's task ("" = none loaded).
+        "task": s.task,
     }
+
+
+def _class_dict(c) -> dict:
+    """A classification engine's whole-image class suggestion (class_id = the engine's)."""
+    return {"class_id": c.class_id, "class_name": c.class_name, "score": c.score}
 
 
 def _suggestion_dict(d) -> dict:
@@ -93,6 +104,20 @@ def training_label_model_detect():
         threshold = float(body.get("threshold", 0.0) or 0.0)
     except (TypeError, ValueError):
         return _json_error("Malformed threshold")
+    # Suggestions are only valid for a dataset of the engine's task: the check
+    # is against the dataset, not the device.
+    try:
+        dataset = clients.training.GetDataset(trn.DatasetId(dataset_id=dataset_id))
+        engine_task = clients.model.GetLabelModelStatus(inf.Empty()).task
+    except grpc.RpcError as exc:
+        if exc.code() == grpc.StatusCode.NOT_FOUND:
+            return _json_error(f"Dataset '{dataset_id}' not found", 404)
+        return _grpc_error(exc)
+    dataset_task = dataset.task or "detect"
+    if engine_task and engine_task != dataset_task:
+        return _json_error(
+            f"The labeling model is a '{engine_task}' model, but this dataset is labeled "
+            f"for '{dataset_task}'; load a '{dataset_task}' model.", 409)
     try:
         blob = clients.training.GetImage(trn.ImageId(dataset_id=dataset_id, image_id=image_id))
     except grpc.RpcError as exc:
@@ -110,4 +135,11 @@ def training_label_model_detect():
         "boxes": [_suggestion_dict(d) for d in r.detections],
         "scores": [d.score for d in r.detections],
         "class_names": [d.class_name for d in r.detections],
+        # A segmentation engine: each box's mask as rings, parallel to boxes
+        # (the same shape as the SAM route's `polygons`).
+        "polygons": [[_pairs(ring.points) for ring in d.rings] for d in r.detections],
+        # A classification engine: the class above the threshold (or null)
+        # and its top-k candidates, highest first.
+        "image_class": _class_dict(r.image_class) if r.HasField("image_class") else None,
+        "candidates": [_class_dict(c) for c in r.candidates],
     })

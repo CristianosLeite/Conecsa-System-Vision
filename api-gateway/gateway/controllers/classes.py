@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Class-labels controller: get/upload/clear, with JSON↔protobuf content
 negotiation."""
 # Compiled detection schemas (protobuf content-negotiation). Sits next to the

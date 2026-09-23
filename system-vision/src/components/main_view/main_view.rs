@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -9,11 +11,12 @@ use leptos::task::spawn_local;
 
 use crate::api;
 use crate::app::{check_api_health, refresh_status, SystemStatus};
+use crate::components::application_select::use_application;
 use crate::components::configuration::model_conversion::PendingConversion;
 use crate::components::control_panel::ViewMode;
 use crate::components::training::{TrainingConfirmModal, TrainingView};
 use crate::i18n::*;
-use crate::models::PerformanceStats;
+use crate::models::{AppState, PerformanceStats};
 
 use super::main_component::MainComponent;
 
@@ -27,13 +30,15 @@ use super::main_component::MainComponent;
 #[derive(Clone, Copy)]
 pub struct HostView(pub RwSignal<ViewMode>);
 
-/// The `MainView` view component.
 #[component]
 pub fn MainView() -> impl IntoView {
     let i18n = use_i18n();
     let host_view = use_context::<HostView>()
         .map(|h| h.0)
         .unwrap_or_else(|| RwSignal::new(ViewMode::LiveStream));
+    // Provided (and loaded) here, before any consumer renders: the app and
+    // the interactive manual both mount MainView.
+    let application = use_application();
     let (status, set_status) = signal(None::<SystemStatus>);
     let (stats, set_stats) = signal(None::<PerformanceStats>);
     let (models, set_models) = signal(Vec::new());
@@ -48,6 +53,8 @@ pub fn MainView() -> impl IntoView {
     // thresholds) is refreshed across sibling panels.
     let (model_refresh, set_model_refresh) = signal(0u32);
     let (camera_refresh, set_camera_refresh) = signal(0u32);
+    // Latest camera health from the event stream; Camera Settings shows it live.
+    let (camera_health, set_camera_health) = signal(None::<api::CameraHealth>);
     let (network_refresh, set_network_refresh) = signal(0u32);
     let (gpio_refresh, set_gpio_refresh) = signal(0u32);
     // Training page entry is confirmed (it stops inference); on training
@@ -129,7 +136,7 @@ pub fn MainView() -> impl IntoView {
 
     // Unified application stream: ONE SSE connection per page load carrying
     // both invalidation events and high-rate performance stats. Any client can
-    // change backend state (web UI, Node-RED, curl), so this reconciles the
+    // change backend state (device UI, Node-RED, curl), so this reconciles the
     // mounted UI with authoritative backend reads whenever a relevant event
     // arrives; stats (`type: "stats"`) feed the dedicated `stats` signal in
     // real time. The handle lives in `sse_handle` for the MainView lifetime
@@ -177,6 +184,14 @@ pub fn MainView() -> impl IntoView {
                 refresh_training_active();
             }
 
+            // The application type changed (any client, or the hub): re-read
+            // it. The same event also carries the "models" and "status" keys
+            // handled below, since a switch may deselect the active model.
+            if event.event_type == "application_changed" || is_snapshot || has_key("application")
+            {
+                application.reload();
+            }
+
             if is_snapshot || has_key("models") {
                 let locale = i18n.get_locale_untracked();
                 spawn_local(async move {
@@ -198,6 +213,16 @@ pub fn MainView() -> impl IntoView {
                 set_camera_refresh.update(|n| *n = n.wrapping_add(1));
             }
 
+            // Camera health is its own event and key: it changes while the
+            // operator may be editing Camera Settings, so it must update the
+            // status row without reloading (and wiping) the form.
+            if event.event_type == "camera_health_changed" {
+                match serde_json::from_value::<api::CameraHealth>(event.data.clone()) {
+                    Ok(health) => set_camera_health.set(Some(health)),
+                    Err(e) => leptos::logging::error!("Failed to parse camera health event: {}", e),
+                }
+            }
+
             if is_snapshot || has_key("network") {
                 set_network_refresh.update(|n| *n = n.wrapping_add(1));
             }
@@ -216,6 +241,19 @@ pub fn MainView() -> impl IntoView {
         if let Some(status) = status.get() {
             set_threshold.set(status.confidence_threshold);
             set_overlay_threshold.set(status.overlay_threshold);
+        }
+    });
+
+    // Fallback for a missed `application_changed` (SSE down): the 5 s status
+    // poll carries the task; when it disagrees with what the UI shows, re-read
+    // the application. Only once a read has answered — a failing read must
+    // never be "corrected" into the selector.
+    Effect::new(move |_| {
+        if let Some(status) = status.get() {
+            let shown = application.state.get_untracked();
+            if shown.is_known() && AppState::from_task(status.task.as_deref()) != shown {
+                application.reload();
+            }
         }
     });
 
@@ -268,7 +306,10 @@ pub fn MainView() -> impl IntoView {
     // `MainComponent` (and thus does not remount long-lived children like
     // StatusComponent). Within MainComponent, the primary pane still switches
     // per `current_view`.
-    let is_training = Memo::new(move |_| current_view.get() == ViewMode::Training);
+    // A device still waiting for its application type never shows training.
+    let is_training = Memo::new(move |_| {
+        current_view.get() == ViewMode::Training && !application.state.get().gated()
+    });
 
     view! {
         {move || if is_training.get() {
@@ -302,6 +343,7 @@ pub fn MainView() -> impl IntoView {
                     model_refresh=model_refresh
                     set_model_refresh=set_model_refresh
                     camera_refresh=camera_refresh
+                    camera_health=camera_health
                     network_refresh=network_refresh
                     gpio_refresh=gpio_refresh
                     on_training_request=on_training_request

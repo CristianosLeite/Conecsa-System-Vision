@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Turning a request into an audit record: who, what, and from where.
 
 The gateway audits *per request* rather than per handler. Several routes are
@@ -48,10 +52,15 @@ ROUTE_EVENTS = {
     ("POST", "/api/v1/flow/token"): "flow.editor_opened",
     ("POST", "/api/v1/overlay_threshold"): "detection.overlay_threshold_changed",
     ("POST", "/api/overlay_threshold"): "detection.overlay_threshold_changed",
+    ("POST", "/api/v1/segment/max_instances"): "detection.segment_max_instances_changed",
+    ("POST", "/api/v1/face/settings"): "detection.face_settings_changed",
     ("POST", "/api/v1/stats/reset"): "detection.stats_reset",
     ("POST", "/api/v1/counter/reset"): "detection.counter_reset",
     ("POST", "/api/v1/trigger/enable"): "trigger.enabled",
     ("POST", "/api/v1/trigger/disable"): "trigger.disabled",
+
+    # ── application type ─────────────────────────────────────────────────────
+    ("PUT", "/api/v1/application"): "application.changed",
 
     # ── models ───────────────────────────────────────────────────────────────
     ("POST", "/api/v1/model"): "model.uploaded",
@@ -81,6 +90,10 @@ ROUTE_EVENTS = {
     ("POST", "/api/v1/network/config"): "network.configured",
     ("POST", "/api/v1/network/wifi/connect"): "network.wifi_connected",
     ("POST", "/api/v1/network/wifi/forget"): "network.wifi_forgotten",
+    # The start body holds the passphrase and nothing worth recording: the
+    # SSID is the device id. Neither route has a detail field.
+    ("POST", "/api/v1/network/ap/start"): "network.ap_started",
+    ("POST", "/api/v1/network/ap/stop"): "network.ap_stopped",
 
     # ── training session + jobs ──────────────────────────────────────────────
     ("POST", "/api/v1/training/enter"): "training.entered",
@@ -132,6 +145,7 @@ GENERIC_EVENT = "device.request"
 # rule → the single JSON body field worth recording, when there is one. Only
 # these are ever read; anything not listed here contributes no detail at all.
 _BODY_DETAIL_FIELDS = {
+    "/api/v1/application": "task",
     "/api/v1/model/select": "model_name",
     "/api/v1/system/power": "action",
     "/api/v1/network/config": "method",

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Camera format enumeration: publishes the V4L2 capture formats of every
 //! visible `/dev/video*` node as JSON for the inference-service and UI.
 

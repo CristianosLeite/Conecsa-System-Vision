@@ -1,4 +1,8 @@
-"""Every unary gateway call gets a deadline (review H3).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Every unary gateway call gets a deadline.
 
 A real in-process gRPC server whose GetStatus never answers proves the
 interceptor releases the caller within the deadline; the unit tests pin the

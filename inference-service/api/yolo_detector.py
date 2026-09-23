@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 YOLO detections processor.
 """
@@ -6,29 +10,27 @@ import os
 from typing import Optional
 
 # noinspection PyPackageRequirements
-import cv2  # Package is included on os build.
+import cv2  # ships in conecsa-os-base:base
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import numpy as np  # ships in conecsa-os-base:base
 
 from .models.detection_models import Detection
+from .postprocess.contract import E2E_MAX_DET as _E2E_MAX_DET
 from .utils import bgr_to_hex, generate_colors, resolve_class_colors
 from .views.area_overlay import draw_areas
 from .views.detection_boxes import (
     apply_nms,
-    calculate_box_from_center,
     corners_from_normalized,
     corners_from_pixel,
-    extract_class_info,
     sigmoid,
 )
 
 logger = logging.getLogger(__name__)
 
-# End-to-end (YOLO26) heads emit at most 300 rows (ultralytics max_det
-# default). Deliberately a constant and not YOLO_MAX_CANDIDATES: that knob is
-# env-tunable and must not change how the output layout is classified.
-_E2E_MAX_DET = 300
+# _E2E_MAX_DET (imported above) is shared with the engine output contract
+# (api.postprocess.contract), so activation classifies an engine exactly the
+# way this decoder does.
 
 DEFAULT_TILING_MERGE_IOU = 0.5
 
@@ -73,9 +75,16 @@ class YOLODetector:
 
         self._set_class_metadata(class_labels)
 
-    # ------------------------------------------------------------------
-    # Class metadata (labels + colors)
-    # ------------------------------------------------------------------
+    # ── Class metadata (labels + colors) ──
+
+    def set_class_labels(self, class_labels):
+        """Adopt renamed labels (and the colors parsed out of them) live.
+
+        The next frame's decode re-pads the tables against the engine's class
+        count (``_adopt_output_format``), so a short or empty list is safe.
+        """
+        self._set_class_metadata(class_labels)
+        self.num_classes_detected = None
 
     def _set_class_metadata(self, class_labels):
         """
@@ -88,13 +97,10 @@ class YOLODetector:
         self.output_format = output_format
         self.num_classes_detected = num_classes
 
-        # Adjust class_labels if necessary
         if len(self.class_labels) != num_classes:
             if output_format == "single_class":
-                # For single class, use first label or generic
                 self.class_labels = [self.class_labels[0] if self.class_labels else "Object"]
             else:
-                # Add generic classes if necessary
                 while len(self.class_labels) < num_classes:
                     self.class_labels.append(f"Class-{len(self.class_labels)}")
 
@@ -122,9 +128,7 @@ class YOLODetector:
             return 255, 255, 255
         return self.class_colors[class_id % len(self.class_colors)]
 
-    # ------------------------------------------------------------------
-    # Detection areas (spatial filter + editing overlay)
-    # ------------------------------------------------------------------
+    # ── Detection areas (spatial filter + editing overlay) ──
 
     def set_areas(self, areas):
         """Update the active detection-area snapshot for this frame."""
@@ -193,9 +197,7 @@ class YOLODetector:
         """Render the editing-areas overlay (see views.area_overlay)."""
         return draw_areas(img, self._areas)
 
-    # ------------------------------------------------------------------
-    # Drawing
-    # ------------------------------------------------------------------
+    # ── Drawing ──
 
     def _draw_detection_box(self, img, x1, y1, x2, y2, class_id, confidence,
                            line_thickness=3, font_scale=0.6, draw_center=False):
@@ -216,30 +218,23 @@ class YOLODetector:
         """
         color = self._get_class_color(class_id)
 
-        # Draw bounding box
         cv2.rectangle(img, (x1, y1), (x2, y2), color, line_thickness)
 
-        # Draw center circle if requested
         if draw_center:
             center_x = (x1 + x2) // 2
             center_y = (y1 + y2) // 2
             cv2.circle(img, (center_x, center_y), 3, color, -1)
 
-        # Draw label
         label = self._get_class_label(class_id, confidence)
         label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)[0]
 
-        # Draw label background
         cv2.rectangle(img, (x1, y1 - label_size[1] - 15),
                      (x1 + label_size[0] + 10, y1), color, -1)
 
-        # Draw label text
         cv2.putText(img, label, (x1 + 5, y1 - 5),
                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2)
 
-    # ------------------------------------------------------------------
-    # Main pipeline: normalize → score → filter → decode → NMS → draw
-    # ------------------------------------------------------------------
+    # ── Main pipeline: normalize → score → filter → decode → NMS → draw ──
 
     def process_detections(self, output_data, image_original, scale=1.0, border_top=0, actual_input_size=None):
         """
@@ -285,13 +280,6 @@ class YOLODetector:
                 confidences[valid_detections],
                 class_ids[valid_detections],
             )
-
-            # If ANY detection has invalid width/height, use alternative method
-            if any(box[2] <= 0 or box[3] <= 0 for box in valid_boxes):
-                return self._process_detections_alternative(
-                    detections, image_original, valid_detections,
-                    scale=scale, border_top=border_top, actual_input_size=actual_input_size,
-                )
 
             boxes_for_nms, confidences_for_nms, class_ids_for_nms = self._decode_candidate_boxes(
                 valid_boxes, valid_confidences, valid_class_ids,
@@ -444,13 +432,12 @@ class YOLODetector:
                 )
             x1, y1, x2, y2 = corners
 
-            # Ensure within bounds
             x1 = max(0, min(x1, frame_w))
             y1 = max(0, min(y1, frame_h))
             x2 = max(0, min(x2, frame_w))
             y2 = max(0, min(y2, frame_h))
 
-            # Check if box is large enough
+            # Drop boxes of 5 px or less on either side.
             if (x2 - x1) > 5 and (y2 - y1) > 5:
                 boxes_for_nms.append([x1, y1, x2, y2])
                 confidences_for_nms.append(float(confidence))
@@ -466,12 +453,10 @@ class YOLODetector:
         origin (``TileMeta`` in ``model_manager``). Candidates are decoded
         against the tile's own geometry, shifted by the tile origin, merged
         with the shared class-aware NMS from ``conecsa_common.tiling`` and
-        then handed to the
-        ordinary overlay-threshold NMS, area filter and drawing — so
+        then handed to the ordinary overlay-threshold NMS, area filter and drawing — so
         everything downstream of the merge behaves as on the plain path.
         """
-        # Imported lazily: only a base image built with this feature ships
-        # conecsa_common.tiling, and the off path must not depend on it.
+        # Imported lazily so the untiled path does not load the tiling module.
         from conecsa_common.tiling import merge_tiles
 
         img = image_original.copy()
@@ -583,8 +568,8 @@ class YOLODetector:
         """Convert center-format candidate boxes to clamped pixel corners.
 
         Returns the parallel lists ``(boxes, confidences, class_ids)`` ready
-        for NMS. Boxes that collapse after clamping are dropped; boxes with
-        unusable corners fall back to a small debug box around the center.
+        for NMS. Boxes with a non-positive width or height, or that collapse
+        after clamping, are dropped.
         """
         # In pixel mode, coordinates may be in model input resolution.
         # Scale to current frame resolution using configured capture size as reference.
@@ -601,62 +586,40 @@ class YOLODetector:
         confidences_for_nms = []
         class_ids_for_nms = []
 
-        for i, (box, confidence, class_id) in enumerate(zip(valid_boxes, valid_confidences, valid_class_ids, strict=False)):
+        for box, confidence, class_id in zip(valid_boxes, valid_confidences, valid_class_ids, strict=False):
             x_center, y_center, width, height = box
-
-            # Invalid width/height: try alternative interpretation (absolute
-            # values, or a 5%-of-image fallback) before converting.
             if width <= 0 or height <= 0:
-                width = abs(width) if width != 0 else 0.05
-                height = abs(height) if height != 0 else 0.05
+                continue
 
-            # Convert from center format to corner format
             x_min = x_center - width / 2
             y_min = y_center - height / 2
             x_max = x_center + width / 2
             y_max = y_center + height / 2
 
-            if x_min < x_max and y_min < y_max:
-                if use_normalized_coords:
-                    corners = corners_from_normalized(
-                        x_min, y_min, x_max, y_max, frame_w, frame_h,
-                        scale, border_top, actual_input_size,
-                    )
-                    if corners is None:  # collapsed after clamping to [0, 1]
-                        continue
-                else:
-                    corners = corners_from_pixel(
-                        x_min, y_min, x_max, y_max, scale_x, scale_y,
-                        scale, border_top, actual_input_size,
-                    )
-                x1, y1, x2, y2 = corners
-
-                # Ensure within bounds
-                x1 = max(0, min(x1, frame_w))
-                y1 = max(0, min(y1, frame_h))
-                x2 = max(0, min(x2, frame_w))
-                y2 = max(0, min(y2, frame_h))
-
-                # Check if box is large enough
-                if (x2 - x1) > 5 and (y2 - y1) > 5:
-                    boxes_for_nms.append([x1, y1, x2, y2])
-                    confidences_for_nms.append(float(confidence))
-                    class_ids_for_nms.append(int(class_id))
+            if use_normalized_coords:
+                corners = corners_from_normalized(
+                    x_min, y_min, x_max, y_max, frame_w, frame_h,
+                    scale, border_top, actual_input_size,
+                )
+                if corners is None:  # collapsed after clamping to [0, 1]
+                    continue
             else:
-                # FALLBACK: try to draw a small box around the center for debug
-                if use_normalized_coords and 0 <= x_center <= 1 and 0 <= y_center <= 1:
-                    logger.warning(f"Warning: Detection {i} has invalid normalized coordinates - using fallback")
-                    center_x = int(x_center * frame_w)
-                    if actual_input_size and actual_input_size > 0:
-                        center_y = int((y_center * actual_input_size - border_top) * scale)
-                    else:
-                        center_y = int(y_center * frame_h)
-                    center_y = max(0, min(center_y, frame_h))
+                corners = corners_from_pixel(
+                    x_min, y_min, x_max, y_max, scale_x, scale_y,
+                    scale, border_top, actual_input_size,
+                )
+            x1, y1, x2, y2 = corners
 
-                    x1, y1, x2, y2 = calculate_box_from_center(center_x, center_y, 20, frame_w, frame_h)
-                    boxes_for_nms.append([x1, y1, x2, y2])
-                    confidences_for_nms.append(float(confidence))
-                    class_ids_for_nms.append(int(class_id))
+            x1 = max(0, min(x1, frame_w))
+            y1 = max(0, min(y1, frame_h))
+            x2 = max(0, min(x2, frame_w))
+            y2 = max(0, min(y2, frame_h))
+
+            # Drop boxes of 5 px or less on either side.
+            if (x2 - x1) > 5 and (y2 - y1) > 5:
+                boxes_for_nms.append([x1, y1, x2, y2])
+                confidences_for_nms.append(float(confidence))
+                class_ids_for_nms.append(int(class_id))
 
         return boxes_for_nms, confidences_for_nms, class_ids_for_nms
 
@@ -687,92 +650,3 @@ class YOLODetector:
             ))
         return detection_objects
 
-    # ------------------------------------------------------------------
-    # Alternative pipeline (when main coordinates fail)
-    # ------------------------------------------------------------------
-
-    def _process_detections_alternative(self, detections, image_original, valid_detections,
-                                        scale=1.0, border_top=0, actual_input_size=None):
-        """
-        Alternative method to process detections when main coordinates fail.
-        Tries different interpretations of output data.
-        """
-        img = image_original.copy()
-        frame_h, frame_w = img.shape[:2]
-        valid_rows = detections[valid_detections]
-
-        # Method 1: Using only valid x,y positions with fixed size boxes
-        detections_found = self._draw_alt_normalized_centers(
-            img, valid_rows, frame_w, frame_h, scale, border_top, actual_input_size
-        )
-
-        # If method 1 didn't work, try method 2
-        if detections_found == 0:
-            detections_found = self._draw_alt_scaled_centers(
-                img, valid_rows, frame_w, frame_h, scale, border_top, actual_input_size
-            )
-
-        return self._draw_areas(img), detections_found, []
-
-    def _draw_alt_normalized_centers(self, img, rows, frame_w, frame_h,
-                                     scale, border_top, actual_input_size):
-        """Draw confidence-sized boxes around rows whose x,y look normalized."""
-        detections_found = 0
-        for detection in rows:
-            x_pos, y_pos = detection[0], detection[1]  # Positions that seem valid
-            class_id, confidence = extract_class_info(detection, self.output_format)
-
-            # If we have valid positions, draw a fixed-size box
-            if not (0 <= x_pos <= 1 and 0 <= y_pos <= 1):
-                continue
-
-            # Convert to pixels
-            center_x = int(x_pos * frame_w)
-            if actual_input_size and actual_input_size > 0:
-                center_y = int((y_pos * actual_input_size - border_top) * scale)
-            else:
-                center_y = int(y_pos * frame_h)
-            center_y = max(0, min(center_y, frame_h - 1))
-
-            # Define a fixed box size based on confidence (between 30 and 80 pixels)
-            box_size = max(30, int(confidence * 80))
-            x1, y1, x2, y2 = calculate_box_from_center(center_x, center_y, box_size, frame_w, frame_h)
-
-            # Draw detection with center point
-            self._draw_detection_box(img, x1, y1, x2, y2, class_id, confidence, draw_center=True)
-            detections_found += 1
-        return detections_found
-
-    def _draw_alt_scaled_centers(self, img, rows, frame_w, frame_h,
-                                 scale, border_top, actual_input_size):
-        """Interpret x,y as model-input pixels, trying common YOLO input sizes."""
-        detections_found = 0
-        for detection in rows:
-            # Try interpreting as absolute pixel coordinates (multiplied by a factor)
-            x_pos, y_pos = detection[0], detection[1]
-            class_id, confidence = extract_class_info(detection, self.output_format)
-
-            # Try different model input sizes
-            for try_size in [640, 416, 320]:  # Common YOLO input sizes
-                scaled_x = int(x_pos * try_size)
-                if actual_input_size and actual_input_size > 0:
-                    scaled_y = int((y_pos * try_size - border_top) * scale)
-                else:
-                    scaled_y = int(y_pos * try_size)
-
-                if 0 <= scaled_x < frame_w and 0 <= scaled_y < frame_h:
-                    # Draw a small box
-                    box_size = 40
-                    x1, y1, x2, y2 = calculate_box_from_center(scaled_x, scaled_y, box_size, frame_w, frame_h)
-
-                    color = (255, 0, 255)  # Magenta for method 2
-                    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-                    cv2.circle(img, (scaled_x, scaled_y), 2, color, -1)
-
-                    label = f"M2-{confidence:.2f}"
-                    cv2.putText(img, label, (x1, y1 - 5),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-
-                    detections_found += 1
-                    break  # Use the first scale that works
-        return detections_found

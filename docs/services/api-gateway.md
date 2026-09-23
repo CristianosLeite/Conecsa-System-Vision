@@ -1,23 +1,28 @@
 # API Gateway (Python)
 
-The thin HTTP↔gRPC/SHM interface and the **only public HTTP surface** (port
-5000, Flask + Waitress). It mirrors the legacy REST/SSE/MJPEG contract
-byte-for-byte so the web app and Flow need no changes:
+The thin HTTP↔gRPC/SHM interface and the **only HTTP surface** of a device
+(port 5000, Flask + Waitress), serving the web app, Flow and the hub:
 
 - **Control / config / models / classes / areas / system / GPIO / network /
   training**: translated to gRPC calls (inference-service `:50061`,
-  training-service `:50071`, `os-base` agent `:50051`).
+  training-service `:50071`, `os-base` hardware agent `:50051`).
 - **Both MJPEG feeds** (`/api/v1/video_feed`, `/api/v1/video_feed_processed`):
   fanned out directly from the camera and processed SHM rings.
 - **Unified SSE** (`/api/v1/events/stream`): invalidation events plus a
-  multiplexed stats channel, fed by background relays of inference's
-  `StreamEvents` / `StreamStats`.
-- Keeps Protocol Buffers content-negotiation for the endpoints the frontend
-  uses it on (start/stop/threshold/overlay_threshold/runtime/status/classes).
-- **Audit trail**: every mutating request is appended to a SQLite ring buffer
-  under `AUDIT_DIR` (`audit.db`, volume `conecsa-audit-data` at `/data/audit`),
-  which the hub drains over mTLS via `/api/v1/audit/backlog` and clears with
-  `/api/v1/audit/backlog/ack`. See
+  multiplexed stats channel, fed by background relays of the inference-service's
+  `StreamEvents` / `StreamStats` and the training-service's `StreamEvents`
+  (see [Event stream](../api-reference.md#event-stream)).
+- **Protocol Buffers content negotiation** on status/start/stop/threshold/
+  overlay_threshold/classes and their `/api/*` aliases; every other route is
+  JSON only.
+- **Mutating routes are role-checked** for hub-relayed operator traffic
+  (`ROUTE_POLICIES` in `gateway/authz.py`, see
+  [Roles](../api-reference.md#roles)).
+- **Audit trail**: mutating requests (with the exclusions listed in the
+  [HTTP API reference](../api-reference.md)) are appended to a SQLite ring
+  buffer under `AUDIT_DIR` (`audit.db`, volume `conecsa-audit-data` at
+  `/data/audit`), which the hub drains over mTLS via `/api/v1/audit/backlog`
+  and clears with `/api/v1/audit/backlog/ack`. See
   [Audit trail](hub-vision.md#audit-trail).
 
 It ships no ML stack (no torch/tensorrt) — only the web layer and the compiled
@@ -39,8 +44,7 @@ proto stubs on top of `conecsa-os-base:base`.
     concurrent streams.
 
 !!! note "Every backend call has a deadline"
-    The gRPC channels are wrapped by an interceptor (`gateway/rpc_deadlines.py`)
-    that gives every unary and client-streaming call a deadline when the call
+    The gRPC channels are wrapped by an interceptor that gives every unary and client-streaming call a deadline when the call
     site passes none — `GATEWAY_GRPC_TIMEOUT` for control calls,
     `GATEWAY_GRPC_LONG_TIMEOUT` for the slow ones (runtime swaps, training
     start/stop, dataset deletion) and `GATEWAY_GRPC_UPLOAD_TIMEOUT` for

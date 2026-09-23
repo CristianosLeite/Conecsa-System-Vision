@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file stats node — subscribes to the `/api/v1/stats/stream` SSE endpoint and
  *   emits `{ detections, fps, inference_time, frames_with_detections }`.

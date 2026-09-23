@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! webcam-server — the Rust camera capture process.
 //!
 //! Captures frames from a V4L2 device (native MJPEG passthrough, RGGB8 Bayer
@@ -12,7 +16,7 @@
 
 mod webcam_server;
 
-/// Initialise logging and run the capture loop until the process is killed.
+/// Initialize logging and run the capture loop until the process is killed.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     webcam_server::run_server()

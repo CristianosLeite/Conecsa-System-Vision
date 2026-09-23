@@ -1,7 +1,7 @@
 SUMMARY = "Jetson.GPIO Python library for NVIDIA Jetson Orin Nano"
-DESCRIPTION = "Access to /dev/gpiochip0/1 via Python. The inference-service \
-imports this module via the bind-mount /usr/lib/python3/dist-packages/Jetson \
-declared in docker-compose.yml — so the exact path must exist in the rootfs."
+DESCRIPTION = "Access to /dev/gpiochip0/1 via Python. The os-base hardware \
+agent container bind-mounts /usr/lib/python3/dist-packages/Jetson \
+(docker-compose.yml), so that exact path must exist in the rootfs."
 HOMEPAGE = "https://github.com/NVIDIA/jetson-gpio"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://LICENSE.txt;md5=963ead04a49bf4a1fe8567be3d7c0b63"
@@ -17,8 +17,9 @@ inherit setuptools3
 RDEPENDS:${PN} = "python3-core"
 
 # Creates the /usr/lib/python3/dist-packages/Jetson path expected by
-# docker-compose.yml. Yocto installs into /usr/lib/python3.10/site-packages
-# by default; the symlink preserves the Debian-style path the app expects.
+# docker-compose.yml. Yocto installs into ${PYTHON_SITEPACKAGES_DIR}
+# (/usr/lib/python3.<minor>/site-packages); the symlink preserves the
+# Debian-style path the container expects.
 do_install:append() {
     install -d ${D}${libdir}/python3/dist-packages
     ln -sf ${PYTHON_SITEPACKAGES_DIR}/Jetson ${D}${libdir}/python3/dist-packages/Jetson

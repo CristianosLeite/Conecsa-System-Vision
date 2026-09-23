@@ -1,5 +1,5 @@
 DISTRO = "conecsa"
-DISTRO_NAME = "Conecsa Object Detection minimal distro"
+DISTRO_NAME = "Conecsa System Vision minimal distro"
 DISTRO_VERSION_BASE = "1.0"
 DISTRO_VERSION = "${DISTRO_VERSION_BASE}+snapshot-${METADATA_REVISION}"
 DISTRO_CODENAME = "scarthgap"
@@ -14,9 +14,10 @@ TARGET_VENDOR = "-conecsa"
 # Bump whenever the layer/config layout changes incompatibly.
 LOCALCONF_VERSION = "1"
 
-# Minimal features: systemd init, virtualization (docker), wayland (for future
-# desktop containers), opengl (EGL nvidia-l4t-3d-core). Removed: x11, ptest,
-# multiarch, vulkan (the app is TensorRT-only and uses CUDA only), pam.
+# Added on top of poky's DISTRO_FEATURES_DEFAULT (which still carries x11):
+# systemd init, virtualization (docker), wayland and opengl (the kiosk
+# compositor on the NVIDIA EGL stack). Not enabled: pam, ptest, multiarch,
+# vulkan (inference is TensorRT/CUDA only).
 DISTRO_FEATURES_CONECSA = "largefile opengl wayland systemd virtualization usrmerge"
 
 DISTRO_FEATURES ?= "${DISTRO_FEATURES_DEFAULT} ${DISTRO_FEATURES_CONECSA}"
@@ -53,11 +54,10 @@ INHERIT += "uninative"
 # Allow commercial packages (e.g. faad2/x264 used by NVIDIA gstreamer).
 LICENSE_FLAGS_ACCEPTED += "commercial_faad2 commercial_x264"
 
-# avahi-daemon is in the image PACKAGE_EXCLUDE (build/conf/local.conf) as part of
-# the "no extra daemons" minimal policy, but conecsa-bootstrap now requires it to
-# advertise _conecsa._tcp on the LAN for conecsa-hub-vision discovery. Drop it
-# from the exclude list (`:remove` is applied last, so it overrides the `+=` in
-# local.conf) rather than editing local.conf.
+# kas-config.yml lists avahi-daemon in PACKAGE_EXCLUDE (no extra daemons), but
+# conecsa-bootstrap needs it to advertise _conecsa._tcp on the LAN for hub
+# discovery. `:remove` is applied last, so it takes avahi-daemon back out of
+# the exclude list.
 PACKAGE_EXCLUDE:remove = "avahi-daemon"
 
 # Redundant (A/B) flash layout is the meta-tegra default; kept for compatibility.

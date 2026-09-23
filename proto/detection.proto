@@ -1,12 +1,15 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 syntax = "proto3";
 
 package detection;
 
-// Schemas de mensagens para API REST de detecção de objetos
-// Estas mensagens definem os tipos usados na comunicação entre cliente e servidor
-// Não há serviços gRPC - apenas REST endpoints que usam estes schemas
+// Message schemas for the object-detection REST API. These types are the
+// bodies exchanged between the device UI and the api-gateway (protobuf content
+// negotiation); this file defines no gRPC services.
 
-// Start detection request
 message StartDetectionRequest {}
 
 message StartDetectionResponse {
@@ -15,7 +18,6 @@ message StartDetectionResponse {
   string video_feed_url = 3;
 }
 
-// Stop detection request
 message StopDetectionRequest {}
 
 message StopDetectionResponse {
@@ -23,17 +25,33 @@ message StopDetectionResponse {
   string message = 2;
 }
 
-// Get status request
 message GetStatusRequest {}
 
 message StatusResponse {
-  reserved 4;  // was: bool using_npu (Jetson Orin Nano has no NPU)
+  reserved 4;  // was using_npu
   bool is_running = 1;
   string current_model = 2;
   float confidence_threshold = 3;
   Stats stats = 5;
   Protocols protocols = 6;
   bool camera_connected = 7;  // false → Start is refused, the UI says why
+  // Application type of the device: "detect", "classify", "segment" or "face";
+  // empty while no application has been chosen (Start is refused until one
+  // is). Unset means older firmware without application types, never "none
+  // chosen". A value this client does not know comes from newer firmware and
+  // must be shown as unsupported, never as unset.
+  optional string task = 8;
+  // Per-task settings in effect, present only when the device runs that
+  // task and its inference-service reports them (absent on older firmware
+  // and for the other tasks) — the same keys the JSON status carries.
+  // Instance limit of a segmentation device (1–255).
+  optional uint32 segment_max_instances = 9;
+  // Cosine similarity a face must exceed to take an enrolled person's name (0–1).
+  optional float face_match_threshold = 10;
+  // Faces whose shorter side is below this many pixels are ignored (0–1024).
+  optional uint32 face_min_size_px = 11;
+  // Faces recognized per frame at most, largest first (1–20).
+  optional uint32 face_max_faces = 12;
 }
 
 // Live performance counters surfaced on /api/v1/status and /api/v1/stats.
@@ -46,11 +64,10 @@ message Stats {
 
 // Stream ports advertised to the frontend.
 message Protocols {
-  reserved 1;  // was rtsp_url — RTSP support removed
+  reserved 1;  // was rtsp_url
   uint32 http_port = 2;
 }
 
-// Stream detections request
 message StreamRequest {
   uint32 max_fps = 1;  // Maximum FPS to stream (0 = no limit)
 }
@@ -80,7 +97,6 @@ message BoundingBox {
   float height = 4;
 }
 
-// Select model request
 message SelectModelRequest {
   string model_name = 1;
 }
@@ -92,7 +108,6 @@ message SelectModelResponse {
   bool was_running = 4;
 }
 
-// List models request
 message ListModelsRequest {}
 
 message ListModelsResponse {
@@ -106,7 +121,6 @@ message ModelInfo {
   bool is_active = 4;
 }
 
-// Upload model request
 message ModelChunk {
   oneof data {
     ModelMetadata metadata = 1;
@@ -125,7 +139,6 @@ message UploadModelResponse {
   string model_path = 3;
 }
 
-// Set threshold request
 message SetThresholdRequest {
   float threshold = 1;
 }
@@ -136,7 +149,6 @@ message SetThresholdResponse {
   float threshold = 3;
 }
 
-// Get config request
 message GetConfigRequest {}
 
 message ConfigResponse {
@@ -147,7 +159,6 @@ message ConfigResponse {
   float confidence_threshold = 5;
 }
 
-// Update config request
 message UpdateConfigRequest {
   optional string capture_device = 1;
   optional int32 capture_framerate = 2;
@@ -159,7 +170,6 @@ message UpdateConfigResponse {
   string message = 2;
 }
 
-// Get classes request
 message GetClassesRequest {}
 
 message GetClassesResponse {
@@ -168,7 +178,6 @@ message GetClassesResponse {
   repeated string classes = 3;
 }
 
-// Upload classes request
 message UploadClassesRequest {
   string classes_content = 1;  // Classes separated by newlines
 }

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SAHI-style tiled inference helpers (pure numpy).
 
 A detector trained at 640 px sees a 1920×1080 frame downscaled roughly 3×, so
@@ -22,10 +26,16 @@ layout trained on is byte-for-byte the layout deployed:
 - :func:`tile_crop` / :func:`shift_boxes` — zero-copy crop and the inverse
   coordinate shift.
 - :func:`clip_box` / :func:`tile_label_rows` — the training-side counterpart:
-  ground-truth boxes clipped into a tile and rewritten as tile-normalised
+  ground-truth boxes clipped into a tile and rewritten as tile-normalized
   YOLO rows, so a model is trained on exactly the crops it will be run on.
 - :func:`iou_matrix` / :func:`merge_tiles` — pairwise IoU and greedy NMS over
   the union of per-tile detections.
+- :func:`tile_overlap` / :func:`merge_tiles_grouped` — the segmentation
+  counterpart of the merge: instead of discarding the lower-scoring
+  duplicate it groups the fragments of one object seen by different tiles,
+  so their masks can be stitched into one instance.
+
+The polygon helpers that need OpenCV live in :mod:`conecsa_common.polygons`.
 
 NMS is deliberately re-implemented here in numpy although both consumers
 have faster kernels at hand (``cv2.dnn.NMSBoxes`` in the inference pipeline,
@@ -45,7 +55,9 @@ __all__ = [
     "clip_box",
     "iou_matrix",
     "merge_tiles",
+    "merge_tiles_grouped",
     "shift_boxes",
+    "tile_overlap",
     "tile_crop",
     "tile_grid",
     "tile_label_rows",
@@ -86,9 +98,8 @@ def auto_tile(width: int, height: int) -> int:
     the aspect ratio, never on the pixel count: a 1280×720, 1920×1080 or
     3840×2160 frame all give two columns (K=2), 4:3 gives two heavily
     overlapping ones, wider than 1.8:1 gives three, a square frame gives
-    one. Training
-    crops and inference crops computed this way stay the same geometry on
-    every camera the device may be fitted with.
+    one. Training crops and inference crops computed this way stay the same
+    geometry on every camera the device may be fitted with.
     """
     if width <= 0 or height <= 0:
         raise ValueError(f"frame size must be positive, got {width}x{height}")
@@ -185,7 +196,7 @@ def tile_label_rows(
 
     ``class_ids`` and ``boxes_xyxy`` (frame pixels) are parallel sequences.
     A box is kept when at least ``min_visible`` of its area lies inside the
-    tile, clipped to the tile and normalised to the tile's size as
+    tile, clipped to the tile and normalized to the tile's size as
     ``"class cx cy w h"``. Returns the rows and the number of boxes that
     *touch* the tile at all, so the caller can tell a genuinely empty tile
     (a valid negative) from one whose only content was a discarded fragment
@@ -308,3 +319,146 @@ def merge_tiles(
         alive &= ~(ious[idx] > iou_threshold)
         alive[idx] = False
     return np.asarray(keep, dtype=np.int64)
+
+
+def tile_overlap(a: Tile, b: Tile) -> "Tile | None":
+    """The overlap rectangle of two tiles, or ``None`` when they do not overlap."""
+    x0, y0 = max(a.x0, b.x0), max(a.y0, b.y0)
+    x1, y1 = min(a.x1, b.x1), min(a.y1, b.y1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return Tile(x0, y0, x1, y1)
+
+
+def merge_tiles_grouped(
+    boxes_xyxy: np.ndarray,
+    scores: np.ndarray,
+    classes: np.ndarray,
+    tile_ids,
+    tiles: "list[Tile]",
+    iou_threshold: float = 0.5,
+    ios_threshold: float = 0.5,
+) -> list[list[int]]:
+    """Group the per-tile fragments of one object (frame-space boxes).
+
+    Returns groups of input indices; each group's first index is its
+    highest-scoring member (the survivor) and groups are ordered by that
+    score. Greedy by descending score, ties by input order. A candidate joins
+    a group when it matches **any** member under all of:
+
+    - same class;
+    - a different tile of origin (``tile_ids`` indexes ``tiles``) — and the
+      group holds no member of the candidate's own tile yet, since two
+      detections from one tile are the model's own distinct predictions;
+    - both boxes intersect the overlap rectangle of their two tiles;
+    - ``IoU >= iou_threshold`` **or** ``IoS >= ios_threshold``, where IoS is
+      the intersection over the smaller box with **both boxes clipped to the
+      overlap rectangle** first. Fragments of one object cut by the tile
+      edges cover the same part of the band, so their band IoS is close to 1
+      however long the object is; whole-box IoS (and IoU) falls below any
+      useful threshold as soon as an object is much wider than the band.
+
+    Matching against any member makes the rule transitive, so an object
+    spanning three tiles ends up in one group although the outer tiles never
+    overlap. A candidate that matches several groups joins the one with the
+    highest-scoring survivor and merges into it every other matching group
+    whose tiles are disjoint from the ones gathered so far, so the order of
+    the fragment scores never leaves one object split; everything else starts
+    its own group.
+    """
+    for name, value in (("iou_threshold", iou_threshold), ("ios_threshold", ios_threshold)):
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} must be in [0, 1], got {value}")
+    boxes = _as_boxes(boxes_xyxy, "boxes_xyxy")
+    score_arr = np.asarray(scores, dtype=np.float64).reshape(-1)
+    class_arr = np.asarray(classes).reshape(-1)
+    tile_arr = np.asarray(tile_ids, dtype=np.int64).reshape(-1)
+    n = boxes.shape[0]
+    if not score_arr.shape[0] == class_arr.shape[0] == tile_arr.shape[0] == n:
+        raise ValueError(
+            f"boxes, scores, classes and tile_ids disagree on N: {n}, {score_arr.shape[0]}, "
+            f"{class_arr.shape[0]}, {tile_arr.shape[0]}"
+        )
+    if n == 0:
+        return []
+    if tile_arr.min() < 0 or tile_arr.max() >= len(tiles):
+        raise ValueError("tile_ids must index tiles")
+
+    match = _fragment_matches(boxes, class_arr, tile_arr, tiles, iou_threshold, ios_threshold)
+
+    # Each group keeps the set of its members' tiles next to it.
+    groups: list[list[int]] = []
+    group_tiles: list[set[int]] = []
+    for idx in np.argsort(-score_arr, kind="stable"):
+        i = int(idx)
+        tile_i = int(tile_arr[i])
+        row = match[i]
+        joined: "int | None" = None
+        for g, group in enumerate(groups):
+            if joined is None:
+                if tile_i in group_tiles[g] or not row[group].any():
+                    continue
+                group.append(i)
+                group_tiles[g].add(tile_i)
+                joined = g
+            elif (group_tiles[g].isdisjoint(group_tiles[joined]) and group
+                  and row[group].any()):
+                # The candidate bridges two groups formed before it arrived
+                # (a middle fragment scoring below both outer ones).
+                groups[joined].extend(group)
+                group_tiles[joined] |= group_tiles[g]
+                group.clear()
+                group_tiles[g] = set()
+        if joined is None:
+            groups.append([i])
+            group_tiles.append({tile_i})
+        else:
+            kept = [g for g, group in enumerate(groups) if group]
+            groups = [groups[g] for g in kept]
+            group_tiles = [group_tiles[g] for g in kept]
+    return groups
+
+
+def _fragment_matches(boxes: np.ndarray, class_arr: np.ndarray, tile_arr: np.ndarray,
+                      tiles: "list[Tile]", iou_threshold: float,
+                      ios_threshold: float) -> np.ndarray:
+    """``match[i, j]``: fragments ``i`` and ``j`` may belong to one object.
+
+    The pairwise rule of :func:`merge_tiles_grouped` (same class, different
+    tiles, both boxes touching their tiles' overlap, IoU or band IoS over its
+    threshold), evaluated once per tile pair on arrays. A box touches the
+    overlap when it intersects it with positive area; band IoS clips both
+    boxes to the overlap and divides their intersection by the smaller
+    clipped area (0 when that area is 0).
+    """
+    n = boxes.shape[0]
+    match = np.zeros((n, n), dtype=bool)
+    ious = iou_matrix(boxes, boxes)
+    for ta in range(len(tiles)):
+        for tb in range(ta + 1, len(tiles)):
+            band = tile_overlap(tiles[ta], tiles[tb])
+            if band is None:
+                continue
+            touch = ((boxes[:, 0] < band.x1) & (boxes[:, 2] > band.x0)
+                     & (boxes[:, 1] < band.y1) & (boxes[:, 3] > band.y0))
+            ia = np.flatnonzero((tile_arr == ta) & touch)
+            ib = np.flatnonzero((tile_arr == tb) & touch)
+            if ia.size == 0 or ib.size == 0:
+                continue
+            a = boxes[ia][:, None, :]
+            b = boxes[ib][None, :, :]
+            ca = (np.maximum(a[..., 0], band.x0), np.maximum(a[..., 1], band.y0),
+                  np.minimum(a[..., 2], band.x1), np.minimum(a[..., 3], band.y1))
+            cb = (np.maximum(b[..., 0], band.x0), np.maximum(b[..., 1], band.y0),
+                  np.minimum(b[..., 2], band.x1), np.minimum(b[..., 3], band.y1))
+            area_a = np.maximum(0.0, ca[2] - ca[0]) * np.maximum(0.0, ca[3] - ca[1])
+            area_b = np.maximum(0.0, cb[2] - cb[0]) * np.maximum(0.0, cb[3] - cb[1])
+            inter = (np.maximum(0.0, np.minimum(ca[2], cb[2]) - np.maximum(ca[0], cb[0]))
+                     * np.maximum(0.0, np.minimum(ca[3], cb[3]) - np.maximum(ca[1], cb[1])))
+            smaller = np.minimum(area_a, area_b)
+            ios = np.divide(inter, smaller, out=np.zeros_like(inter), where=smaller > 0)
+            pair = ((class_arr[ia][:, None] == class_arr[ib][None, :])
+                    & ((ious[np.ix_(ia, ib)] >= iou_threshold) | (ios >= ios_threshold)))
+            match[np.ix_(ia, ib)] = pair
+            match[np.ix_(ib, ia)] = pair.T
+    return match

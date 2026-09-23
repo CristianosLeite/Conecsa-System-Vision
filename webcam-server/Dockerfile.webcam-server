@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Webcam server — standalone Rust binary
 # Target: Jetson Orin Nano (linux/arm64 aarch64)
 
@@ -35,7 +39,7 @@ COPY webcam-server/Cargo.toml webcam-server/
 # without needing the entire monorepo (frontend WASM sources, system-vision/, etc.)
 RUN printf '[workspace]\nmembers = ["webcam-server"]\n' > Cargo.toml
 
-# Copy proto files (needed by build.rs)
+# proto/ is read by build.rs.
 COPY proto/ proto/
 
 # Build dependencies only with a dummy binary (layer cache)
@@ -46,7 +50,6 @@ RUN mkdir -p webcam-server/src && \
     rm -rf webcam-server/src && \
     mv webcam-server/Cargo.toml.bak webcam-server/Cargo.toml
 
-# Copy actual source, build.rs, and rebuild
 COPY webcam-server/build.rs webcam-server/
 COPY webcam-server/src webcam-server/src
 
@@ -75,7 +78,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the binary from builder
 COPY --from=builder /app/target/release/webcam_server /app/webcam_server
 
 ENV CAMERA_INDEX=0

@@ -1,8 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 [package]
 name = "conecsa-system-vision"
-version = "2026.5.0"
-description = "Conecsa Object Detection Application"
-license = "MIT"
+version = "2026.6.0"
+description = "Conecsa System Vision device UI"
+license = "AGPL-3.0-only"
 authors = ["Conecsa Automação"]
 edition = "2024"
 

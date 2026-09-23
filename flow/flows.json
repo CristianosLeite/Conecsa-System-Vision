@@ -4,7 +4,7 @@
     "type": "tab",
     "label": "Conecsa Flow",
     "disabled": false,
-    "info": "Pre-configured flow for Conecsa object detection system."
+    "info": "Pre-configured flow for Conecsa System Vision."
   },
   {
     "id": "a57709f9a2dc9734",
@@ -605,7 +605,7 @@
     "type": "global-config",
     "env": [],
     "modules": {
-      "@conecsa/node-red-contrib-conecsa-system-vision": "1.1.2"
+      "@conecsa/node-red-contrib-conecsa-system-vision": "1.1.3"
     }
   }
 ]

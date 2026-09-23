@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Utilities for loading labels/classes and class-color management.
 """
@@ -17,7 +21,6 @@ def load_class_labels(config):
     Returns:
         list: List of class labels
     """
-    # Try loading custom classes file first
     try:
         with open(config.CLASSES_FILE_PATH, "r") as f:
             labels = [line.strip() for line in f.readlines() if line.strip()]
@@ -47,17 +50,14 @@ def generate_colors(num_classes):
 
     colors = base_colors.copy()
 
-    # For any additional number of classes, generate colors using HSV
-    # This ensures well-distributed and visually distinct colors
+    # Beyond the base colors, spread the rest evenly around the HSV hue circle.
     if num_classes > len(base_colors):
         additional_colors_needed = num_classes - len(base_colors)
         for i in range(additional_colors_needed):
-            # Distribute evenly across the hue spectrum
             hue = (i / additional_colors_needed) % 1.0
             saturation = 0.8 + (i % 3) * 0.1  # Varies between 0.8 and 1.0
             value = 0.9 + (i % 2) * 0.1       # Varies between 0.9 and 1.0
 
-            # Convert HSV to RGB
             rgb = colorsys.hsv_to_rgb(hue, saturation, value)
             bgr = (int(rgb[2] * 255), int(rgb[1] * 255), int(rgb[0] * 255))
             colors.append(bgr)

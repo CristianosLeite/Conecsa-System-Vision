@@ -1,11 +1,12 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
 use crate::components::PowerButton;
 use crate::i18n::*;
 
-/// The `Header` view component.
 #[component]
 pub fn Header(api_health: ReadSignal<bool>) -> impl IntoView {
     let i18n = use_i18n();
@@ -21,13 +22,6 @@ pub fn Header(api_health: ReadSignal<bool>) -> impl IntoView {
                         </p>
                         <p class="app-brand-subtitle">"AUTOMAÇÃO"</p>
                     </div>
-                </div>
-                <div class="app-product-title">
-                    <svg class="w-7 h-7 stroke-current" viewBox="0 0 24 24" fill="none">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                    </svg>
-                    <h1>"AI System Vision"</h1>
                 </div>
                 <div class="app-service-status">
                     <span class="text-sm font-medium opacity-85">{t!(i18n, common::inference_service)}</span>

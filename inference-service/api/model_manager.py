@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Model manager that wires the TensorRT runtime to the YOLO detector."""
 import logging
 import os
@@ -6,19 +10,17 @@ import threading
 from typing import Any, Dict, List, NamedTuple, Optional
 
 # noinspection PyPackageRequirements
-import cv2  # Package is included on os build.
+import cv2  # ships in conecsa-os-base:base
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import numpy as np  # ships in conecsa-os-base:base
 
 from .runtime_management import RuntimeFactory
 from .runtime_management.base_runtime import Interpreter
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Preprocessing helpers (pure functions, host-testable without TensorRT)
-# ---------------------------------------------------------------------------
+# ── Preprocessing helpers (pure functions, host-testable without TensorRT) ──
 
 # INFER_RESIZE_INTERP values -> OpenCV interpolation flags.
 _RESIZE_INTERP_BY_NAME = {
@@ -64,10 +66,7 @@ def resize_interp_from_env() -> int:
     return flag
 
 
-# ---------------------------------------------------------------------------
-# SAHI-style tiled inference (TILING_* knobs; default grid, tile = the
-# frame's short side, so K=2 on any 16:9 camera)
-# ---------------------------------------------------------------------------
+# ── SAHI-style tiled inference (TILING_*; default grid, tile = short side, K=2 on 16:9) ──
 
 _TILING_MODES = ("off", "grid")
 DEFAULT_TILING_MODE = "grid"
@@ -149,7 +148,9 @@ class TileMeta(NamedTuple):
     ``preprocess_image`` return values, computed against the crop;
     ``ox``/``oy`` are the tile origin in frame pixels (0 for the full frame)
     and ``width``/``height`` the crop size the detector decodes corners
-    against before shifting them into frame space.
+    against before shifting them into frame space. ``border_left`` is the pad
+    on the X axis, which only the face path produces (``letterbox_fit`` fits
+    any orientation); the Y-only letterbox leaves it 0.
     """
 
     scale: float
@@ -159,6 +160,7 @@ class TileMeta(NamedTuple):
     oy: int
     width: int
     height: int
+    border_left: int = 0
 
 
 def input_size_from_shape(shape) -> int:
@@ -178,8 +180,8 @@ def letterbox_to_square(image_bgr, size: int, pad_value: int = DEFAULT_LETTERBOX
     """Resize ``image_bgr`` so its width fills ``size`` and pad the height to ``size``.
 
     Only the Y axis is letterboxed (the camera frames are wider than tall):
-    width is scaled to exactly ``size``, the resized height is centred between
-    equal (±1 px) constant-colour bands. Returns ``(image, scale, border_top)``
+    width is scaled to exactly ``size``, the resized height is centered between
+    equal (±1 px) constant-color bands. Returns ``(image, scale, border_top)``
     where ``scale = original_h / resized_h`` and ``border_top`` is the number of
     pad rows above the image, both consumed by the detector to map model-input
     coordinates back to the frame.
@@ -199,13 +201,103 @@ def letterbox_to_square(image_bgr, size: int, pad_value: int = DEFAULT_LETTERBOX
     return image, scale, border_top
 
 
+#: How a frame becomes the model input: detection and segmentation letterbox
+#: the frame (or each tile); classification resizes and center-crops it like
+def letterbox_fit(image_bgr, size: int, pad_value: int = DEFAULT_LETTERBOX_PAD,
+                  interp: int = cv2.INTER_NEAREST):
+    """Fit a whole frame of any orientation into a ``size`` square, centered.
+
+    ``letterbox_to_square`` scales the *width* to the input and pads only the
+    Y axis, which suits the camera's landscape frames but overflows on a
+    portrait image (its resized height exceeds the square, and
+    ``copyMakeBorder`` refuses the negative padding). Face datasets hold
+    photos of any shape, so the face path fits by the long side instead and
+    pads both axes.
+
+    Returns ``(image, scale, border_top, border_left)``; ``scale`` is the one
+    factor from resized pixels back to original ones, so
+    ``postprocess._yunet.to_frame`` inverts it by removing both bands and
+    multiplying once.
+    """
+    height, width = image_bgr.shape[:2]
+    factor = size / float(max(width, height))
+    new_w = max(1, min(size, int(round(width * factor))))
+    new_h = max(1, min(size, int(round(height * factor))))
+    image = cv2.resize(image_bgr, (new_w, new_h), interpolation=interp)
+    # Measure the factor on the long side, where the rounding is relatively
+    # smallest; the other axis differs by well under a pixel.
+    scale = width / new_w if width >= height else height / new_h
+    border_top = (size - new_h) // 2
+    border_left = (size - new_w) // 2
+    image = cv2.copyMakeBorder(image, border_top, size - new_h - border_top,
+                               border_left, size - new_w - border_left,
+                               cv2.BORDER_CONSTANT,
+                               value=(pad_value, pad_value, pad_value))
+    return image, scale, border_top, border_left
+
+
+#: ultralytics' ``classify_transforms``; the YuNet face detector fits the whole
+#: frame into the square (``letterbox_fit``) and takes BGR 0..255 (OpenCV
+#: ``blobFromImage`` defaults).
+PREPROCESS_LETTERBOX = "letterbox"
+PREPROCESS_CENTER_CROP = "center_crop"
+PREPROCESS_FACE = "face"
+
+
+def classify_resize_size(width: int, height: int, size: int) -> tuple[int, int]:
+    """``(w, h)`` after torchvision ``Resize(size)``: the short side becomes ``size``.
+
+    The long side is truncated exactly like torchvision's
+    ``_compute_resized_output_size`` (``int(size * long / short)``).
+    """
+    if width <= height:
+        return size, int(size * height / width)
+    return int(size * width / height), size
+
+
+def center_crop_offsets(width: int, height: int, size: int) -> tuple[int, int]:
+    """``(left, top)`` of the center ``size`` square, rounded like torchvision ``center_crop``.
+
+    torchvision uses Python's ``round`` (half to even), so a 3 px excess puts
+    the crop at 2, not at ``3 // 2``.
+    """
+    return int(round((width - size) / 2.0)), int(round((height - size) / 2.0))
+
+
+def center_crop_square(image_bgr, size: int) -> np.ndarray:
+    """Ultralytics ``classify_transforms`` on a BGR frame → an RGB uint8 ``size`` square.
+
+    Mirrors the pinned ultralytics 8.4.92 ``ClassificationPredictor``: the
+    frame becomes an RGB PIL image, its short side is resized to ``size``
+    with PIL's ``BILINEAR`` — antialiased when downscaling, which
+    ``cv2.INTER_LINEAR`` is not — and the center square is cropped. Scaling
+    to 0..1 happens when the tensor is packed; ultralytics' ``Normalize`` is
+    a no-op (mean 0, std 1).
+    """
+    # Lazy: Pillow ships with ultralytics in os-base; only classification needs it.
+    from PIL import Image
+
+    height, width = image_bgr.shape[:2]
+    rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    new_w, new_h = classify_resize_size(width, height, size)
+    resized = Image.fromarray(rgb).resize((new_w, new_h), Image.Resampling.BILINEAR)
+    left, top = center_crop_offsets(new_w, new_h, size)
+    return np.asarray(resized)[top:top + size, left:left + size]
+
+
+#: Tasks whose models run on ``TILING_MODE=grid`` tiles.
+_TILED_TASKS = ("detect", "segment")
+
+
 class ModelManager:
     """Class to manage loading and execution of TensorRT models."""
 
-    def __init__(self, config, port: Optional[int] = None):
+    def __init__(self, config, port: Optional[int] = None, task: str = "detect"):
         """``port`` pins the manager to one dedicated worker context (no
         multi-context pool) — the labeling service uses it so an engine can
-        run beside, never instead of, the live model on the base ports."""
+        run beside, never instead of, the live model on the base ports.
+        ``task`` is the model's task: it decides whether ``TILING_MODE=grid``
+        applies (whole-frame classification is never tiled)."""
         self.config = config
         self._port = port
         self.interpreter: Optional[Interpreter] = None
@@ -218,11 +310,11 @@ class ModelManager:
         # Optional pool of additional inference contexts (multi-context). Each
         # entry is an interpreter backed by its own worker subprocess / CUDA
         # context, so N pipeline threads calling run_inference run in parallel.
-        # ``_pool`` stays None (single-context behaviour) unless TENSORRT_CONTEXTS>1.
+        # ``_pool`` stays None (single-context behavior) unless TENSORRT_CONTEXTS>1.
         self._extra_interpreters = []
         self._pool = None
 
-        self._configure_preprocessing()
+        self._configure_preprocessing(task)
 
         self.runtime = RuntimeFactory.get_runtime_for_model(self.config.MODEL_PATH)
         self.runtime_api = self.runtime.name
@@ -249,12 +341,15 @@ class ModelManager:
         self.input_size = input_size_from_shape(self.input_details[0]['shape'])
         self._print_model_details()
 
-    def _configure_preprocessing(self) -> None:
+    def _configure_preprocessing(self, task: str = "detect") -> None:
         """Read the preprocessing knobs once (env is not re-read per frame).
 
         Split out of ``__init__`` so tests can build a manager without a
         TensorRT interpreter (``ModelManager.__new__`` + this + ``input_details``).
         """
+        self._task = task
+        self._preprocess_mode = {"classify": PREPROCESS_CENTER_CROP,
+                                 "face": PREPROCESS_FACE}.get(task, PREPROCESS_LETTERBOX)
         self._pad_value = letterbox_pad_from_env()
         self._resize_interp = resize_interp_from_env()
         self._tiling_mode = tiling_mode_from_env()
@@ -308,17 +403,11 @@ class ModelManager:
         """Destructor to properly clean up resources."""
         # noinspection PyBroadException
         try:
-            # Drop references to the extra inference contexts, but DO NOT close
-            # their worker clients here. Those clients are process-global
-            # singletons cached in worker_client._client_cache and shared across
-            # ModelManager instances — a model swap re-issues `load` to the same
-            # workers rather than spawning new ones. Closing them in this
-            # destructor means a *previous* ModelManager being garbage-collected
-            # after a swap would terminate the worker the *current* ModelManager
-            # is using, leaving that inference lane answering "model not loaded"
-            # (throughput then halves). The workers live for the process and are
-            # reloaded on the next swap; mirror how the primary context (5501) is
-            # already only dereferenced, never closed, here.
+            # Only dereference the extra contexts; never close their worker
+            # clients. They are process-global (worker_client._client_cache) and
+            # shared across ModelManager instances, so closing them when an old
+            # instance is collected after a swap would kill the current one's
+            # workers. The primary context (5501) is treated the same way.
             self._extra_interpreters = []
             self._pool = None
 
@@ -335,10 +424,10 @@ class ModelManager:
             logger.debug(f"Output {i}: name='{detail['name']}', shape={detail['shape']}, dtype={detail['dtype']}")
     
     def preprocess_image(self, image_original) -> tuple[np.ndarray, float, int, int]:
-        """Letterbox, colour-convert and pack a BGR frame into the model input tensor.
+        """Letterbox, color-convert and pack a BGR frame into the model input tensor.
 
         The frame is resized so its width fills the model input, the height is
-        centred between constant-colour bands (Y-only letterbox), BGR becomes
+        centered between constant-color bands (Y-only letterbox), BGR becomes
         RGB and the result is laid out as NCHW (float32 in 0..1) for
         channels-first engines or NHWC otherwise.
 
@@ -367,17 +456,25 @@ class ModelManager:
         else:
             actual_input_size = self.input_size
 
-        image, scale, border_top = letterbox_to_square(
-            image_original, actual_input_size, self._pad_value, self._resize_interp)
-
-        # Convert BGR to RGB
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if self._preprocess_mode == PREPROCESS_CENTER_CROP:
+            # Classification: the whole frame, resized and center-cropped
+            # (no letterbox, so nothing to map back).
+            image_rgb = center_crop_square(image_original, actual_input_size)
+            scale, border_top = 1.0, 0
+        else:
+            image, scale, border_top = letterbox_to_square(
+                image_original, actual_input_size, self._pad_value, self._resize_interp)
+            # Convert BGR to RGB (the face detector keeps BGR)
+            image_rgb = (image if self._preprocess_mode == PREPROCESS_FACE
+                         else cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
 
         if is_channels_first:
             input_tensor = np.transpose(image_rgb, (2, 0, 1))
             input_tensor = np.expand_dims(input_tensor, axis=0)
             if self.input_details[0]['dtype'] == np.float32:
-                input_tensor = input_tensor.astype(np.float32) / 255.0
+                input_tensor = input_tensor.astype(np.float32)
+                if self._preprocess_mode != PREPROCESS_FACE:
+                    input_tensor /= 255.0
             else:
                 input_tensor = input_tensor.astype(np.uint8)
         else:
@@ -387,10 +484,39 @@ class ModelManager:
 
         return input_tensor, scale, border_top, actual_input_size
 
+    def _preprocess_face(self, image_original):
+        """Pack a frame of any orientation into the face detector's input.
+
+        Enrollment photos are whatever the operator uploaded — portrait,
+        landscape or square — so the whole frame is fitted into the square
+        (``letterbox_fit``) instead of scaled by its width. Returns the
+        ``preprocess_image`` tuple plus the X pad, which the decode needs to
+        map faces back into frame pixels.
+        """
+        expected_shape = self.input_details[0]['shape']
+        is_channels_first = (len(expected_shape) == 4 and expected_shape[1] == 3)
+        size = int(expected_shape[2]) if is_channels_first else self.input_size
+
+        image, scale, border_top, border_left = letterbox_fit(
+            image_original, size, self._pad_value, self._resize_interp)
+
+        # YuNet reads BGR 0..255: no channel swap, no scaling.
+        if is_channels_first:
+            tensor = np.expand_dims(np.transpose(image, (2, 0, 1)), axis=0)
+        else:
+            tensor = np.array([image])
+        dtype = self.input_details[0]['dtype']
+        tensor = tensor.astype(np.float32) if dtype == np.float32 else tensor.astype(np.uint8)
+        return tensor, scale, border_top, size, border_left
+
     @property
     def tiling_active(self) -> bool:
-        """True when ``TILING_MODE=grid`` sliced inference is enabled."""
-        return self._tiling_mode == "grid"
+        """True when ``TILING_MODE=grid`` sliced inference applies to this model.
+
+        Only tasks that locate objects are tiled; a classification model
+        always sees the whole frame.
+        """
+        return self._tiling_mode == "grid" and self._task in _TILED_TASKS
 
     def preprocess_tiles(self, image_original):
         """Preprocess a frame into one or more model inputs.
@@ -408,11 +534,16 @@ class ModelManager:
         """
         frame_h, frame_w = image_original.shape[:2]
         if not self.tiling_active:
-            input_tensor, scale, border_top, input_size = self.preprocess_image(image_original)
-            return [input_tensor], [TileMeta(scale, border_top, input_size, 0, 0, frame_w, frame_h)]
+            if self._preprocess_mode == PREPROCESS_FACE:
+                tensor, scale, border_top, input_size, border_left = self._preprocess_face(
+                    image_original)
+            else:
+                tensor, scale, border_top, input_size = self.preprocess_image(image_original)
+                border_left = 0
+            return [tensor], [TileMeta(scale, border_top, input_size, 0, 0, frame_w, frame_h,
+                                       border_left)]
 
-        # Imported lazily: only a base image built with this feature ships
-        # conecsa_common.tiling, and the off path must not depend on it.
+        # Imported lazily so the untiled path does not load the tiling module.
         from conecsa_common.tiling import auto_tile, tile_crop, tile_grid
 
         side = self._tiling_tile or auto_tile(frame_w, frame_h)
@@ -435,7 +566,8 @@ class ModelManager:
             input_tensor: Preprocessed input tensor
 
         Returns:
-            tuple: (output data, inference time)
+            tuple: (every output tensor of the engine, in binding order;
+            inference time in seconds)
         """
         # Multi-context: draw a free context from the pool (each is backed by its
         # own worker subprocess, so N concurrent callers run in parallel). The
@@ -457,7 +589,11 @@ class ModelManager:
             return self._invoke(interpreter, input_tensor)
 
     def _invoke(self, interpreter: Interpreter, input_tensor):
-        """Run one inference on ``interpreter``. Returns ``(output_data, seconds)``."""
+        """Run one inference on ``interpreter``. Returns ``(outputs, seconds)``.
+
+        ``outputs`` holds every output tensor (a segmentation engine has two);
+        postprocessors pick theirs by shape, never by binding index.
+        """
         from time import time
 
         # IMPORTANT: Make a copy of input tensor to avoid internal references.
@@ -472,9 +608,10 @@ class ModelManager:
             logger.error(f"Inference failed: {e}")
             raise e
 
-        output_data = np.array(interpreter.get_tensor(self.output_details[0]['index']))
+        outputs = [np.array(interpreter.get_tensor(detail['index']))
+                   for detail in self.output_details]
 
         # Explicitly release references before returning
         del input_copy
 
-        return output_data, t2 - t1
+        return outputs, t2 - t1

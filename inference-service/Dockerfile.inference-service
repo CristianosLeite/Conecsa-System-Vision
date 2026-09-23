@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # ============================================================================
 # Inference service image. Inherits the shared ML stack (CUDA + Python + torch
 # + tensorrt + pycuda + opencv + ultralytics + …) from conecsa-os-base:base.
@@ -11,18 +15,49 @@ FROM base
 
 WORKDIR /app
 
-# Service-specific Python deps (web stack + Jetson hardware bindings).
+# Service-specific Python deps. The file lists none: the base image provides
+# everything the service imports.
 COPY inference-service/requirements.txt /app/
-# ${JETSON_PIP_INDEX} is inherited from the base image; passed explicitly
-# (the base no longer sets a global extra index).
+# ${JETSON_PIP_INDEX} is inherited from the base image and passed explicitly
+# (the base sets no global extra index).
 RUN pip install --no-cache-dir --root-user-action=ignore \
         --extra-index-url "${JETSON_PIP_INDEX}" -r /app/requirements.txt
 
 ENV PYTHONPATH=/app/inference-service:/usr/lib/python3.10/dist-packages:/usr/local/lib/python3.10/dist-packages
 ENV TENSORRT_WORKER_PORT=5501
+# Single-threaded BLAS. The pipeline already runs one thread per stage and lane;
+# an OpenBLAS pool (numpy and OpenCV each bundle one, sized to every core)
+# busy-waits between the small matrix products of segmentation masks and fought
+# those threads for the Orin's six cores: under load one mask's logits took
+# ~20 ms instead of ~0.2 ms.
+ENV OPENBLAS_NUM_THREADS=1
+ENV OMP_NUM_THREADS=1
 
-# Application code
 COPY inference-service/ /app/inference-service/
+
+# Face recognition models (YuNet MIT + SFace Apache-2.0), fetched into
+# inference-service/assets/face/ by scripts/fetch-face-models.sh before the
+# build — like the SAM3 checkpoint of the training-service. They are verified
+# here against the same pins (scripts/face-models.pin). A build without them
+# is valid: the face application type is simply not offered
+# (api/postprocess/_face_assets.py).
+ARG FACE_DETECTOR_FILE=face_detection_yunet_2023mar.onnx
+ARG FACE_DETECTOR_SHA256=8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+ARG FACE_EMBEDDER_FILE=face_recognition_sface_2021dec.onnx
+ARG FACE_EMBEDDER_SHA256=0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79
+ENV FACE_MODELS_DIR=/app/inference-service/assets/face
+RUN set -eu; \
+    if [ -f "$FACE_MODELS_DIR/$FACE_DETECTOR_FILE" ] && \
+       [ -f "$FACE_MODELS_DIR/$FACE_EMBEDDER_FILE" ]; then \
+        cd "$FACE_MODELS_DIR"; \
+        echo "$FACE_DETECTOR_SHA256  $FACE_DETECTOR_FILE" | sha256sum --check --strict; \
+        echo "$FACE_EMBEDDER_SHA256  $FACE_EMBEDDER_FILE" | sha256sum --check --strict; \
+        echo "Face recognition models verified."; \
+    else \
+        echo "No face recognition models in the build context; the face application"; \
+        echo "type will not be offered (run scripts/fetch-face-models.sh to include it)."; \
+        rm -rf "$FACE_MODELS_DIR"; \
+    fi
 
 # Compile proto files using grpc_tools.protoc (installed in conecsa-os-base:base)
 # so the generated stubs are compatible with the protobuf runtime.
@@ -45,8 +80,8 @@ RUN python3 -m compileall -b -q /app/inference-service && \
 # at runtime).
 RUN mkdir -p /data/models
 
-# Headless: the only surface is the gRPC control server (proto/inference.proto).
-# The api-gateway owns all HTTP/SSE/MJPEG now.
+# Headless: the only surface is the gRPC control server (proto/inference.proto);
+# the api-gateway owns all HTTP/SSE/MJPEG.
 EXPOSE 50061
 WORKDIR /app/inference-service
 

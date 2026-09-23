@@ -1,6 +1,9 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Backend access layer (HTTP/SSE).
 
-/// Parse classes text.
 pub fn parse_classes_text(text: &str) -> Vec<String> {
     text.lines()
         .map(|line| line.trim().to_string())
@@ -16,13 +19,17 @@ pub mod wasm32;
 
 pub use wasm32::http::fetch_api;
 
+pub use wasm32::services::application::{get_application, set_application};
+
 pub use wasm32::services::detection::{
-    set_overlay_threshold, set_threshold, start_detection, stop_detection,
+    get_snapshot, set_face_settings, set_overlay_threshold, set_segment_max_instances,
+    set_threshold, start_detection, stop_detection, FaceSettings,
 };
 
 pub use wasm32::services::model::{
     delete_model, get_conversion_status, list_active_conversions, list_training_models,
-    model_download_url, model_stem, select_model, upload_model_dialog, upload_model_file,
+    list_training_models_for, model_download_url, model_stem, select_model,
+    upload_model_dialog, upload_model_file,
     ActiveConversionsResponse, ConversionStatusResponse, TrainingModelLists,
     UploadModelResponse,
 };
@@ -32,8 +39,9 @@ pub use wasm32::services::classes::{
 };
 
 pub use wasm32::services::camera::{
-    get_camera_devices, update_camera_config, update_stereo_config, CameraDevice,
-    CameraDevicesResponse,
+    camera_source_body, get_camera_devices, update_camera_config, update_camera_source,
+    update_stereo_config, CameraDevice, CameraDevicesResponse, CameraHealth, SOURCE_LOCAL,
+    SOURCE_NETWORK,
 };
 
 pub use wasm32::services::detection_areas::{
@@ -48,6 +56,7 @@ pub use wasm32::services::network::{
     connect_wifi, forget_wifi, get_network_config, scan_wifi, set_network_config, InterfaceConfig,
     NetworkConfig, NetworkSetResponse, WifiConnectResponse, WifiNetwork, WifiScanResponse,
     WifiStatus,
+    get_ap_status, start_ap, stop_ap, ApStation, ApStatus,
 };
 
 pub use wasm32::services::gpio::{
@@ -64,11 +73,12 @@ pub use wasm32::services::training::{
     get_training_classes, get_training_dataset, get_training_labels, get_training_status,
     label_detect, list_datasets, list_training_images, load_label_model, load_sam,
     remove_training_class, rename_dataset, rename_training_class, replicate_training_image,
-    sam_segment, set_dataset_cover, set_training_labels, start_training,
-    training_dataset_export_url, training_enter, training_exit, training_heartbeat,
-    training_image_url, training_preview_url, unload_label_model, upload_dataset_zip,
-    DatasetSummary, LabelBox, LabelDetectResponse, LabelModelStatusResponse,
-    SamStatusResponse, TrainingDatasetInfo, TrainingImageInfo, TrainingJobStatus,
+    sam_segment, set_dataset_cover, set_training_image_class, set_training_labels,
+    set_training_polygons, start_training, training_dataset_export_url, training_enter,
+    training_exit, training_heartbeat, training_image_url, training_preview_url,
+    unload_label_model, upload_dataset_zip, DatasetSummary, LabelBox, LabelClassSuggestion,
+    LabelDetectResponse, LabelModelStatusResponse, LabelPolygon, SamStatusResponse,
+    TrainingDatasetInfo, TrainingImageInfo, TrainingJobStatus,
 };
 
 #[cfg(test)]

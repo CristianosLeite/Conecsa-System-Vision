@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # ============================================================================
 # DEV stack for x86_64 + NVIDIA GPU — a faithful mirror of the production
 # docker-compose.yml that reuses the SAME service Dockerfiles and the SAME
@@ -5,13 +9,16 @@
 #
 #   - os-base       → builds Dockerfile.os-base.dev (x86 PyPI tensorrt-cu12/pycuda
 #                     instead of the aarch64 jetson-ai-lab wheels) and runs as a
-#                     plain base/volume-owner (the GPIO/Wi-Fi hardware agent is
-#                     Jetson-only).
+#                     plain base/volume-owner (the `os-base` hardware agent
+#                     runs only on the Jetson).
 #   - system-vision → builds Dockerfile.system-vision.dev (x86_64 Tailwind binary).
-#   - inference /   → REMOVE the Tegra host-library bind-mounts, the aarch64
-#     training        LD_LIBRARY_PATH / jemalloc LD_PRELOAD, GPIO shm, and
-#                     privileged/pid:host (all Jetson-specific); GPU comes from
-#                     the NVIDIA container toolkit via `deploy.resources`.
+#   - inference /   → REMOVE `runtime: nvidia`, the Tegra host-library bind-mounts,
+#     training        the aarch64 LD_LIBRARY_PATH / jemalloc LD_PRELOAD and the
+#                     GPIO SHM channel volume (all Jetson-specific); GPU comes from the
+#                     NVIDIA container toolkit via `deploy.resources`.
+#   - host ports    → api-gateway :5000, system-vision :80 (plus :443) and flow
+#                     :1880 (editor without tokens, FLOW_ADMIN_AUTH=0) are
+#                     published for local access; production publishes only :443.
 #
 # Everything else (webcam-server, api-gateway, flow, the service Dockerfiles,
 # the compose-network service-name wiring, volumes) is reused unchanged.
@@ -26,8 +33,9 @@ services:
       context: .
       dockerfile: os-base/Dockerfile.os-base.dev
     container_name: conecsa-os-base
-    # The Jetson hardware agent (GPIO/Wi-Fi/network) is device-only; off-device
-    # `os-base` is just the shared base image + owner of the named data volumes.
+    # The `os-base` hardware agent (GPIO/Wi-Fi/network) runs only on the device;
+    # off-device `os-base` is just the shared base image + owner of the named
+    # data volumes.
     command: ["tail", "-f", "/dev/null"]
     volumes:
       - models-data:/data/models
@@ -50,6 +58,13 @@ services:
       - RUST_LOG=info
       - SHM_NAME=conecsa_frame_shm
       - SHM_SLOT_MIN_BYTES=16777216
+      # Start-up capture source, from the shell or .env. `network` pulls the
+      # remote camera protocol from webcam-server/tools/mjpeg_test_sender.py;
+      # use the workstation's LAN address (loopback is this container).
+      - CAMERA_SOURCE=${CAMERA_SOURCE:-local}
+      - CAMERA_NETWORK_HOST=${CAMERA_NETWORK_HOST:-}
+      - CAMERA_NETWORK_PORT=${CAMERA_NETWORK_PORT:-}
+      - CAMERA_NETWORK_TOKEN=${CAMERA_NETWORK_TOKEN:-}
     # privileged grants access to all /dev/video* (incl. hot-plugged nodes) so
     # the server starts with no camera (publishing `no_camera`, no frames) and
     # picks one up when it appears — same as production.
@@ -96,6 +111,10 @@ services:
       - TENSORRT_AUTO_REBUILD_ENGINE=1
       - TENSORRT_WORKSPACE_MB=192
       - TENSORRT_CONTEXTS=2
+      # Face recognition; see docker-compose.yml for what each value means.
+      - FACE_MATCH_THRESHOLD=0.363
+      - FACE_MIN_SIZE_PX=40
+      - FACE_MAX_FACES=5
       - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8
     volumes:
       - models-data:/data/models
@@ -221,8 +240,6 @@ services:
       context: .
       dockerfile: system-vision/Dockerfile.system-vision.dev
     container_name: conecsa-system-vision
-    environment:
-      - API_BASE_URL=${API_BASE_URL:-http://api-gateway:5000}
     ports:
       - "${SYSTEM_VISION_PORT:-80}:80"
       - "${SYSTEM_VISION_TLS_PORT:-443}:443"
@@ -248,7 +265,7 @@ services:
     environment:
       - TZ=${TZ:-America/Sao_Paulo}
       - INFERENCE_URL=${INFERENCE_URL:-http://api-gateway:5000}
-      # Dev-only fixed secret (production requires a real per-deployment one).
+      # Fixed development secret (production requires a real per-deployment one).
       - NODE_RED_CREDENTIAL_SECRET=${NODE_RED_CREDENTIAL_SECRET:-conecsa-dev-only-secret}
       # The editor is published on the host below, so keep it usable without
       # a token in development. Set FLOW_ADMIN_AUTH=1 to exercise the tokens.

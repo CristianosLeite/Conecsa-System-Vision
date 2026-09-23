@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 "use strict";
 const helper = require("node-red-node-test-helper");
 const statsNode = require("../nodes/stats/stats.js");

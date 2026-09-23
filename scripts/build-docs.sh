@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # build-docs.sh — build the full documentation site into ./site
 #
 # Steps:
 #   1. mkdocs build (Material theme + mkdocstrings Python API + generated proto
 #      reference). Uses --strict so broken links / missing nav fail the build.
-#   2. cargo doc for the Rust workspace (app + webcam-server), with private
+#   2. cargo doc for system-vision and webcam-server, with private
 #      items, and overlay it under site/rust/ so it is reachable from the nav.
 #
 # Prerequisites:
 #   pip install -r docs/requirements-docs.txt
-#   a Rust toolchain (rustup) with the wasm32-unknown-unknown target for the app
+#   a Rust toolchain (rustup) with the wasm32-unknown-unknown target for system-vision
 #
 # Usage:
 #   scripts/build-docs.sh           # full build

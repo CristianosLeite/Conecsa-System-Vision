@@ -1,10 +1,16 @@
-"""Static IP configuration: validation, atomic write and rollback (review H2).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Static IP configuration: validation, atomic write and rollback.
 
 Runs the real ``NetworkAgent.set_ip_config`` against a temp networkd
 directory, a fixed interface and recorded ``reload``/``reconfigure_link``
 calls. No D-Bus, no networkd.
 """
 import os
+import threading
+from types import SimpleNamespace
 
 import pytest
 from agent import network_agent as mod
@@ -137,3 +143,116 @@ class TestRollback:
         assert _static(agent)["success"] is False
         assert not path.exists()
         assert [f for f in os.listdir(path.parent) if ".tmp-" in f] == []
+
+
+class TestWhileTheAccessPointIsUp:
+    """A Wi-Fi change is refused outright while the radio is an access point:
+    the guard raises before any interface is discovered or any file written."""
+
+    @pytest.fixture
+    def guarded(self, rig, monkeypatch):
+        agent, networkd, path = rig
+        agent._ap = SimpleNamespace(active=True)
+        monkeypatch.setattr(NetworkAgent, "_discover",
+                            staticmethod(lambda: pytest.fail("discovery must not run")))
+        return agent, networkd, path
+
+    def test_a_wifi_ip_change_is_refused(self, guarded):
+        agent, networkd, path = guarded
+        with pytest.raises(mod.AccessPointActive, match="stop it before changing Wi-Fi"):
+            _static(agent, interface="wifi")
+        assert networkd.calls == [] and not path.exists()
+
+    def test_connect_and_forget_are_refused(self, guarded):
+        agent, *_ = guarded
+        with pytest.raises(mod.AccessPointActive):
+            agent.connect_wifi("site", "passphrase")
+        with pytest.raises(mod.AccessPointActive):
+            agent.forget_wifi("site")
+
+    def test_a_wired_change_still_goes_through(self, rig):
+        agent, networkd, path = rig
+        agent._ap = SimpleNamespace(active=True)
+        assert _static(agent)["success"]
+        assert path.exists()
+
+    def test_the_guard_is_idle_without_an_access_point(self, rig):
+        agent, *_ = rig
+        assert agent._ap is None
+        agent._ap = SimpleNamespace(active=False)
+        assert _static(agent)["success"]
+
+
+def _free_from_another_thread(lock) -> bool:
+    """Whether *lock* can be taken by a thread that is not the caller."""
+    got = []
+
+    def probe():
+        if lock.acquire(blocking=False):
+            lock.release()
+            got.append(True)
+        else:
+            got.append(False)
+
+    worker = threading.Thread(target=probe)
+    worker.start()
+    worker.join(1.0)
+    return got == [True]
+
+
+class TestTheRadioDuringAWifiChange:
+    """A Wi-Fi change holds the access point's radio lock from the check to
+    the end of the change, so a start cannot slip in between the two."""
+
+    def test_a_wifi_change_holds_the_radio_until_it_is_done(self, rig, monkeypatch):
+        agent, networkd, path = rig
+        ap = SimpleNamespace(active=False, radio=threading.RLock())
+        agent._ap = ap
+        monkeypatch.setattr(NetworkAgent, "_discover", staticmethod(lambda: {"wifi": (IFINDEX, IFACE)}))
+        seen = []
+        reload = mod.networkd.reload
+        monkeypatch.setattr(mod.networkd, "reload",
+                            lambda: (seen.append(_free_from_another_thread(ap.radio)), reload()))
+        assert _static(agent, interface="wifi")["success"]
+        assert seen == [False], "the radio was free while the file was being applied"
+        assert _free_from_another_thread(ap.radio), "and is released afterwards"
+
+    def test_a_transition_that_takes_the_radio_meanwhile_is_refused(self, rig, monkeypatch):
+        class Ap:
+            def __init__(self):
+                self.radio = threading.RLock()
+                self.looks = 0
+
+            @property
+            def active(self):
+                # Idle at the first look, a start under way once the radio is held.
+                self.looks += 1
+                return self.looks > 1
+
+        agent, networkd, path = rig
+        agent._ap = Ap()
+        monkeypatch.setattr(NetworkAgent, "_discover",
+                            staticmethod(lambda: pytest.fail("discovery must not run")))
+        with pytest.raises(mod.AccessPointActive):
+            agent.connect_wifi("site", "passphrase")
+        assert networkd.calls == [] and not path.exists()
+
+    def test_a_wired_change_does_not_wait_for_the_radio(self, rig):
+        agent, networkd, path = rig
+        ap = SimpleNamespace(active=False, radio=threading.RLock())
+        agent._ap = ap
+        taken, release = threading.Event(), threading.Event()
+
+        def hold():
+            with ap.radio:
+                taken.set()
+                release.wait(5.0)
+
+        threading.Thread(target=hold, daemon=True).start()
+        assert taken.wait(1.0)
+        outcome = {}
+        worker = threading.Thread(target=lambda: outcome.update(_static(agent)))
+        worker.start()
+        worker.join(2.0)
+        release.set()
+        assert outcome.get("success"), "a wired change went through while the radio was held"

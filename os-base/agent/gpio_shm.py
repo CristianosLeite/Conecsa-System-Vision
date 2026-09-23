@@ -1,8 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Shared-memory channel for the GPIO trigger gate (hot path).
 
 The per-frame trigger gate must NOT cross a gRPC boundary (the inference loop
-runs at ~45 fps). Instead the `os` agent (which owns the GPIO hardware) and
+runs at ~45 fps). Instead the `os-base` hardware agent (which owns the GPIO hardware) and
 inference-service share a tiny mmap'd file on a volume mounted in both
 containers. mmap MAP_SHARED on the same host inode is shared across mount
 namespaces, so writes are visible to the other container immediately.
@@ -15,7 +19,7 @@ Layout (1 byte each; every field has a single writer, so byte accesses are
 atomic without locking):
 
     [0] version    (agent)
-    [1] available  (agent)   — GPIO hardware initialised
+    [1] available  (agent)   — GPIO hardware initialized
     [2] enabled    (agent)   — trigger/gate mode on (set via gRPC SetGpioTrigger)
     [3] trigger    (agent)   — current trigger pin level
 

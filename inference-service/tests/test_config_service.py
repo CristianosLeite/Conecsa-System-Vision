@@ -1,8 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for ConfigService (get/update of the capture + inference config).
 
 The generic patch is validated through the shared camera bounds, pushed to the
-webcam-server first, and persisted only when the push was acknowledged
-(review M2) — the same contract as the dedicated camera path.
+webcam-server first, and persisted only when the push was acknowledged —
+the same contract as the dedicated camera path.
 """
 from types import SimpleNamespace
 
@@ -38,6 +42,20 @@ def config():
         MODEL_PATH="/models/best.engine",
         CONFIDENCE_THRESHOLD=0.5,
     )
+
+
+class TestLifecycleLock:
+    def test_the_change_and_its_save_hold_the_model_lifecycle_lock(self, config):
+        # A concurrent model activation must not swap the settings file between
+        # the change and the save (the value would land in the wrong model).
+        import threading
+        lock = threading.RLock()
+        held = []
+        settings = SimpleNamespace(save=lambda: held.append(lock._is_owned()))  # type: ignore[attr-defined]
+        svc = ConfigService(config, settings_service=settings, lifecycle_lock=lock)
+        ok, _, status = svc.update_config({"confidence_threshold": 0.7})
+        assert (ok, status) == (True, 200)
+        assert held == [True] and config.CONFIDENCE_THRESHOLD == 0.7
 
 
 class TestGetConfig:

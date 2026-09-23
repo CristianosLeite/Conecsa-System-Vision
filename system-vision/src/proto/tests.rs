@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit tests for the generated prost detection messages (headless browser).
 use super::*;
 use prost::Message;
@@ -16,11 +20,33 @@ fn status_response_encode_decode_round_trip() {
             frames_with_detections: 200,
         }),
         protocols: Some(Protocols { http_port: 80 }),
+        task: Some("detect".into()),
         camera_connected: true,
+        segment_max_instances: None,
+        face_match_threshold: None,
+        face_min_size_px: None,
+        face_max_faces: None,
     };
     let bytes = msg.encode_to_vec();
     let back = StatusResponse::decode(&bytes[..]).unwrap();
     assert_eq!(msg, back);
+}
+
+#[wasm_bindgen_test]
+fn status_response_keeps_the_per_task_settings_presence() {
+    // A field the gateway left unset (another task, older firmware) stays
+    // `None` after the round trip; a set one comes back as set.
+    let msg = StatusResponse {
+        task: Some("face".into()),
+        face_match_threshold: Some(0.45),
+        face_min_size_px: Some(64),
+        face_max_faces: Some(4),
+        ..Default::default()
+    };
+    let back = StatusResponse::decode(&msg.encode_to_vec()[..]).unwrap();
+    assert_eq!(msg, back);
+    assert_eq!(back.segment_max_instances, None);
+    assert_eq!(back.face_max_faces, Some(4));
 }
 
 #[wasm_bindgen_test]

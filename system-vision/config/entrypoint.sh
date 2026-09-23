@@ -1,4 +1,9 @@
 #!/bin/sh
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # nginx entrypoint that flips between the enrollment and enforcing TLS blocks
 # based on whether the device has been paired (a hub-signed cert + the hub CA are
 # present in the shared certs volume), and reloads nginx when that state changes.

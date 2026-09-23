@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """mDNS advertising so conecsa-hub-vision can discover this device passively.
 
 Registers a ``_conecsa._tcp.local.`` service carrying the device identity and the

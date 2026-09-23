@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Parsing of extra ultralytics training hyperparameters.
 
 ``TRAIN_OVERRIDES`` (see :mod:`service.config`) carries space-separated

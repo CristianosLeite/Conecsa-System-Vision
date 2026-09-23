@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The root Leptos `App` component and shared frontend helpers
 //! (API base-URL resolution, fetch wrapper, formatting).
 
@@ -11,13 +15,11 @@ use crate::components::MainView;
 use crate::i18n::*;
 pub use crate::models::{ModelInfo, PerformanceStats, ProtocolInfo, SystemStatus};
 
-/// A `ModelsResponse` struct.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ModelsResponse {
     models: Vec<ModelInfo>,
 }
 
-/// The `App` view component.
 #[component]
 pub fn App() -> impl IntoView {
     crate::components::locale::init_locale();
@@ -27,8 +29,6 @@ pub fn App() -> impl IntoView {
     }
 }
 
-// Helper functions
-/// Refresh status.
 pub async fn refresh_status(
     set_status: WriteSignal<Option<SystemStatus>>,
     set_error_msg: WriteSignal<String>,
@@ -46,9 +46,13 @@ pub async fn refresh_status(
     }
 }
 
-/// Check api health.
+/// Check that the inference-service is serving, for the header status pill.
+///
+/// Uses the gateway's readiness route: `/api/v1/health` only proves the gateway
+/// process answers and stays 200 while the inference-service is down, whereas
+/// `/api/v1/ready` answers 503 `degraded` until the inference-service serves.
 pub async fn check_api_health(set_api_health: WriteSignal<bool>) {
-    match fetch_api::<serde_json::Value>("/api/v1/health", "GET", None).await {
+    match fetch_api::<serde_json::Value>("/api/v1/ready", "GET", None).await {
         Ok(_) => set_api_health.set(true),
         Err(_) => set_api_health.set(false),
     }
@@ -68,7 +72,6 @@ pub async fn load_models(
 }
 
 // Generic HTTP fetch function for web mode
-/// Fetch api.
 async fn fetch_api<T: for<'de> Deserialize<'de>>(
     endpoint: &str,
     method: &str,
@@ -132,7 +135,7 @@ pub fn get_api_base_url() -> String {
     // `window.__conecsa_base_url` (e.g. ".") before the app mounts to make
     // every URL the UI builds — API, streams, the Node-RED editor — relative
     // to a prefix; the interactive user manual uses it to keep its simulated
-    // device inside its own directory. Absent or invalid: unchanged behaviour.
+    // device inside its own directory. Absent or invalid: unchanged behavior.
     web_sys::window()
         .and_then(|w| js_sys::Reflect::get(&w, &wasm_bindgen::JsValue::from_str("__conecsa_base_url")).ok())
         .and_then(|v| v.as_string())
@@ -166,7 +169,6 @@ pub fn get_node_red_url(token: Option<&str>) -> String {
     }
 }
 
-/// Format size.
 pub fn format_size(size: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;

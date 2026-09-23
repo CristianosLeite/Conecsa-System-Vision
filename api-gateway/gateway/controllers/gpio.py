@@ -1,5 +1,9 @@
-"""GPIO controller: trigger-output enable/disable and direct pin control via
-the os hardware agent."""
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""GPIO controller: trigger-mode enable/disable and direct output-pin control
+via the `os-base` hardware agent."""
 import logging
 
 from flask import request

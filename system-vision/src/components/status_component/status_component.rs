@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api::get_system_metrics;
 use crate::i18n::*;
@@ -9,7 +11,6 @@ use leptos::task::spawn_local;
 use super::metrics_grid::SystemMetricsGrid;
 use super::SystemMetrics;
 
-/// The `StatusComponent` view component.
 #[component]
 pub fn StatusComponent() -> impl IntoView {
     let i18n = use_i18n();

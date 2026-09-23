@@ -1,0 +1,18 @@
+HTTP/1.1 200 OK
+Content-Type: multipart/x-mixed-replace; boundary=conecsaframe
+Connection: close
+
+--conecsaframe
+Content-Type: image/jpeg
+Content-Length: 21
+X-Frame-Seq: 1
+X-Encode-Ms: 4
+
+ÿØconecsa-frame-oneÿÙ
+--conecsaframe
+Content-Type: image/jpeg
+Content-Length: 22
+X-Frame-Seq: 2
+X-Encode-Ms: 4
+
+ÿØconecsa-frame-two!ÿÙ

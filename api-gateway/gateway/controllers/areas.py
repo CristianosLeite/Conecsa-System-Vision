@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Detection-areas controller: CRUD, shape selection and move/resize commands
 on the inference-service's detection areas."""
 import grpc

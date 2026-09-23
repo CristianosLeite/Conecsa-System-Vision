@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api::fetch_api;
 use crate::app::get_node_red_url;
@@ -14,8 +16,6 @@ struct FlowToken {
     token: String,
 }
 
-/// The `Flow` view component.
-///
 /// The editor iframe is opened only after an editor token was requested from
 /// the gateway: Node-RED's admin API is behind `adminAuth`, and the token
 /// (passed as `?access_token=`) is what the editor sends on every admin call.

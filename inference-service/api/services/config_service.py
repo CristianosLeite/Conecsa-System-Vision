@@ -1,9 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Config service - reads and applies the app capture/inference configuration.
 
-Holds the business logic that used to live in ConfigController so both the REST
-controller and the gRPC servicer stay thin adapters that delegate here.
+Holds the business logic so the gRPC servicer stays a thin adapter that
+delegates here.
 """
+import contextlib
 import logging
 from typing import Dict, Tuple
 
@@ -25,10 +30,14 @@ class ConfigService:
     """Owns get/update of the capture device + framerate + confidence threshold,
     proxying camera changes to the webcam-server and persisting per-model."""
 
-    def __init__(self, config, video_service=None, settings_service=None):
+    def __init__(self, config, video_service=None, settings_service=None,
+                 lifecycle_lock=None):
         self._config = config
         self._video = video_service
         self._settings = settings_service
+        # ModelService.op_lock: a concurrent model select or activation must not
+        # swap the settings file between a change and its save.
+        self._lifecycle_lock = lifecycle_lock or contextlib.nullcontext()
 
     def get_config(self) -> Dict:
         """Return the current configuration (device, resolution, thresholds, …)."""
@@ -74,14 +83,15 @@ class ConfigService:
             if webcam_patch and self._video is not None:
                 if not self._video.apply_webcam_server_config(webcam_patch):
                     return False, _WEBCAM_UNREACHABLE, 503
-            if camera_index is not None:
-                c.CAPTURE_DEVICE = f"/dev/video{camera_index}"
-            if framerate is not None:
-                c.CAPTURE_FRAMERATE = framerate
-            if confidence is not None:
-                c.CONFIDENCE_THRESHOLD = confidence
-            if self._settings is not None:
-                self._settings.save()
+            with self._lifecycle_lock:
+                if camera_index is not None:
+                    c.CAPTURE_DEVICE = f"/dev/video{camera_index}"
+                if framerate is not None:
+                    c.CAPTURE_FRAMERATE = framerate
+                if confidence is not None:
+                    c.CONFIDENCE_THRESHOLD = confidence
+                if self._settings is not None:
+                    self._settings.save()
             return True, "Configuration updated", 200
         except Exception as ex:  # noqa: BLE001
             logger.error("Error updating config: %s", ex)

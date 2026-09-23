@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
@@ -10,7 +12,7 @@ use crate::i18n::*;
 /// Live combined-camera preview + capture button. The preview MJPEG comes from
 /// the gateway (CPU-only stereo combine), so it works while inference is
 /// stopped; captured frames land in the dataset at its storage geometry
-/// (640×640 letterboxed historically, or the native 16:9 frame for
+/// (640×640 letterboxed for older datasets, or the native 16:9 frame for
 /// native-resolution datasets — the label canvas follows the real size).
 ///
 /// The standard image-adjustment overlay (exposure / RGB / gamma / gain) sits

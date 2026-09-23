@@ -1,15 +1,15 @@
 # Fleet hub (`hub-vision`)
 
 `conecsa-hub-vision` is a native (Tauri 2 + Leptos) desktop **hub** for a fleet
-of `conecsa-system-vision` devices (Jetsons). It is **not** part of the
+of **Conecsa System Vision** devices (Jetsons). It is **not** part of the
 `docker-compose` stack and **not** containerized — it is built separately (see
 [Build](#build)) and installed on a hub machine that sits on the same LAN as the
 devices. It can also run **on a Jetson itself**, auto-started at boot as a
 Wayland kiosk on the DisplayPort (see
 [Jetson kiosk deployment](#jetson-kiosk-deployment)).
 
-It is the single authenticated, secure entry point to the fleet. It does **not**
-drive the devices directly. Instead it:
+It is the authenticated entry point to the fleet (see
+[Architecture](../architecture.md#fleet-hub-hub-vision)). It:
 
 - **authenticates** operators (login required for every action),
 - **discovers** devices on the LAN via mDNS (`_conecsa._tcp`),
@@ -87,18 +87,19 @@ The hub therefore relays its own wall clock on the two paths that work:
   device only honours it on a request the nginx terminator verified, so no other
   container on its compose network can move the clock.
 
-The device applies the time through its privileged `os` agent
+The device applies the time through the `os-base` hardware agent
 (`SetSystemTime`), which refuses anything older than the floor persisted by the
 host's `conecsa-fake-hwclock` units — a hub that lost its own time (the kiosk
 runs on a Jetson too) can never drag a device backwards. Those same units
 restore the floor at boot and save it every 15 minutes and at shutdown, so a
-power cut no longer returns the device to 1970. Where there *is* internet,
-timesyncd still refines everything on top.
+power cut does not return the device to 1970. Where there *is* internet,
+timesyncd refines the time on top.
 
 ## Detection pull
 
 The hub **pulls** detections; there is no inbound ingestion server. For each
-paired, online device it polls `/api/v1/detections/snapshot` over mTLS, de-dupes,
+paired, online device it polls `/api/v1/detections/snapshot` over mTLS every
+second, de-dupes,
 and stores new records (only when the detection total is greater than zero).
 Collection runs in the background whenever the hub app is open, independent of the
 login session.
@@ -107,8 +108,12 @@ Records store the **clean** frame (no overlay) plus each detection's
 normalized bbox coordinates: when the cheap poll shows the device reports
 `bbox`, the full fetch asks for `raw_frame` instead of the annotated frame
 (still one JPEG per record). The Records preview redraws the boxes
-client-side over the image. Devices running an older firmware keep working —
-their records store the annotated frame and render with no overlay.
+client-side over the image. A classification device's snapshot (`task:
+classify`) is recorded with the clean frame too, and the preview names the
+frame's class in a chip instead of a box. A segmentation record also keeps
+each object's outline (`polygons`), which the preview draws under the boxes.
+Devices running older firmware keep working — their records store the
+annotated frame and render with no overlay.
 
 ### Offline coverage (backlog drain)
 
@@ -117,11 +122,14 @@ lost: the device buffers them on disk (see the
 [inference-service offline buffer](inference-service.md)) and the snapshot
 advertises the pending count. When the collector sees `pending_backlog > 0` it
 drains the backlog first — paging through `/api/v1/detections/backlog` (25
-records per page, byte-trimmed by the device with a ~3MB stored-bytes soft cap
-(after the first record) so pages typically stay within transport limits, up to 40 pages per 1s cycle), inserting each page
+records per page, trimmed by the device so a page stays within transport
+limits), inserting each page
 **transactionally into the store** and acking only after the insert commits,
 so the device deletes a record only once the hub has durably persisted it. A
-failed insert or ack simply retries on the next cycle. Each record's
+failed insert or ack simply retries on the next cycle. Each record keeps the
+task it was captured under (records outlive an application switch, so the
+device's current task is never used; a record from older firmware has none and
+is stored as a detection record). Each record's
 `received_at` is reconstructed from its device-side capture age
 (`device_now - captured_at`, both from the device's clock, so any absolute
 clock error cancels): the offline window appears spread over real time in the
@@ -139,7 +147,12 @@ ships the clean image to the device's pre-labeled ingest route
 (`POST /api/v1/training/datasets/<id>/images`). The detection coordinates
 become the image's YOLO labels (letterboxed device-side; class names are
 resolved or created on the dataset), so in the device's label editor the
-operator only fixes the class — no re-drawing. Legacy records (annotated
+operator only fixes the class — no re-drawing. A classification record feeds
+a classification dataset instead: the frame's class becomes the image's
+label (`image_class`, by name). A segmentation record feeds a segmentation
+dataset with its outlines as polygon pre-labels (`polygons`, by class name).
+The picker lists only datasets of the record's kind, and the hub reads the
+target dataset's task before sending. Records from older firmware (annotated
 frame, no coordinates) cannot be exported.
 
 ## Audit trail
@@ -221,7 +234,8 @@ The **Datasets** page (owner/admin only) lists every dataset on every paired,
 online device, grouped per device — each shown as the same cover-image card
 the device UI uses (covers travel over the mTLS channel; a device that fails
 to answer shows an inline error in its own group without affecting the
-others). Clicking a card opens a **read-only image gallery** of the dataset:
+others). Each card names the task the dataset is labeled for. Clicking a
+card opens a **read-only image gallery** of the dataset:
 thumbnails are fetched over mTLS page by page (24 at a time), and labeled
 images show their box count. Datasets are not editable from the hub; the card
 actions are:
@@ -244,7 +258,8 @@ actions are:
 ## Recipes
 
 A **recipe** names a fleet-wide state: for **every paired device**, which model
-to load and which confidence and overlap (IoU/NMS) thresholds to apply. Loading
+to load and which confidence and overlay thresholds to apply (the overlay
+threshold is the IoU above which overlapping boxes are suppressed). Loading
 one puts the whole fleet into that state in a single action, instead of
 configuring each device from its own UI.
 
@@ -270,7 +285,11 @@ tooltip, and its **Load** action disabled until it is edited — when:
 - the recipe names a device this hub is **no longer paired** with, or
 - a device was **paired after** the recipe was saved, so the recipe does not
   cover it. Opening **Edit** pre-fills the new device's row with its current
-  values, so saving fixes it.
+  values, so saving fixes it,
+- an **online** device has **no application type** chosen yet — it can load
+  no model until an administrator picks one, or
+- the recipe's model belongs to **another application** than the one the
+  device runs (the device refuses to activate it).
 
 A device that is merely **offline** does not, by itself, invalidate a recipe:
 its model list is *unknown*, not empty, so a *missing* model cannot be
@@ -345,7 +364,7 @@ the hub. A wrong or missing key gets `401`, an unpaired device id `404`, an
 offline device `503`.
 
 Only `/api/...` is forwardable (the api-gateway surface: `/api/v1/*` and the
-legacy `/api/*` aliases). `/enroll/*` — which can reset a device's pairing —
+[short `/api/*` aliases](../api-reference.md#short-api-aliases)). `/enroll/*` — which can reset a device's pairing —
 `/flow/*` and the UI shell are not reachable this way; a path with a `.` or
 `..` segment (raw or percent-encoded), which the device's nginx would
 normalize out of `/api`, is refused with `400`. Bodies are piped in both
@@ -394,8 +413,8 @@ from, rounds and epochs per round; a confirmation modal warns that **object
 detection stops on the whole fleet** (the same gate as the device UI's
 training entry) and lists the participants.
 
-The coordinator (the `src/federated/` module) then drives one job at a time
-through phases the page polls every second:
+The hub then runs one federated job at a time through these phases, which the
+page follows live:
 
 1. **entering** — when a base model was chosen, its checkpoint is first
    fetched from the source device (before any inference stops, so a missing
@@ -427,9 +446,11 @@ before any weights are averaged — because averaging checkpoints trained at
 different scales would silently corrupt the model.
 
 Preflight requires every paired device online (synchronous FedAvg needs all
-participants), at least two of them, and a dataset large enough that each
+participants), at least two of them, every one running the application the
+dataset is labeled for (a segmentation dataset cannot train on a detection
+device), and a dataset large enough that each
 shard still passes the device training gates (≥ 20 images and ≥ 2 labeled per
-shard). On failure or cancel the coordinator best-effort cancels device jobs
+shard). On failure or cancel the hub best-effort cancels device jobs
 and resumes the inference runtimes; stale weight blobs are pruned device-side
 by TTL. See [training-service](training-service.md#federated-training-hub-orchestrated-fedavg)
 for the device-side building blocks.
@@ -443,14 +464,18 @@ but it is **disabled** (`HUB_MDNS_ENABLED=0`) because the container is on a
 docker bridge and would only announce its unreachable bridge IP.
 
 The hub browses passively and lists discovered devices under **Devices**.
-**Open** embeds that device's main page in the hub.
+**Open** embeds that device's main page in the hub. Each row shows the
+device's application type next to its name, as the device last reported it
+— kept while the device is offline; a type this hub does not know reads
+*Unsupported application*.
 
 ## Storage
 
 SQLite is the default (a file under the app data directory). External backends
 are configured in **Settings**, each with **Test connection** (health check) and
 **Generate schema** (DDL, which creates `devices`, `detections` and
-`audit_events`):
+`audit_events`; a `devices` table created by an older hub gains its `task`
+column the next time the schema is initialized):
 
 | Backend | Notes |
 |---|---|
@@ -539,7 +564,12 @@ Kiosk specifics:
 - **Self-management**: the kiosk hub discovers the device it runs on via mDNS
   like any other device (multicast loopback), so a single Jetson can be both a
   managed device and the fleet hub.
-- **WebKit workarounds** (set by the wrapper, root-caused on the device):
+- **WebKit workarounds** (set by the wrapper):
   `WEBKIT_DISABLE_DMABUF_RENDERER=1` (DMABUF path broken with NVIDIA EGL) and
   `JSC_useBBQJIT=false` / `JSC_useOMGJIT=false` (the wasm JITs SIGABRT on this
-  aarch64 build; LLInt interpretation is stable).
+  aarch64 build; LLInt interpretation is stable). Without them the window
+  stays empty and the audit log shows `ANOM_ABEND` for `WebKitWebProcess`.
+- **Blank window with `Could not connect to localhost`**: the binary was built
+  without `tauri/custom-protocol` (a plain `cargo build`), so it loads the dev
+  server URL instead of the embedded assets. Always deploy with
+  `scripts/build-hub-jetson.sh`, whose Dockerfile passes the feature.

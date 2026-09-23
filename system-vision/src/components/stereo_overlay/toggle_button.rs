@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The "3D" toggle button that shows/hides the stereo overlay alignment panel.
 
 use super::PANEL_ID;

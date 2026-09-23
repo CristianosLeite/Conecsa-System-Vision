@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Per-image routes: camera capture, labeled-image upload, listing, JPEG
 retrieval, deletion, replication and the YOLO label editor."""
 import grpc
@@ -6,7 +10,17 @@ from flask import Response, request
 from ..config import settings
 from ..grpc_clients import clients, trn
 from . import training_bp
-from .helpers import _grpc_error, _json, _json_error, _parse_named_boxes, _result
+from .helpers import (
+    _grpc_error,
+    _image_info_dict,
+    _json,
+    _json_error,
+    _labels_dict,
+    _labels_message,
+    _parse_named_boxes,
+    _parse_named_polygons,
+    _result,
+)
 
 
 @training_bp.route("/api/v1/training/datasets/<dataset_id>/capture", methods=["POST"])
@@ -16,13 +30,7 @@ def training_capture(dataset_id):
         info = clients.training.CaptureImage(trn.DatasetId(dataset_id=dataset_id))
     except grpc.RpcError as exc:
         return _grpc_error(exc)
-    return _json({
-        "image_id": info.image_id,
-        "created_at": info.created_at,
-        "labeled": info.labeled,
-        "box_count": info.box_count,
-        "replica": info.replica,
-    })
+    return _json(_image_info_dict(info))
 
 
 @training_bp.route("/api/v1/training/datasets/<dataset_id>/images", methods=["POST"])
@@ -32,8 +40,12 @@ def training_image_add(dataset_id):
         return _json_error("No file provided")
     try:
         boxes = _parse_named_boxes(request.form.get("boxes", "[]"))
+        # A segment dataset's pre-labels: rings by class name.
+        polygons = _parse_named_polygons(request.form.get("polygons", "[]"))
     except ValueError as exc:
         return _json_error(str(exc))
+    # A classify dataset's pre-label: the image's class by name ("" = none).
+    image_class = (request.form.get("image_class") or "").strip()
     # Bounded read: the image travels as one gRPC message, so an oversized
     # body must be refused here rather than buffered whole and rejected later.
     cap = settings.MAX_IMAGE_UPLOAD_BYTES
@@ -46,16 +58,12 @@ def training_image_add(dataset_id):
             dataset_id=dataset_id,
             jpeg=jpeg,
             boxes=boxes,
+            polygons=polygons,
+            image_class=image_class,
         ))
     except grpc.RpcError as exc:
         return _grpc_error(exc)
-    return _json({
-        "image_id": info.image_id,
-        "created_at": info.created_at,
-        "labeled": info.labeled,
-        "box_count": info.box_count,
-        "replica": info.replica,
-    }, 201)
+    return _json(_image_info_dict(info), 201)
 
 
 @training_bp.route("/api/v1/training/datasets/<dataset_id>/images", methods=["GET"])
@@ -65,11 +73,7 @@ def training_images(dataset_id):
         lst = clients.training.ListImages(trn.DatasetId(dataset_id=dataset_id))
     except grpc.RpcError as exc:
         return _grpc_error(exc)
-    return _json({"images": [
-        {"image_id": i.image_id, "created_at": i.created_at,
-         "labeled": i.labeled, "box_count": i.box_count, "replica": i.replica}
-        for i in lst.images
-    ]})
+    return _json({"images": [_image_info_dict(i) for i in lst.images]})
 
 
 @training_bp.route("/api/v1/training/datasets/<dataset_id>/images/<image_id>",
@@ -125,10 +129,7 @@ def training_labels_get(dataset_id, image_id):
             trn.ImageId(dataset_id=dataset_id, image_id=image_id))
     except grpc.RpcError as exc:
         return _grpc_error(exc)
-    return _json({"image_id": labels.image_id, "boxes": [
-        {"class_id": b.class_id, "cx": b.cx, "cy": b.cy, "w": b.w, "h": b.h}
-        for b in labels.boxes
-    ]})
+    return _json(_labels_dict(labels))
 
 
 @training_bp.route("/api/v1/training/datasets/<dataset_id>/images/<image_id>/labels",
@@ -136,20 +137,10 @@ def training_labels_get(dataset_id, image_id):
 def training_labels_put(dataset_id, image_id):
     """PUT /api/v1/training/datasets/<dataset_id>/images/<image_id>/labels — gateway relay."""
     body = request.get_json(silent=True) or {}
-    boxes = body.get("boxes")
-    if not isinstance(boxes, list):
-        return _json_error("Body must contain a 'boxes' list")
-    if not all(isinstance(b, dict) for b in boxes):
-        return _json_error("Malformed box entry")
     try:
-        msg = trn.Labels(dataset_id=dataset_id, image_id=image_id, boxes=[
-            trn.Box(class_id=int(b.get("class_id", 0)),
-                    cx=float(b.get("cx", 0)), cy=float(b.get("cy", 0)),
-                    w=float(b.get("w", 0)), h=float(b.get("h", 0)))
-            for b in boxes
-        ])
-    except (TypeError, ValueError):
-        return _json_error("Malformed box entry")
+        msg = _labels_message(dataset_id, image_id, body)
+    except ValueError as exc:
+        return _json_error(str(exc))
     try:
         return _result(clients.training.SetLabels(msg))
     except grpc.RpcError as exc:

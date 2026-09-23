@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 "use strict";
 const http = require("http");
 const { request, subscribeSSE, inferenceBaseUrl, normalizeTarget } = require("../lib/http-client");

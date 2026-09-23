@@ -1,4 +1,9 @@
 #!/bin/sh
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Node-RED keeps its config (settings.js, theme, logo) and user data (flows,
 # credentials) in the same /data volume. A named volume is populated only once,
 # so image updates to settings.js would otherwise never reach an existing

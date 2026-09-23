@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the federated weights stash (WeightsStore)."""
 import os
 import time
@@ -94,3 +98,49 @@ class TestPrune:
             store.path(stale_id)
         store.path(fresh_id)  # untouched
         assert os.path.exists(foreign)  # non-store files are never pruned
+
+    def test_a_stale_task_sidecar_goes_with_its_blob(self, store, cfg):
+        stale_id, _ = store.save_stream([b"old"], task="classify")
+        sidecar = os.path.join(cfg.weights_dir, f"{stale_id}.task")
+        old = time.time() - cfg.WEIGHTS_TTL_SEC - 10
+        os.utime(store.path(stale_id), (old, old))
+        os.utime(sidecar, (old, old))
+        store.prune()
+        assert not os.path.exists(sidecar)
+
+
+class TestTask:
+    """A checkpoint remembers the task it was trained for."""
+
+    def test_an_upload_records_its_task(self, store):
+        weights_id, _ = store.save_stream([b"x"], task="classify")
+        assert store.task_of(weights_id) == "classify"
+
+    def test_an_unknown_task_reads_as_empty(self, store):
+        weights_id, _ = store.save_stream([b"x"])
+        assert store.task_of(weights_id) == ""
+        assert store.task_of("0" * 32) == ""
+
+    def test_a_stash_records_its_task(self, store, tmp_path):
+        src = tmp_path / "last.pt"
+        src.write_bytes(b"checkpoint")
+        assert store.task_of(store.stash_file(str(src), task="detect")) == "detect"
+
+    def test_delete_removes_the_sidecar(self, store, cfg):
+        weights_id, _ = store.save_stream([b"x"], task="classify")
+        store.delete(weights_id)
+        assert os.listdir(cfg.weights_dir) == []
+
+    def test_a_failed_upload_leaves_no_sidecar(self, store, cfg):
+        with pytest.raises(DatasetError):
+            store.save_stream([], task="classify")
+        assert os.listdir(cfg.weights_dir) == []
+
+    def test_both_base_weights_are_linked_into_the_store(self, cfg, tmp_path):
+        for name in ("yolo26s.pt", "yolo26s-cls.pt"):
+            (tmp_path / name).write_bytes(b"base")
+        cfg.BASE_WEIGHTS = str(tmp_path / "yolo26s.pt")
+        cfg.BASE_WEIGHTS_CLS = str(tmp_path / "yolo26s-cls.pt")
+        WeightsStore(cfg)
+        linked = sorted(e for e in os.listdir(cfg.weights_dir) if e.startswith("yolo26s"))
+        assert linked == ["yolo26s-cls.pt", "yolo26s.pt"]

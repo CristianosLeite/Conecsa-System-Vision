@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Single authority for model filenames: the extension allowlist and the
 traversal-safe name check.
 
@@ -13,7 +17,7 @@ from pathlib import Path
 from typing import Tuple
 
 # Everything the model API accepts and lists.
-ALLOWED_MODEL_EXTENSIONS = ('.engine', '.plan', '.pt', '.onnx')
+ALLOWED_MODEL_EXTENSIONS = ('.engine', '.plan', '.pt', '.onnx', '.faces')
 
 # What the TensorRT runtime can load or build from (no .pt — those convert first).
 TENSORRT_MODEL_EXTENSIONS = ('.engine', '.plan', '.onnx')

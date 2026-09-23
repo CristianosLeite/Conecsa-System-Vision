@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Audit buffer — the device's own record of what users did to it.
 
 Every mutating request that reaches the gateway is appended to a small SQLite

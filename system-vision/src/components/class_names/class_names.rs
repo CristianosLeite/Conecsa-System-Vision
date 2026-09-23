@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api;
 use crate::i18n::*;
@@ -10,12 +12,15 @@ use super::actions::ClassActions;
 use super::editor::ClassEditor;
 use super::list::ClassList;
 
-/// The `ClassNames` view component.
 #[component]
 pub fn ClassNames(
     refresh_classes: ReadSignal<u32>,
     set_error_msg: WriteSignal<String>,
     set_success_msg: WriteSignal<String>,
+    /// The device runs face recognition: the list names the enrolled people
+    /// and must keep their count and order (the device refuses otherwise).
+    #[prop(optional, into)]
+    face: Signal<bool>,
 ) -> impl IntoView {
     let i18n = use_i18n();
     let privileged = crate::components::access::privileged();
@@ -164,6 +169,7 @@ pub fn ClassNames(
                     <ClassEditor
                         edited_classes_text=edited_classes_text
                         set_edited_classes_text=set_edited_classes_text
+                        face=face
                     />
                 }.into_any()
             } else {

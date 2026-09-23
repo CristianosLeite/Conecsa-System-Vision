@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Detection controller: run state (status/start/stop), confidence thresholds,
 stats and the detections snapshot."""
 import logging
@@ -34,9 +38,46 @@ def _camera_connected(status) -> bool:
     camera gate leaves it absent rather than sending false. Defaulting that to
     false would fail closed — the gateway would refuse every Start with a 409
     until inference is upgraded too. Unset means "no gate on the producer",
-    which is exactly the pre-gate behaviour: let detection start.
+    which is exactly the ungated behavior: let detection start.
     """
     return status.camera_connected if status.HasField("camera_connected") else True
+
+
+def _status_task(status) -> dict:
+    """StatusResponse.task for JSON clients, as the keys to merge into the body.
+
+    ``{"task": None}`` while none is chosen. An inference-service that predates
+    application types leaves the field absent, and the key is omitted then:
+    the hub reads a missing key as older firmware (no guard) and ``null`` as
+    "unset", so collapsing the two would guard a device that merely lags.
+    """
+    if not status.HasField("task"):
+        return {}
+    return {"task": status.task or None}
+
+
+def _application_unset(status) -> bool:
+    """True only when the producer knows application types and none is chosen.
+
+    Presence decides, like ``camera_connected``: an absent field comes from an
+    inference-service that predates the feature, so it must not block Start
+    during a rolling upgrade.
+    """
+    return status.HasField("task") and not status.task
+
+
+def _status_segment(status) -> dict:
+    """The segmentation instance limit in effect, when the inference-service reports one."""
+    if status.HasField("segment_max_instances"):
+        return {"segment_max_instances": status.segment_max_instances}
+    return {}
+
+
+def _status_face(status) -> dict:
+    """The face recognition settings in effect, when the inference-service reports them."""
+    return {key: getattr(status, key)
+            for key in ("face_match_threshold", "face_min_size_px", "face_max_faces")
+            if status.HasField(key)}
 
 
 @api_bp.route('/api/v1/status', methods=['GET'])
@@ -57,6 +98,11 @@ def get_status():
         r.stats.frames_with_detections = int(s.stats.frames_with_detections)
         r.protocols.http_port = 5000
         r.camera_connected = _camera_connected(s)
+        # Left unset (not empty) for an older inference-service, like the JSON key.
+        if s.HasField("task"):
+            r.task = s.task
+        for key, value in {**_status_segment(s), **_status_face(s)}.items():
+            setattr(r, key, value)
         return _protobuf(r)
     return _json({
         "is_running": s.is_running,
@@ -67,6 +113,9 @@ def get_status():
         "acceleration_type": s.acceleration_type,
         "runtime_type": s.runtime_type,
         "camera_connected": _camera_connected(s),
+        **_status_task(s),
+        **_status_segment(s),
+        **_status_face(s),
         "stats": {
             "fps": s.stats.fps,
             "inference_time": s.stats.inference_time,
@@ -89,6 +138,14 @@ def start_detection():
                 return _protobuf(det_pb.StartDetectionResponse(
                     success=False, message="Detection already running"), 400)
             return _json_error("Detection already running", 400)
+        # A blank device has no application type: nothing may run until an
+        # administrator chooses one (the inference-service refuses as well).
+        if _application_unset(status):
+            msg = ("No application type is selected. An administrator must choose "
+                   "one before starting detection.")
+            if _accepts_protobuf():
+                return _protobuf(det_pb.StartDetectionResponse(success=False, message=msg), 409)
+            return _json_error(msg, 409)
         # Without a camera the webcam-server publishes no frames at all, so
         # detection would run blind — refuse before touching inference.
         if not _camera_connected(status):
@@ -240,6 +297,80 @@ def set_overlay_threshold():
                                data={"overlay_threshold": threshold})
 
 
+@api_bp.route('/api/v1/segment/max_instances', methods=['POST'])
+def set_segment_max_instances():
+    """POST /api/v1/segment/max_instances — segmentation instance limit.
+
+    JSON ``{"max_instances": n}``, an integer 1..255 that caps the instances
+    per frame and per tile; saved with the active model's settings, like the
+    thresholds, and announced on the same ``thresholds`` event key.
+    """
+    body = request.get_json(silent=True)
+    value = body.get("max_instances") if isinstance(body, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 255:
+        return _json({"success": False,
+                      "message": "max_instances must be an integer between 1 and 255"}, 400)
+    try:
+        r = clients.detection.SetSegmentMaxInstances(
+            inf.SegmentMaxInstancesRequest(max_instances=value))
+    except grpc.RpcError as exc:
+        return _grpc_error(exc)
+    if not r.success:
+        return _json({"success": False, "message": r.message}, 400)
+    resp = _json({"success": True, "message": "Instance limit updated", "max_instances": value})
+    return _publish_if_success(resp, "thresholds_changed", ["status", "thresholds"],
+                               data={"segment_max_instances": value})
+
+
+def _face_setting(body: dict, key: str, valid):
+    """``(present, value, error)`` for one optional field of the face settings body."""
+    if key not in body:
+        return False, None, None
+    value = body[key]
+    if isinstance(value, bool) or not valid(value):
+        return True, None, key
+    return True, value, None
+
+
+@api_bp.route('/api/v1/face/settings', methods=['POST'])
+def set_face_settings():
+    """POST /api/v1/face/settings — face recognition settings.
+
+    JSON with any of ``match_threshold`` (number 0..1, the cosine similarity a
+    face must exceed to be named), ``min_size_px`` (integer 0..1024) and
+    ``max_faces`` (integer 1..20); saved with the active model's settings and
+    announced on the ``thresholds`` event key.
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _json({"success": False, "message": "A JSON object is required"}, 400)
+    fields = {
+        "match_threshold": lambda v: isinstance(v, (int, float)) and 0.0 <= v <= 1.0,
+        "min_size_px": lambda v: isinstance(v, int) and 0 <= v <= 1024,
+        "max_faces": lambda v: isinstance(v, int) and 1 <= v <= 20,
+    }
+    changes = {}
+    for key, valid in fields.items():
+        present, value, error = _face_setting(body, key, valid)
+        if error:
+            return _json({"success": False,
+                          "message": f"{error} is out of range or not a number"}, 400)
+        if present:
+            changes[key] = value
+    if not changes:
+        return _json({"success": False,
+                      "message": "Give match_threshold, min_size_px or max_faces"}, 400)
+    try:
+        r = clients.detection.SetFaceSettings(inf.FaceSettingsRequest(**changes))
+    except grpc.RpcError as exc:
+        return _grpc_error(exc)
+    if not r.success:
+        return _json({"success": False, "message": r.message}, 400)
+    resp = _json({"success": True, "message": "Face settings updated", **changes})
+    return _publish_if_success(resp, "thresholds_changed", ["status", "thresholds"],
+                               data={f"face_{k}": v for k, v in changes.items()})
+
+
 @api_bp.route('/api/v1/stats', methods=['GET'])
 def get_stats():
     """GET /api/v1/stats — gateway relay."""
@@ -252,6 +383,15 @@ def get_stats():
         "inference_time": s.inference_time,
         "detections": s.detections,
         "frames_with_detections": s.frames_with_detections,
+        # Pipeline service times in ms (benchmark protocol): stage C
+        # (postprocess), stage D (encode + publish) and the age of a frame
+        # from its pickup off the camera ring to its publication.
+        "finish_mean_ms": s.finish_mean_ms,
+        "finish_p95_ms": s.finish_p95_ms,
+        "finish_p99_ms": s.finish_p99_ms,
+        "encode_mean_ms": s.encode_mean_ms,
+        "encode_p95_ms": s.encode_p95_ms,
+        "frame_age_p95_ms": s.frame_age_p95_ms,
     })
 
 
@@ -276,7 +416,12 @@ def get_detections_snapshot():
     # consumers (Flow nodes hitting the gateway directly) must not feed the
     # offline-buffer's hub-is-online heartbeat, even if they spoof the header —
     # _hub_verified also checks that the peer is the terminator itself.
-    hub_pull = _hub_verified()
+    # ``passive=true`` marks a reader that is never the heartbeat even through
+    # the terminator: the device UI's classification panel polls this route
+    # while the device is open in the hub. The flag can only
+    # switch counting off, so a spoofed value is harmless.
+    passive = request.args.get("passive", "false").lower() == "true"
+    hub_pull = not passive and _hub_verified()
     try:
         # proto3 bool default is false; set it explicitly to match HTTP default-true.
         r = clients.detection.Snapshot(inf.SnapshotRequest(

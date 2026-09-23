@@ -1,0 +1,5 @@
+# Conecsa kiosk: weston is skipped at boot when no display is connected (see
+# the ExecCondition in weston.service.d/10-conecsa-kiosk.conf). A DRM hotplug
+# event asks systemd to start it; the condition runs again, so an unplug event
+# or a still-disconnected connector changes nothing.
+ACTION=="change", SUBSYSTEM=="drm", ENV{HOTPLUG}=="1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="weston.service"

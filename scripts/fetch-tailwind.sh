@@ -1,11 +1,15 @@
 #!/bin/bash
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Ensure bin/tailwindcss is the pinned Tailwind CSS standalone CLI.
 #
-# scripts/build.sh, scripts/build-hub.sh and scripts/dev.sh used to download
-# `releases/latest` once and keep whatever they got, so every workstation
-# silently held a different Tailwind and none was verified. This script reads
-# scripts/tailwind.pin, verifies the cached binary against the pinned SHA256
-# for this architecture, and (re)downloads and verifies it on any mismatch.
+# Used by scripts/build.sh, scripts/build-hub.sh and scripts/dev.sh so every
+# workstation runs the same verified Tailwind. Reads scripts/tailwind.pin,
+# verifies the cached binary against the pinned SHA256 for this architecture,
+# and (re)downloads and verifies it on any mismatch.
 # Prints nothing on the happy path; exits non-zero when the download does not
 # match the pin.
 set -euo pipefail

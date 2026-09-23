@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! 3D stereo overlay alignment control: a button over the live video (shown
 //! only when the stereo overlay is enabled in Camera Settings) that reveals a
 //! Blend / Horizontal / Vertical alignment panel. Self-fetches its state from
@@ -18,7 +22,6 @@ fn push_stereo(alpha: f32, offset: f32, offset_y: f32) {
     });
 }
 
-/// The `StereoOverlay` view component.
 #[component]
 pub fn StereoOverlay(
     /// Bumped on model select; stereo settings are per-model, so re-fetch.
@@ -39,7 +42,10 @@ pub fn StereoOverlay(
         let _ = camera_refresh.get();
         spawn_local(async move {
             if let Ok(resp) = api::get_camera_devices().await {
-                set_enabled.set(resp.current_stereo_enabled);
+                // A remote camera frame is never side by side: no 3D button for it.
+                set_enabled.set(
+                    resp.current_stereo_enabled && resp.current_source != api::SOURCE_NETWORK,
+                );
                 set_alpha.set(resp.current_stereo_blend_alpha);
                 set_offset_x.set(resp.current_stereo_offset);
                 set_offset_y.set(resp.current_stereo_offset_y);

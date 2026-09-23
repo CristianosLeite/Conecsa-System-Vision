@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file detection node — per-class breakdown of the active detections.
  *   `on-change` or interval mode; can include the processed frame as base64.

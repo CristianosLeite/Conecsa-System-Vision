@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Generated protobuf messages for the detection REST API (`detection.proto`).
 
 /// Generated protobuf messages for the detection API

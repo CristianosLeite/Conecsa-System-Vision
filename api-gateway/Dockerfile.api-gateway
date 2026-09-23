@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # ============================================================================
 # API gateway image. A thin HTTP↔gRPC/SHM interface in front of the headless
 # inference-service. Inherits the shared stack (Python + grpcio + protobuf +
@@ -15,8 +19,11 @@ RUN pip install --no-cache-dir --root-user-action=ignore -r /app/requirements.tx
 
 ENV PYTHONPATH=/app/api-gateway:/usr/lib/python3.10/dist-packages:/usr/local/lib/python3.10/dist-packages
 
-# Application code
 COPY api-gateway/ /app/api-gateway/
+
+# The gateway's own third-party notices, next to the base table it inherits.
+RUN install -Dm644 /app/api-gateway/THIRD-PARTY-NOTICES.md \
+        /usr/share/doc/conecsa/THIRD-PARTY-NOTICES-api-gateway.md
 
 # Compile the proto files the gateway consumes (inference control + hardware
 # agent) plus the detection schemas used for protobuf content-negotiation.

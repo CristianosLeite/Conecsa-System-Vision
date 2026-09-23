@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Orphaned-training-mode watchdog.
 
 Training mode (inference runtime released) is entered and exited only by

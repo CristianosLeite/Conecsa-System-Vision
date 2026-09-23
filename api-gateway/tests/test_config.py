@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the gateway Settings and _env_float helper."""
 from gateway.config import Settings, _env_float
 
@@ -19,7 +23,7 @@ class TestEnvFloat:
 class TestSettingsDefaults:
     def test_grpc_peer_defaults(self):
         assert Settings.INFERENCE_GRPC_ADDR == "inference-service:50061"
-        assert Settings.HARDWARE_AGENT_ADDR == "os:50051"
+        assert Settings.HARDWARE_AGENT_ADDR == "os-base:50051"
         assert Settings.TRAINING_GRPC_ADDR == "training-service:50071"
 
     def test_shm_names(self):

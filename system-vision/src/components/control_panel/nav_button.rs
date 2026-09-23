@@ -1,8 +1,9 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
-/// A `ViewMode` enum.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ViewMode {
     LiveStream,
@@ -15,7 +16,6 @@ pub enum ViewMode {
     Training,
 }
 
-/// The `NavButton` view component.
 #[component]
 pub fn NavButton(
     view_mode: ViewMode,

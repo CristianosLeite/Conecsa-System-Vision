@@ -1,14 +1,17 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
 use crate::api::{training_image_url, DatasetSummary};
+use crate::components::application_select::task_label;
 use crate::i18n::*;
+use crate::models::Task;
 
 /// Cover shown for datasets without any image (static asset in system-vision/public).
 const DEFAULT_COVER: &str = "/public/dataset_default_cover.svg";
 
-/// Cover url.
 fn cover_url(ds: &DatasetSummary) -> String {
     if ds.cover_image_id.is_empty() {
         DEFAULT_COVER.to_string()
@@ -32,6 +35,8 @@ pub(super) fn DatasetCard(
     let i18n = use_i18n();
     let (image_count, labeled_count, class_count) =
         (dataset.image_count, dataset.labeled_count, dataset.class_count);
+    // The task the dataset is labeled for, named in text.
+    let task = Task::parse(&dataset.task);
     let ds_open = dataset.clone();
     let ds_export = dataset.clone();
     let ds_rename = dataset.clone();
@@ -60,6 +65,11 @@ pub(super) fn DatasetCard(
                         classes = class_count
                     )}
                 </span>
+                {task.map(|t| view! {
+                    <span class="ui-badge ui-badge-primary self-start normal-case">
+                        {move || task_label(i18n.get_locale(), t)}
+                    </span>
+                })}
             </div>
             {move || if training.get() {
                 view! {

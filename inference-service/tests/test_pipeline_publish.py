@@ -1,4 +1,8 @@
-"""Processed-frame publication is serialized with its ordering (review M5).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Processed-frame publication is serialized with its ordering.
 
 ``_publish`` used to advance the last-published sequence under the lock and
 then write to the ring outside it, so a frame that paused between the two

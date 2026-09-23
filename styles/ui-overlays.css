@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /* Stream-stage overlays, tool panels, thumbs, modals. */
 
 @layer components {
@@ -308,9 +314,19 @@
 
   .ui-modal-actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: 0.5rem;
     margin-top: 1.5rem;
+  }
+
+  /* Phones: the dialog takes the full width (minus a small gutter). */
+  @media (max-width: 767px) {
+    .ui-modal,
+    .ui-modal-sm {
+      max-width: none;
+      margin-inline: 0.75rem;
+    }
   }
   .ui-overlay-panel {
     background: var(--surface-overlay);

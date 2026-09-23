@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the pure SAM worker box helpers and load-path plumbing."""
 from types import SimpleNamespace
 
@@ -140,3 +144,28 @@ class TestStartCacheWarmer:
         _start_cache_warmer(str(tmp_path / "ckpt.pt"))
         assert len(started) == 1
         assert started[0]["daemon"] is True
+
+
+class TestMaskRings:
+    """SAM masks leave the worker as normalized rings."""
+
+    def test_a_blob_becomes_one_normalized_ring(self):
+        mask = np.zeros((1, 40, 80), np.float32)
+        mask[0, 10:30, 20:60] = 1.0
+        (ring,) = _sam_worker._mask_rings(mask, 80, 40)
+        xs, ys = [p[0] for p in ring], [p[1] for p in ring]
+        assert (min(xs), max(xs)) == (pytest.approx(20 / 80), pytest.approx(59 / 80))
+        assert (min(ys), max(ys)) == (pytest.approx(10 / 40), pytest.approx(29 / 40))
+
+    def test_a_low_resolution_mask_is_scaled_to_the_image(self):
+        mask = np.zeros((20, 40), np.float32)
+        mask[5:15, 10:30] = 1.0
+        (ring,) = _sam_worker._mask_rings(mask, 80, 40)
+        assert min(p[0] for p in ring) == pytest.approx(20 / 80, abs=0.02)
+
+    def test_an_empty_mask_has_no_rings(self):
+        assert _sam_worker._mask_rings(np.zeros((40, 80)), 80, 40) == []
+
+    def test_mask_arrays_split_the_batch(self):
+        assert len(_sam_worker._mask_arrays(np.zeros((3, 1, 4, 4)))) == 3
+        assert _sam_worker._mask_arrays(np.float32(1.0)) == []

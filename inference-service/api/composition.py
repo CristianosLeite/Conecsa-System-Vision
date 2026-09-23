@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Composition root for the headless inference-service.
 
@@ -10,6 +14,7 @@ import logging
 import os
 import threading
 
+from api import postprocess
 from api.config import Config
 from api.model_paths import ENGINE_FILE_EXTENSIONS
 from api.services import (
@@ -29,6 +34,8 @@ from api.services import (
     StatsService,
     VideoService,
 )
+from api.services.application_service import ApplicationService
+from api.services.errors import PreconditionFailed
 from api.views import OverlayRenderer
 
 logger = logging.getLogger(__name__)
@@ -82,9 +89,8 @@ def get_detections_directory():
     return local_dir
 
 
-# Initialize application components
 def _bootstrap_tensorrt_worker() -> None:
-    """Start the TRT worker process eagerly in the background.
+    """Start the TensorRT worker process eagerly in the background.
 
     The worker initializes ``pycuda.autoinit`` (and therefore the CUDA
     context) the first time it processes a command, so engine builds work
@@ -152,15 +158,23 @@ class Application:
         model_directory = get_model_directory()
         os.environ.setdefault("MODELS_DIR", model_directory)
 
-        # Configuration
         self.config = Config()
 
-        # Services
+        # The application type (detect / classify / segment) the device runs,
+        # persisted beside the models. The supported tasks are exactly the
+        # postprocess strategies this build registers.
+        self.application_service = ApplicationService(
+            model_directory, postprocess.supported_tasks())
+
         # Transport + image codec are independent services; VideoService is the
         # camera-config facade over them.
         self.consumer_service = ConsumerService(shm_name=self.config.SHM_NAME)
         self.codec_service = FrameCodecService()
-        self.video_service = VideoService(self.consumer_service, self.codec_service)
+        self.video_service = VideoService(
+            self.consumer_service, self.codec_service, model_directory=model_directory)
+        # The webcam-server recreates its segment on every start and the new
+        # one holds no config: replay ours, or the capture source is lost.
+        self.consumer_service.set_on_attach(self.video_service.republish)
 
         # Per-model thresholds + camera config (sibling weights.settings.json),
         # switched on model selection and restored at startup.
@@ -178,40 +192,50 @@ class Application:
             max_records=self.config.DETECTION_BUFFER_MAX_RECORDS,
             max_bytes=self.config.DETECTION_BUFFER_MAX_BYTES,
             offline_threshold_s=self.config.HUB_OFFLINE_THRESHOLD_SEC,
+            sample_interval_s=self.config.DETECTION_BUFFER_SAMPLE_SEC,
         )
         self.detection_service = DetectionService(
             self.config,
             area_service=self.detection_area_service,
             video_service=self.video_service,
             buffer_service=self.detection_buffer,
+            application_service=self.application_service,
         )
         self.model_service = ModelService(self.config, model_directory)
+        self.model_service.attach_application_service(self.application_service)
         self.model_service.attach_detection_service(self.detection_service)
         self.model_service.attach_area_service(self.detection_area_service)
         self.model_service.attach_settings_service(self.model_settings_service)
         self.stats_service = StatsService()
         self.event_service = EventService()
+        self.video_service.start_health_watch(self.event_service)
+        self.model_service.attach_event_service(self.event_service)
         self.conversion_service = ConversionService(self.event_service)
         self.model_service.attach_conversion_service(self.conversion_service)
+        # A gallery rebuilt over the active face model is reloaded as part of
+        # its publication, under the model lifecycle lock.
+        self.conversion_service.attach_publication_guard(self.model_service.publication)
         # Model-assisted labeling for the training page: an existing engine on
         # a private TensorRT worker, same preprocessing/decode as live detection.
         self.labeling_service = LabelingService(
             self.config, self.model_service, event_service=self.event_service)
+        self.model_service.attach_labeling_service(self.labeling_service)
         # Fan stats out over the unified app-event SSE stream so web clients
         # need a single connection (events + stats) instead of two.
         self.stats_service.set_update_listener(self.event_service.publish_stats)
 
-        # App capture/inference config (get/update), proxying camera changes and
-        # persisting per-model — keeps ConfigController/gRPC thin.
+        # Capture/inference config (get/update), proxying camera changes and
+        # persisting per model, so the gRPC servicer stays thin.
         self.config_service = ConfigService(
-            self.config, self.video_service, self.model_settings_service
+            self.config, self.video_service, self.model_settings_service,
+            lifecycle_lock=self.model_service.op_lock,
         )
 
-        # GPIO service (client to the os hardware agent: SHM hot path + gRPC)
+        # GPIO trigger gate (SHM channel from the `os-base` hardware agent)
         self.gpio_service = GPIOService()
 
         # Shared decode∥infer∥encode pipeline — the single producer of the
-        # processed stream (all HTTP clients fan out from it).
+        # processed stream (the api-gateway fans it out to HTTP clients).
         self.pipeline_service = ProcessingPipelineService(
             self.consumer_service,
             self.codec_service,
@@ -226,7 +250,18 @@ class Application:
         # (api/inference_grpc.py) drive the services above directly; the
         # api-gateway owns the REST/SSE/MJPEG surface.
 
-        # Pre-warm TRT worker in background so CUDA context is ready before
+        # Resolve the application type (an installation from older firmware is
+        # migrated to object detection) and drop a boot-default
+        # model that cannot run — before the warm-up thread below reads
+        # .current_model, so it never pre-loads an engine that was just cleared.
+        self.application_service.load_or_migrate()
+        self.model_service.heal_persisted_selection()
+
+        # The capture source is device-level: send it now, since a device with
+        # no usable model never applies any model settings that would.
+        self.video_service.publish_startup_source()
+
+        # Pre-warm the TensorRT worker so the CUDA context is ready before
         # the first .pt upload arrives
         _bootstrap_tensorrt_worker()
 
@@ -236,13 +271,27 @@ class Application:
         Restores the last-selected model (persisted by ModelService) and
         auto-starts detection so the system boots back into the same state.
         Falls back to a plain detector init if no persisted model is usable.
+        A blank device (no application type yet) starts nothing: it waits for
+        an administrator to choose the application.
         """
         logger.info("Initializing application...")
+
+        if self.application_service.task is None:
+            # Per-model settings still get a home, so camera edits persist.
+            self.model_settings_service.switch_model(
+                ModelService.settings_file_for_model(self.config.MODEL_PATH)
+            )
+            logger.info("No application type selected yet; detection not started")
+            logger.info("Application initialized successfully")
+            return
 
         persisted = self.model_service.load_persisted_current_model()
         if persisted:
             logger.info(f"Restoring last-selected model: {persisted}")
-            success, result, _was_running = self.model_service.activate_model(persisted)
+            try:
+                success, result, _was_running = self.model_service.activate_model(persisted)
+            except PreconditionFailed as ex:
+                success, result = False, str(ex)
             if success:
                 # The webcam-server opens the device concurrently with this boot,
                 # so give it a grace period before deciding there is no camera.
@@ -268,6 +317,11 @@ class Application:
         )
         try:
             self.detection_service.initialize()
+            # A legacy device really running the default engine: name it, so
+            # status and the model list show what is loaded.
+            self.model_service.current_model = os.path.basename(self.config.MODEL_PATH)
         except FileNotFoundError as ex:
             logger.warning(f"No model loaded at startup: {ex}")
+        except PreconditionFailed as ex:
+            logger.warning(f"Default model not loaded at startup: {ex}")
         logger.info("Application initialized successfully")

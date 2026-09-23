@@ -1,11 +1,36 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Dataset registry routes: list/create/upload, per-dataset get/rename/delete,
 ZIP export (full or federated shard), cover image and the class list."""
 import grpc
 from flask import Response, request
 
-from ..grpc_clients import clients, trn
+from ..grpc_clients import clients, inf, trn
+from ..helpers import _grpc_error as _inference_grpc_error
 from . import training_bp
 from .helpers import _grpc_error, _json, _json_error, _meta_dict, _result
+
+
+def _device_task():
+    """The device's application task for a new dataset, or an error Response.
+
+    A dataset is labeled for one task, fixed at creation from the device's
+    application. An inference-service that predates
+    application types (UNIMPLEMENTED during a rolling upgrade) is object
+    detection.
+    """
+    try:
+        info = clients.management.GetApplication(inf.Empty())
+    except grpc.RpcError as exc:
+        if exc.code() == grpc.StatusCode.UNIMPLEMENTED:
+            return "detect", None
+        return None, _inference_grpc_error(exc)
+    if not info.task:
+        return None, _json_error("No application type is selected; an administrator must "
+                                 "choose one before creating a dataset.", 409)
+    return info.task, None
 
 
 @training_bp.route("/api/v1/training/datasets", methods=["GET"])
@@ -25,8 +50,15 @@ def training_dataset_create():
     name = (body.get("name") or "").strip()
     if not name:
         return _json_error("'name' is required")
+    task, error = _device_task()
+    if error is not None:
+        return error
+    requested = body.get("task")
+    if isinstance(requested, str) and requested.strip() and requested.strip() != task:
+        return _json_error(f"This device runs the '{task}' application; a "
+                           f"'{requested.strip()}' dataset cannot be created here.", 409)
     try:
-        m = clients.training.CreateDataset(trn.DatasetName(name=name))
+        m = clients.training.CreateDataset(trn.DatasetName(name=name, task=task))
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     return _json(_meta_dict(m), 201)
@@ -40,11 +72,16 @@ def training_dataset_upload():
     name = (request.form.get("name") or "").strip()
     if not name:
         return _json_error("'name' is required")
+    # The archive must be laid out for the device's task, which the new
+    # dataset then records.
+    task, error = _device_task()
+    if error is not None:
+        return error
     file = request.files["file"]
 
     def stream():
         """Yield DatasetUploadChunk messages (metadata first, then ZIP chunks)."""
-        yield trn.DatasetUploadChunk(meta=trn.DatasetUploadMeta(name=name))
+        yield trn.DatasetUploadChunk(meta=trn.DatasetUploadMeta(name=name, task=task))
         while True:
             chunk = file.stream.read(1 << 20)
             if not chunk:
@@ -78,6 +115,7 @@ def training_dataset(dataset_id):
         "dataset_id": d.dataset_id,
         "name": d.name,
         "cover_image_id": d.cover_image_id,
+        "task": d.task or "detect",
     })
 
 
@@ -130,30 +168,29 @@ def training_dataset_export(dataset_id):
             dataset_id=dataset_id, num_shards=num_shards,
             shard_index=shard_index, seed=request.args.get("seed") or "",
         ), timeout=600)
-        # Pull the first chunk before answering so an INVALID_ARGUMENT can
-        # still set the HTTP status (download_model precedent).
-        try:
-            first = next(stream, None)
-        except grpc.RpcError as exc:
-            return _grpc_error(exc)
-
-        def generate():
-            """Yield the shard ZIP bytes relayed from the training-service."""
-            if first is not None:
-                yield first.chunk
-            for msg in stream:
-                yield msg.chunk
-
-        body = generate()
         filename = f"{d.name}-shard-{shard_index}.zip"
     else:
         stream = clients.training.ExportDataset(
             trn.DatasetId(dataset_id=dataset_id), timeout=600)
-        body = (msg.chunk for msg in stream)
+    # Pull the first chunk before answering so an INVALID_ARGUMENT (shard
+    # geometry) or FAILED_PRECONDITION (a face dataset never leaves the
+    # device) can still set the HTTP status (download_model precedent).
+    try:
+        first = next(stream, None)
+    except grpc.RpcError as exc:
+        return _grpc_error(exc)
+
+    def generate():
+        """Yield the ZIP bytes relayed from the training-service."""
+        if first is not None:
+            yield first.chunk
+        for msg in stream:
+            yield msg.chunk
+
     # Dataset names are validated server-side (ASCII letters/digits/space/
     # _-.) so they are safe inside a quoted filename.
     return Response(
-        body,
+        generate(),
         mimetype="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',

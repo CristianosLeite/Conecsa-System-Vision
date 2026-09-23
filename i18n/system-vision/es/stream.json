@@ -30,5 +30,19 @@
   "toggle_shape": "Alternar rectángulo / círculo",
   "add_detection_area": "Agregar área de detección",
   "edit_area": "Editar esta área",
-  "delete_area": "Eliminar esta área"
+  "delete_area": "Eliminar esta área",
+  "classification_result": "Clasificación",
+  "classification_waiting": "Esperando el primer fotograma clasificado…",
+  "no_class_above_threshold": "Ninguna clase por encima del umbral de confianza",
+  "top_candidates": "Principales candidatas",
+  "segmentation_result": "Objetos en el fotograma",
+  "segmentation_waiting": "Esperando el primer fotograma segmentado…",
+  "no_object_above_threshold": "Ningún objeto por encima del umbral de confianza",
+  "polygons_truncated": "Se omitieron algunos contornos para mantener el resultado pequeño",
+  "face_result": "Personas en el fotograma",
+  "face_waiting": "Esperando el primer fotograma reconocido…",
+  "no_face_in_frame": "Ningún rostro en el fotograma",
+  "face_unknown": "Desconocido",
+  "face_similarity": "Mayor semejanza con las fotos registradas de esta persona",
+  "face_privacy_note": "Las fotos de rostro y la galería permanecen en este dispositivo."
 }

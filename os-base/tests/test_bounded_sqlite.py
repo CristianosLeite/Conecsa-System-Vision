@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Conformance tests for the shared bounded SQLite queue.
 
 Both subclasses (the gateway's AuditBuffer, the inference-service's

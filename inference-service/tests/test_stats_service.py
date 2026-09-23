@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for StatsService."""
 from api.services.stats_service import StatsService
 
@@ -60,6 +64,12 @@ class TestUpdateListener:
             "inference_time": 0.0,
             "detections": 0,
             "frames_with_detections": 0,
+            "finish_mean_ms": 0.0,
+            "finish_p95_ms": 0.0,
+            "finish_p99_ms": 0.0,
+            "encode_mean_ms": 0.0,
+            "encode_p95_ms": 0.0,
+            "frame_age_p95_ms": 0.0,
         }
 
     def test_listener_exception_is_swallowed(self):

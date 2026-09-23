@@ -2,10 +2,7 @@
 """Render ``docs/communication.png`` — the service communication diagram.
 
 The PNG embedded in the README and ``docs/architecture.md`` has no other
-source, so it kept going stale across the refactor (``os`` → ``os-base``,
-``node-red`` → ``flow``, ``app`` → WASM-only ``system-vision``) and the
-``hub-vision``/``training-service`` additions. This script *is* the source —
-edit it and re-run to regenerate the image:
+source: this script is it. Edit it and re-run to regenerate the image:
 
     python3 docs/communication-diagram.py     # writes docs/communication.png
 
@@ -22,7 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
-# ── Palette (dark, to match the previous diagram) ────────────────────────────
+# ── Palette (dark) ────────────────────────────
 BG = "#14171c"
 GRID = "#20262e"
 BOX_FC = "#1b1f26"

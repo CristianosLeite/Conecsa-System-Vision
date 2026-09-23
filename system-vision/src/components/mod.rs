@@ -1,14 +1,17 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Leptos UI components for the device UI.
 
 pub mod access;
+pub mod application_select;
 pub mod camera_settings;
 pub mod class_names;
 pub mod common;
 pub mod configuration;
 pub mod control_panel;
-pub mod detection_areas;
 pub mod detection_models;
-pub mod editing_toolbar;
 pub mod flow;
 pub mod image_adjust_overlay;
 pub mod live_video_stream;
@@ -21,6 +24,10 @@ pub mod status_component;
 pub mod stereo_overlay;
 pub mod training;
 pub mod view_navigation;
+
+// Object-detection UI lives in `crate::apps::object_detection`; these re-exports
+// expose it under `crate::components::…`, which the manual also imports.
+pub use crate::apps::object_detection::{detection_areas, editing_toolbar};
 
 pub use common::panel_header;
 pub use detection_areas::add_area_button;

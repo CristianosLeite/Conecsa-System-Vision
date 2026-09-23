@@ -1,4 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for YOLO dataset ZIP import validation and normalization."""
+import json
 import os
 import zipfile
 
@@ -42,6 +47,12 @@ class TestValidateClasses:
         with pytest.raises(DatasetImportError):
             _validate_classes(["cap", "cap"], "data.yaml")
 
+    def test_unknown_is_reserved_for_face_only(self):
+        assert _validate_classes(["unknown", "cap"], "data.yaml") == ["unknown", "cap"]
+        assert _validate_classes(["unknown"], "classes.txt", task="classify") == ["unknown"]
+        with pytest.raises(DatasetImportError, match="reserved"):
+            _validate_classes(["Alice", "Unknown #ff0000"], "the class folders", task="face")
+
 
 class TestClassesFromYaml:
     def test_list_form(self, tmp_path):
@@ -82,16 +93,13 @@ class TestParseLabelFile:
             (1, 0.1, 0.1, 0.05, 0.05),
         ]
 
-    def test_polygon_row_collapses_to_bbox(self, tmp_path):
+    def test_polygon_rows_are_refused(self, tmp_path):
+        # A segmentation export is not turned into boxes behind the
+        # operator's back: it imports only into a segmentation dataset.
         p = tmp_path / "a.txt"
-        # Square polygon from (0.2,0.2) to (0.6,0.6) -> center (0.4,0.4), w=h=0.4
         p.write_text("0 0.2 0.2 0.6 0.2 0.6 0.6 0.2 0.6\n")
-        boxes = _parse_label_file(str(p), n_classes=1)
-        assert boxes[0][0] == 0
-        assert boxes[0][1] == pytest.approx(0.4)
-        assert boxes[0][2] == pytest.approx(0.4)
-        assert boxes[0][3] == pytest.approx(0.4)
-        assert boxes[0][4] == pytest.approx(0.4)
+        with pytest.raises(DatasetImportError, match="segmentation polygon"):
+            _parse_label_file(str(p), n_classes=1)
 
     def test_blank_lines_skipped(self, tmp_path):
         p = tmp_path / "a.txt"
@@ -163,6 +171,107 @@ class TestImportDatasetZip:
         with pytest.raises(DatasetImportError):
             import_dataset_zip(str(zip_path), str(tmp_path / "out"))
 
+    def test_a_colour_suffixed_class_name_reimports(self, tmp_path):
+        # The dataset export writes class names with their "#rrggbb" suffix.
+        zip_path = tmp_path / "ds.zip"
+        with zipfile.ZipFile(zip_path, "w") as z:
+            z.writestr("data.yaml", "names: ['cap #ff0000']\n")
+            z.writestr("images/img1.jpg", _jpeg())
+        classes, _ = import_dataset_zip(str(zip_path), str(tmp_path / "out"))
+        assert classes == ["cap #ff0000"]
+
+
+def _zip(tmp_path, entries, name="cls.zip"):
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w") as z:
+        for arcname, data in entries.items():
+            z.writestr(arcname, data)
+    return str(path)
+
+
+def _labels(dest):
+    return sorted(p.read_text() for p in (dest / "labels").glob("*.txt"))
+
+
+class TestClassificationImport:
+    """A classify dataset imports one folder of images per class."""
+
+    def _import(self, tmp_path, entries, img_size=0):
+        dest = tmp_path / "out"
+        classes, count = import_dataset_zip(_zip(tmp_path, entries), str(dest),
+                                            img_size=img_size, task="classify")
+        return classes, count, dest
+
+    def test_split_folders_are_merged_and_classes_sorted(self, tmp_path):
+        classes, count, dest = self._import(tmp_path, {
+            n: _jpeg() for n in ("train/dog/a.jpg", "train/cat/b.jpg", "val/cat/c.jpg",
+                                 "test/dog/d.jpg")})
+        assert (classes, count) == (["cat", "dog"], 4)
+        # One label line per image: its class id.
+        assert _labels(dest) == ["0\n", "0\n", "1\n", "1\n"]
+        assert json.loads((dest / "classes.json").read_text()) == ["cat", "dog"]
+
+    def test_top_level_class_folders_inside_a_wrapper(self, tmp_path):
+        classes, count, _ = self._import(tmp_path, {"pets/cat/a.jpg": _jpeg(),
+                                                    "pets/dog/b.jpg": _jpeg()})
+        assert (classes, count) == (["cat", "dog"], 2)
+
+    def test_a_single_class_archive(self, tmp_path):
+        classes, count, _ = self._import(tmp_path, {"cat/a.jpg": _jpeg(), "cat/b.jpg": _jpeg()})
+        assert (classes, count) == (["cat"], 2)
+
+    def test_classes_txt_fixes_the_order_and_keeps_empty_classes(self, tmp_path):
+        classes, _, dest = self._import(tmp_path, {
+            "classes.txt": "dog\ncat\nbird\n", "train/cat/a.jpg": _jpeg(),
+            "train/dog/b.jpg": _jpeg()})
+        assert classes == ["dog", "cat", "bird"]
+        assert _labels(dest) == ["0\n", "1\n"]
+
+    def test_a_folder_missing_from_classes_txt_is_refused(self, tmp_path):
+        with pytest.raises(DatasetImportError, match="'dog' is not listed"):
+            self._import(tmp_path, {"classes.txt": "cat\n", "train/cat/a.jpg": _jpeg(),
+                                    "train/dog/b.jpg": _jpeg()})
+
+    def test_a_colour_suffixed_class_folder_is_kept(self, tmp_path):
+        classes, _, _ = self._import(tmp_path, {"train/cat #ff0000/a.jpg": _jpeg(),
+                                                "train/dog/b.jpg": _jpeg()})
+        assert classes == ["cat #ff0000", "dog"]
+
+    def test_a_dot_class_folder_is_kept_and_a_hidden_tool_folder_ignored(self, tmp_path):
+        classes, count, dest = self._import(tmp_path, {
+            "train/.defective/a.jpg": _jpeg(), "train/good/b.jpg": _jpeg(),
+            "train/.git/config": "[core]\n"})
+        assert (classes, count) == ([".defective", "good"], 2)
+        assert _labels(dest) == ["0\n", "1\n"]
+
+    def test_an_invalid_class_folder_is_refused(self, tmp_path):
+        with pytest.raises(DatasetImportError, match="Invalid class name"):
+            self._import(tmp_path, {"train/c*t/a.jpg": _jpeg(), "train/dog/b.jpg": _jpeg()})
+
+    def test_a_detection_archive_is_refused(self, tmp_path):
+        with pytest.raises(DatasetImportError, match="object-detection dataset"):
+            self._import(tmp_path, {"data.yaml": "names: [cap]\n", "images/a.jpg": _jpeg(),
+                                    "labels/a.txt": "0 0.5 0.5 0.2 0.2\n"})
+
+    def test_an_archive_without_class_folders_is_refused(self, tmp_path):
+        with pytest.raises(DatasetImportError, match="class folders"):
+            self._import(tmp_path, {"a.jpg": _jpeg()})
+
+    def test_images_are_stored_in_the_dataset_geometry(self, tmp_path):
+        _, _, dest = self._import(tmp_path, {"cat/a.jpg": _jpeg(), "dog/b.jpg": _jpeg()},
+                                  img_size=640)
+        shapes = set()
+        for path in (dest / "images").glob("*.jpg"):
+            image = cv2.imread(str(path))
+            assert image is not None
+            shapes.add(image.shape)
+        assert shapes == {(640, 640, 3)}
+
+    def test_a_classification_layout_is_refused_for_segmentation(self, tmp_path):
+        archive = _zip(tmp_path, {"train/cap/a.jpg": _jpeg(), "train/bottle/b.jpg": _jpeg()})
+        with pytest.raises(DatasetImportError, match="runs segmentation"):
+            import_dataset_zip(archive, str(tmp_path / "out"), task="segment")
+
 
 class TestNativeGeometryImport:
     """``img_size=0`` keeps the source resolution and the labels verbatim."""
@@ -195,15 +304,26 @@ class TestNativeGeometryImport:
         (label,) = (dest / "labels").glob("*.txt")
         assert label.read_text() == "0 0.500000 0.250000 0.200000 0.100000\n"
 
-    def test_native_import_collapses_polygons_too(self, tmp_path):
+    def test_native_import_refuses_polygons_too(self, tmp_path):
         dest = tmp_path / "out"
         poly = "0 0.2 0.2 0.6 0.2 0.6 0.6 0.2 0.6\n"
-        import_dataset_zip(self._make_zip(tmp_path, label=poly), str(dest),
-                           img_size=0)
-        (label,) = (dest / "labels").glob("*.txt")
-        cls, cx, cy, w, h = label.read_text().split()
-        assert cls == "0"
-        assert [float(v) for v in (cx, cy, w, h)] == pytest.approx([0.4, 0.4, 0.4, 0.4])
+        with pytest.raises(DatasetImportError, match="segmentation"):
+            import_dataset_zip(self._make_zip(tmp_path, label=poly), str(dest),
+                               img_size=0)
+
+    def test_a_classification_layout_is_refused(self, tmp_path):
+        # ultralytics classification export: <split>/<class>/*.jpg, no labels.
+        path = tmp_path / "cls.zip"
+        with zipfile.ZipFile(path, "w") as z:
+            for name in ("train/cap/a.jpg", "train/bottle/b.jpg", "val/cap/c.jpg"):
+                z.writestr(name, _jpeg())
+        with pytest.raises(DatasetImportError, match="classification dataset"):
+            import_dataset_zip(str(path), str(tmp_path / "out"))
+
+    def test_a_detection_archive_is_refused_on_a_classification_device(self, tmp_path):
+        with pytest.raises(DatasetImportError, match="object-detection dataset"):
+            import_dataset_zip(self._make_zip(tmp_path), str(tmp_path / "out"),
+                               task="classify")
 
     def test_native_import_still_rejects_oversized_images(self, tmp_path,
                                                           monkeypatch):
@@ -228,7 +348,7 @@ class TestNativeGeometryImport:
 
 
 class TestExtractionLimits:
-    """REFACTORING.md M5: real (written-byte) limits, not ZIP-header claims."""
+    """Real (written-byte) limits, not ZIP-header claims."""
 
     def _zip_with(self, tmp_path, entries):
         zip_path = tmp_path / "ds.zip"

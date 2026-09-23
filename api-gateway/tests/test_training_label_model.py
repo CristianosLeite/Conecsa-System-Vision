@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the model-assisted labeling relays (gateway/training/label_model.py)
 and the base_model passthrough on POST /api/v1/training/train."""
 from types import SimpleNamespace
@@ -77,7 +81,15 @@ class TestStatus:
         with app.test_request_context("/api/v1/training/label-model"):
             resp = label_model.training_label_model_status()
         assert resp.get_json() == {"loaded": True, "model_name": "Teste.engine",
-                                   "class_names": ["logo", "person"], "message": ""}
+                                   "class_names": ["logo", "person"], "message": "",
+                                   "task": ""}
+
+    def test_carries_the_engine_task(self, app, monkeypatch):
+        _wire(monkeypatch, label_model, model={"GetLabelModelStatus": inf_pb.LabelModelStatus(
+            loaded=True, model_name="Pets.engine", task="classify")})
+        with app.test_request_context("/api/v1/training/label-model"):
+            resp = label_model.training_label_model_status()
+        assert resp.get_json()["task"] == "classify"
 
 
 class TestLoad:
@@ -156,18 +168,32 @@ class TestDetect:
             resp = label_model.training_label_model_detect()
         assert resp.status_code == 400 and calls == []
 
-    def test_fetches_the_dataset_image_and_maps_the_detections(self, app, monkeypatch):
+    @staticmethod
+    def _detect(app, monkeypatch, *, dataset_task="detect", engine_task="detect",
+                result=None, dataset=None):
         calls = _wire(
             monkeypatch, label_model,
-            training={"GetImage": trn_pb.ImageBlob(image_id="i", jpeg=b"jpegbytes")},
-            model={"LabelDetect": inf_pb.LabelDetectResult(
-                success=True,
-                detections=[inf_pb.LabelDetection(class_id=1, class_name="person", score=0.9,
-                                                  x1=0.25, y1=0.25, x2=0.5, y2=0.5)])})
+            training={
+                "GetDataset": dataset if dataset is not None
+                else trn_pb.DatasetInfo(dataset_id="d", task=dataset_task),
+                "GetImage": trn_pb.ImageBlob(image_id="i", jpeg=b"jpegbytes"),
+            },
+            model={
+                "GetLabelModelStatus": inf_pb.LabelModelStatus(loaded=True, task=engine_task),
+                "LabelDetect": result if result is not None
+                else inf_pb.LabelDetectResult(success=True),
+            })
         with app.test_request_context("/api/v1/training/label-model/detect", method="POST",
                                       json={"dataset_id": "d", "image_id": "i",
                                             "threshold": 0.4}):
             resp = label_model.training_label_model_detect()
+        return resp, calls
+
+    def test_fetches_the_dataset_image_and_maps_the_detections(self, app, monkeypatch):
+        resp, calls = self._detect(app, monkeypatch, result=inf_pb.LabelDetectResult(
+            success=True,
+            detections=[inf_pb.LabelDetection(class_id=1, class_name="person", score=0.9,
+                                              x1=0.25, y1=0.25, x2=0.5, y2=0.5)]))
         assert resp.status_code == 200
         body = resp.get_json()
         assert body["class_names"] == ["person"]
@@ -176,17 +202,71 @@ class TestDetect:
         assert box["class_id"] == 1
         assert (box["cx"], box["cy"], box["w"], box["h"]) == pytest.approx(
             (0.375, 0.375, 0.25, 0.25))
-        assert [c[0] for c in calls] == ["GetImage", "LabelDetect"]
-        assert calls[1][1].jpeg == b"jpegbytes"
-        assert calls[1][1].threshold == pytest.approx(0.4)
+        assert body["image_class"] is None and body["candidates"] == []
+        assert [c[0] for c in calls] == [
+            "GetDataset", "GetLabelModelStatus", "GetImage", "LabelDetect"]
+        assert calls[3][1].jpeg == b"jpegbytes"
+        assert calls[3][1].threshold == pytest.approx(0.4)
+
+    def test_maps_a_segmentation_suggestion_with_its_rings(self, app, monkeypatch):
+        resp, _ = self._detect(
+            app, monkeypatch, dataset_task="segment", engine_task="segment",
+            result=inf_pb.LabelDetectResult(success=True, detections=[inf_pb.LabelDetection(
+                class_id=0, class_name="bolt", score=0.8, x1=0.1, y1=0.2, x2=0.5, y2=0.6,
+                rings=[inf_pb.Ring(points=[0.1, 0.2, 0.5, 0.2, 0.5, 0.6])])]))
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert len(body["boxes"]) == 1
+        ((ring,),) = body["polygons"]
+        assert [v for point in ring for v in point] == pytest.approx(
+            [0.1, 0.2, 0.5, 0.2, 0.5, 0.6])
+
+    def test_maps_a_classification_suggestion(self, app, monkeypatch):
+        resp, _ = self._detect(
+            app, monkeypatch, dataset_task="classify", engine_task="classify",
+            result=inf_pb.LabelDetectResult(
+                success=True,
+                image_class=inf_pb.LabelClass(class_id=0, class_name="cat", score=0.8),
+                candidates=[inf_pb.LabelClass(class_id=0, class_name="cat", score=0.8),
+                            inf_pb.LabelClass(class_id=1, class_name="dog", score=0.2)]))
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["boxes"] == []
+        # Class 0 is a real class: it must not read as "no class".
+        assert body["image_class"] == {"class_id": 0, "class_name": "cat",
+                                       "score": pytest.approx(0.8)}
+        assert [c["class_name"] for c in body["candidates"]] == ["cat", "dog"]
+
+    @pytest.mark.parametrize("dataset_task, engine_task", [
+        ("classify", "detect"), ("detect", "classify"),
+    ])
+    def test_an_engine_of_another_task_is_refused_before_any_inference(
+            self, app, monkeypatch, dataset_task, engine_task):
+        resp, calls = self._detect(app, monkeypatch, dataset_task=dataset_task,
+                                   engine_task=engine_task)
+        assert resp.status_code == 409
+        error = resp.get_json()["error"]
+        assert f"'{engine_task}' model" in error and f"'{dataset_task}'" in error
+        assert "LabelDetect" not in [c[0] for c in calls]
+
+    def test_a_legacy_dataset_is_a_detection_dataset(self, app, monkeypatch):
+        resp, _ = self._detect(app, monkeypatch, dataset=trn_pb.DatasetInfo(dataset_id="d"),
+                               engine_task="classify")
+        assert resp.status_code == 409
+
+    def test_an_older_inference_service_is_not_checked(self, app, monkeypatch):
+        resp, calls = self._detect(app, monkeypatch, dataset_task="classify", engine_task="")
+        assert resp.status_code == 200 and calls[-1][0] == "LabelDetect"
+
+    def test_an_unknown_dataset_is_a_404(self, app, monkeypatch):
+        resp, calls = self._detect(app, monkeypatch,
+                                   dataset=_rpc_error(grpc.StatusCode.NOT_FOUND))
+        assert resp.status_code == 404
+        assert [c[0] for c in calls] == ["GetDataset"]
 
     def test_service_failure_is_a_400(self, app, monkeypatch):
-        _wire(monkeypatch, label_model,
-              training={"GetImage": trn_pb.ImageBlob(jpeg=b"x")},
-              model={"LabelDetect": inf_pb.LabelDetectResult(success=False, message="no model")})
-        with app.test_request_context("/api/v1/training/label-model/detect", method="POST",
-                                      json={"dataset_id": "d", "image_id": "i"}):
-            resp = label_model.training_label_model_detect()
+        resp, _ = self._detect(app, monkeypatch, result=inf_pb.LabelDetectResult(
+            success=False, message="no model"))
         assert resp.status_code == 400
 
 
@@ -204,3 +284,23 @@ class TestTrainBaseModel:
         assert resp.status_code == 202
         assert calls[0][1].base_model == "Teste.engine"
         assert resp.get_json()["base_model"] == "Teste.engine"
+
+
+class TestSamSegment:
+    def test_each_box_carries_its_mask_rings(self, app, monkeypatch):
+        _wire(monkeypatch, sam, training={"SamSegment": trn_pb.SamResult(
+            success=True,
+            boxes=[trn_pb.Box(cx=0.3, cy=0.4, w=0.4, h=0.4), trn_pb.Box(cx=0.8, cy=0.8)],
+            scores=[0.9, 0.5],
+            polygons=[trn_pb.Polygon(instance=0, points=[0.1, 0.2, 0.5, 0.2, 0.5, 0.6])],
+        )})
+        with app.test_request_context("/api/v1/training/sam/segment", method="POST",
+                                      json={"dataset_id": "d", "image_id": "i",
+                                            "text_prompt": "bolt"}):
+            resp = sam.training_sam_segment()
+        body = resp.get_json()
+        assert len(body["boxes"]) == 2 and body["scores"] == pytest.approx([0.9, 0.5])
+        (ring,), no_mask = body["polygons"]
+        assert [v for point in ring for v in point] == pytest.approx(
+            [0.1, 0.2, 0.5, 0.2, 0.5, 0.6])
+        assert no_mask == []

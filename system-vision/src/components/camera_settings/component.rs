@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api;
 use crate::components::panel_header::PanelHeader;
@@ -6,12 +8,23 @@ use crate::i18n::*;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
+use super::ap_confirm_modal::AccessPointConfirmModal;
 use super::apply_button::ApplyCameraSettingsButton;
 use super::device_select::CaptureDeviceSelect;
 use super::loading_state::CameraSettingsLoadingState;
+use super::network_source_form::NetworkSourceForm;
 use super::resolution_controls::ResolutionControls;
+use super::source_select::CaptureSourceSelect;
+use super::status_row::CameraStatusRow;
 use super::stereo_toggle::StereoOverlayToggle;
-use super::{is_stereo_camera, CameraFormat, Resolution};
+use super::{
+    is_stereo_camera, offers_access_point, parse_network_form, station_suggestion,
+    AddressSuggestion, CameraFormat, NetworkFormError, Resolution,
+};
+
+/// How often the access point is re-read while the remote camera form is on
+/// screen: a remote camera joining it raises no event.
+const AP_POLL_MS: u64 = 3_000;
 
 /// Push only the stereo combine settings. Applied immediately (no camera
 /// restart, since stereo lives in the inference-service, not the SHM config).
@@ -21,10 +34,12 @@ fn push_stereo_enabled(enabled: bool) {
     });
 }
 
-/// The `CameraSettings` view component.
 #[component]
 pub fn CameraSettings(
     refresh_camera: ReadSignal<u32>,
+    refresh_network: ReadSignal<u32>,
+    /// Live camera health from the event stream (see `main_view`).
+    camera_health: ReadSignal<Option<api::CameraHealth>>,
     set_error_msg: WriteSignal<String>,
     set_success_msg: WriteSignal<String>,
 ) -> impl IntoView {
@@ -47,13 +62,106 @@ pub fn CameraSettings(
     let (loading, set_loading) = signal(true);
     let (saving, set_saving) = signal(false);
 
+    // Capture source. `source` follows the selector; `saved_source` is what the
+    // device runs. The token field is write-only: blank on every load, with
+    // `token_set` saying whether the device has one stored.
+    let (source, set_source) = signal(api::SOURCE_LOCAL.to_string());
+    let (saved_source, set_saved_source) = signal(api::SOURCE_LOCAL.to_string());
+    let (network_host, set_network_host) = signal(String::new());
+    let (saved_host, set_saved_host) = signal(String::new());
+    let (network_port, set_network_port) = signal(String::new());
+    let (network_token, set_network_token) = signal(String::new());
+    let (token_set, set_token_set) = signal(false);
+    let (camera_status, set_camera_status) = signal(String::new());
+    let (camera_detail, set_camera_detail) = signal(String::new());
+    // Wi-Fi gateway: on a remote camera's hotspot that is the remote camera itself.
+    let (wifi_gateway, set_wifi_gateway) = signal(None::<String>);
+    // The address the device's access point leased to the remote camera that joined.
+    let (station_address, set_station_address) = signal(None::<String>);
+
+    // The device's own access point, read while the remote camera form is on
+    // screen: Apply offers to turn it on, and the remote camera that joins it
+    // is where the address comes from.
+    let ap_status = RwSignal::new(None::<api::ApStatus>);
+    let (ap_confirm_open, set_ap_confirm_open) = signal(false);
+    let (ap_busy, set_ap_busy) = signal(false);
+    let reload_ap = move || {
+        spawn_local(async move {
+            if let Ok(st) = api::get_ap_status().await {
+                ap_status.set(Some(st));
+            }
+        });
+    };
+    Effect::new(move |_| {
+        let _ = refresh_network.get();
+        reload_ap();
+    });
+    let ap_poll = StoredValue::new(None::<IntervalHandle>);
+    let stop_ap_poll = move || {
+        ap_poll.update_value(|slot| {
+            if let Some(handle) = slot.take() {
+                handle.clear();
+            }
+        });
+    };
+    Effect::new(move |_| {
+        stop_ap_poll();
+        if source.get() == api::SOURCE_NETWORK {
+            reload_ap();
+            let handle = set_interval_with_handle(
+                reload_ap,
+                std::time::Duration::from_millis(AP_POLL_MS),
+            );
+            ap_poll.set_value(handle.ok());
+        }
+    });
+    on_cleanup(stop_ap_poll);
+
+    // Shown while the address field still holds an unconfirmed suggestion.
+    let suggestion = Signal::derive(move || {
+        let host = network_host.get();
+        if host.is_empty() || host == saved_host.get() {
+            return None;
+        }
+        if station_address.get().as_deref() == Some(host.as_str()) {
+            return Some(AddressSuggestion::Station(host));
+        }
+        if wifi_gateway.get().as_deref() == Some(host.as_str()) {
+            return Some(AddressSuggestion::Gateway(host));
+        }
+        None
+    });
+
+    // The remote camera that joined the access point: fill its leased address
+    // into the field while the operator has not typed or stored one. A hotspot
+    // gateway suggestion gives way to it, a confirmed address never does.
+    Effect::new(move |_| {
+        let Some(address) = station_suggestion(ap_status.get().as_ref()) else {
+            return;
+        };
+        let host = network_host.get_untracked();
+        let unconfirmed = host.is_empty()
+            || wifi_gateway.get_untracked().as_deref() == Some(host.as_str())
+            || station_address.get_untracked().as_deref() == Some(host.as_str());
+        if unconfirmed {
+            if host != address {
+                set_network_host.set(address.clone());
+            }
+            set_station_address.set(Some(address));
+        }
+    });
+
     // The stereo overlay only makes sense on a 3D camera: it splits one frame
     // into its left|right halves and blends them, which would tear an ordinary
     // picture in two. Resolution cannot tell a side-by-side frame from a merely
     // wide one, so the camera model decides. Follows the dropdown selection,
     // like the other settings, rather than the applied device.
+    // A remote camera's frame is never side by side either, so a network source
+    // counts as "not a 3D camera" once it is the applied source.
     let stereo_supported = Signal::derive(move || {
-        devices_loaded.get() && stereo_devices.get().contains(&selected_index.get())
+        devices_loaded.get()
+            && saved_source.get() != api::SOURCE_NETWORK
+            && stereo_devices.get().contains(&selected_index.get())
     });
 
     // Never leave the overlay enabled on a camera that is not a 3D camera.
@@ -138,6 +246,33 @@ pub fn CameraSettings(
                     set_selected_framerate.set(resp.current_framerate);
                     set_selected_stereo_enabled.set(resp.current_stereo_enabled);
 
+                    set_source.set(resp.current_source.clone());
+                    set_saved_source.set(resp.current_source);
+                    set_saved_host.set(resp.current_network_host.clone());
+                    set_network_port.set(match resp.current_network_port {
+                        0 => "8080".to_string(),
+                        port => port.to_string(),
+                    });
+                    set_network_token.set(String::new());
+                    set_token_set.set(resp.network_token_set);
+                    set_camera_status.set(resp.camera_status);
+                    set_camera_detail.set(resp.camera_detail);
+
+                    // With no address stored yet, suggest the Wi-Fi gateway: on
+                    // a remote camera's hotspot that is the remote camera. It only
+                    // fills the field — nothing is saved until the operator applies it.
+                    if resp.current_network_host.is_empty() {
+                        let gateway = api::get_network_config()
+                            .await
+                            .ok()
+                            .and_then(|net| net.wifi.gateway)
+                            .filter(|gw| !gw.is_empty());
+                        set_network_host.set(gateway.clone().unwrap_or_default());
+                        set_wifi_gateway.set(gateway);
+                    } else {
+                        set_network_host.set(resp.current_network_host);
+                    }
+
                     // Last: everything the stereo guard reads is now in place.
                     set_devices_loaded.set(true);
                     set_loading.set(false);
@@ -155,15 +290,127 @@ pub fn CameraSettings(
         reload_camera();
     });
 
+    // The status row follows the camera as it changes — only the status: the
+    // form keeps whatever the operator is typing.
+    Effect::new(move |_| {
+        if let Some(health) = camera_health.get() {
+            set_camera_status.set(health.status);
+            set_camera_detail.set(health.detail);
+            if !health.source.is_empty() {
+                set_saved_source.set(health.source);
+            }
+        }
+    });
+
+    // Validates the remote camera form and makes it the device's source.
+    let save_network_source = move || {
+        let locale = i18n.get_locale_untracked();
+        let form = parse_network_form(
+            &network_host.get_untracked(),
+            &network_port.get_untracked(),
+            &network_token.get_untracked(),
+            token_set.get_untracked(),
+        );
+        let (host, port, token) = match form {
+            Ok(form) => form,
+            Err(NetworkFormError::Address) => {
+                return set_error_msg.set(td_string!(locale, camera::address_required).to_string())
+            }
+            Err(NetworkFormError::Port) => {
+                return set_error_msg.set(td_string!(locale, camera::port_invalid).to_string())
+            }
+            Err(NetworkFormError::Token) => {
+                return set_error_msg.set(td_string!(locale, camera::token_required).to_string())
+            }
+        };
+        set_saving.set(true);
+        spawn_local(async move {
+            match api::update_camera_source(api::SOURCE_NETWORK, Some(host), Some(port), token)
+                .await
+            {
+                Ok(_) => {
+                    set_success_msg.set(td_string!(locale, camera::source_applied).to_string());
+                    reload_camera();
+                }
+                Err(e) => set_error_msg.set(td_string!(locale, camera::failed_to_apply, err = e)),
+            }
+            set_saving.set(false);
+        });
+    };
+
+    // The confirmation's choices. "Turn on" starts the access point first;
+    // the source is then saved only with an address the operator entered or
+    // confirmed — an empty field, or a suggestion still standing, means the
+    // remote camera has not joined yet, and its address is filled in when it does.
+    let ap_close = Callback::new(move |_| {
+        if !ap_busy.get_untracked() {
+            set_ap_confirm_open.set(false);
+        }
+    });
+    let ap_apply_only = Callback::new(move |_| {
+        set_ap_confirm_open.set(false);
+        save_network_source();
+    });
+    let ap_turn_on = Callback::new(move |(passphrase, channel): (String, u32)| {
+        if ap_busy.get_untracked() {
+            return;
+        }
+        let locale = i18n.get_locale_untracked();
+        set_ap_busy.set(true);
+        spawn_local(async move {
+            let outcome = api::start_ap(passphrase, channel).await;
+            set_ap_busy.set(false);
+            set_ap_confirm_open.set(false);
+            reload_ap();
+            match outcome {
+                Ok(resp) if resp.success => {
+                    let address_pending = network_host.get_untracked().trim().is_empty()
+                        || suggestion.get_untracked().is_some();
+                    if address_pending {
+                        set_success_msg
+                            .set(td_string!(locale, camera::ap_started_await_address).to_string());
+                    } else {
+                        save_network_source();
+                    }
+                }
+                Ok(resp) => set_error_msg.set(resp.message),
+                Err(e) => set_error_msg.set(td_string!(locale, settings::ap_start_failed, err = e)),
+            }
+        });
+    });
+
     // Applies device / resolution / framerate (the fields that restart capture).
     // Exposure, RGB, gamma and gain are adjusted live from the live-video overlay.
     let apply = Callback::new(move |_| {
+        let locale = i18n.get_locale_untracked();
+
+        if source.get() == api::SOURCE_NETWORK {
+            // With the device's access point off, ask first: the remote camera
+            // may need it, and turning it on drops the Wi-Fi link.
+            if offers_access_point(&source.get(), ap_status.get().as_ref()) {
+                set_ap_confirm_open.set(true);
+            } else {
+                save_network_source();
+            }
+            return;
+        }
+
         let idx = selected_index.get();
         let res = selected_res.get();
         let framerate = selected_framerate.get();
+        let leaving_network = saved_source.get() == api::SOURCE_NETWORK;
         set_saving.set(true);
-        let locale = i18n.get_locale_untracked();
         spawn_local(async move {
+            // Back to the local camera first; the stored remote camera address and
+            // token stay on the device for the next switch.
+            if leaving_network
+                && let Err(e) =
+                    api::update_camera_source(api::SOURCE_LOCAL, None, None, None).await
+            {
+                set_error_msg.set(td_string!(locale, camera::failed_to_apply, err = e));
+                set_saving.set(false);
+                return;
+            }
             match api::update_camera_config(
                 Some(idx),
                 Some(res.w),
@@ -205,29 +452,64 @@ pub fn CameraSettings(
                 view! { <CameraSettingsLoadingState /> }.into_any()
             } else {
                 view! {
-                    <div class="flex flex-col gap-6">
-                        <CaptureDeviceSelect
-                            devices=devices
-                            selected_index=selected_index
-                            set_selected_index=set_selected_index
+                    <div class="camera-settings">
+                        <CameraStatusRow
+                            status=camera_status
+                            detail=camera_detail
+                            applied_source=saved_source
+                            selected_source=source
                         />
-                        <ResolutionControls
-                            formats=formats
-                            selected_res=selected_res
-                            set_selected_res=set_selected_res
-                            selected_framerate=selected_framerate
-                            set_selected_framerate=set_selected_framerate
-                        />
-                        <StereoOverlayToggle
-                            stereo_supported=stereo_supported
-                            selected_stereo_enabled=selected_stereo_enabled
-                            set_selected_stereo_enabled=set_selected_stereo_enabled
-                            on_push=push_stereo
-                        />
+                        <CaptureSourceSelect source=source set_source=set_source />
+                        // Device, resolution, framerate and stereo describe a
+                        // V4L2 camera; a remote camera has none of them.
+                        {move || if source.get() == api::SOURCE_NETWORK {
+                            view! {
+                                <NetworkSourceForm
+                                    host=network_host
+                                    set_host=set_network_host
+                                    port=network_port
+                                    set_port=set_network_port
+                                    token=network_token
+                                    set_token=set_network_token
+                                    token_set=token_set
+                                    suggestion=suggestion
+                                    ap_status=ap_status
+                                />
+                            }.into_any()
+                        } else {
+                            view! {
+                                <CaptureDeviceSelect
+                                    devices=devices
+                                    selected_index=selected_index
+                                    set_selected_index=set_selected_index
+                                />
+                                <ResolutionControls
+                                    formats=formats
+                                    selected_res=selected_res
+                                    set_selected_res=set_selected_res
+                                    selected_framerate=selected_framerate
+                                    set_selected_framerate=set_selected_framerate
+                                />
+                                <StereoOverlayToggle
+                                    stereo_supported=stereo_supported
+                                    selected_stereo_enabled=selected_stereo_enabled
+                                    set_selected_stereo_enabled=set_selected_stereo_enabled
+                                    on_push=push_stereo
+                                />
+                            }.into_any()
+                        }}
                         <ApplyCameraSettingsButton saving=saving on_apply=apply />
                     </div>
                 }.into_any()
             }}
+            <AccessPointConfirmModal
+                open=ap_confirm_open
+                status=ap_status
+                busy=ap_busy
+                on_close=ap_close
+                on_apply_only=ap_apply_only
+                on_turn_on=ap_turn_on
+            />
         </div>
     }
 }

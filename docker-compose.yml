@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 services:
   os-base:
     image: conecsa-os-base:base
@@ -5,13 +9,15 @@ services:
       context: .
       dockerfile: os-base/Dockerfile.os-base
     container_name: conecsa-os-base
-    # `os-base` doubles as the privileged hardware-management agent (network/Wi-Fi
-    # today; GPIO in a later migration). It serves gRPC HardwareService on :50051,
-    # consumed by inference-service.
+    # This container also runs the privileged `os-base` hardware agent (network,
+    # Wi-Fi and GPIO), serving gRPC HardwareService on :50051 to the api-gateway.
     command: ["python3", "-m", "agent"]
     privileged: true
     environment:
       - HARDWARE_AGENT_LISTEN=0.0.0.0:50051
+      # Remote camera access point subnet; change it when the wired network
+      # overlaps it (see docs/configuration.md).
+      - AP_ADDRESS_CIDR=10.98.76.1/24
     volumes:
       - models-data:/data/models
       - runs-data:/data/runs
@@ -20,16 +26,17 @@ services:
       - /run/wpa_supplicant:/run/wpa_supplicant      # wpa_cli control sockets
       - /etc/wpa_supplicant:/etc/wpa_supplicant       # persisted network blocks (PSKs)
       - /etc/systemd/network:/etc/systemd/network      # static/DHCP .network files
+      - /run/systemd/network:/run/systemd/network      # volatile access-point .network file (never persisted)
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket  # systemd-networkd D-Bus
       # Clock floor shared with the host's conecsa-fake-hwclock units: the agent
       # rewrites it whenever it accepts a time from the hub, so the acquired
       # time survives a power cut (this board has no RTC battery).
       - /var/lib/conecsa:/var/lib/conecsa
-      # GPIO: the agent owns the hardware. The shared-memory hot-path channel
-      # with inference-service + the host Jetson.GPIO library.
+      # GPIO: the agent owns the pins. Mounts the SHM channel shared with
+      # inference-service and the host Jetson.GPIO library.
       - gpio-shm:/run/conecsa-gpio
       - /usr/lib/python3/dist-packages/Jetson:/usr/lib/python3/dist-packages/Jetson:ro
-      # Opt-in: share the Python env from `os` with other services. Note
+      # Opt-in: share the Python env from `os-base` with other services. Note
       # that named volumes are populated only on first creation — see README.
       # - python-env:/usr/local/lib/python3.10/site-packages
     devices:
@@ -37,7 +44,7 @@ services:
       - /dev/gpiochip0:/dev/gpiochip0
       - /dev/gpiochip1:/dev/gpiochip1
     group_add:
-      # gpio group (GID 999 on the Jetson host).
+      # render group (GID 999 on the Yocto host), which owns /dev/gpiochip*.
       - "999"
     restart: unless-stopped
     networks:
@@ -56,20 +63,16 @@ services:
       - CAPTURE_FRAMERATE=60
       - RUST_LOG=info
       - SHM_NAME=conecsa_frame_shm
-      # SHM slot must fit the LARGEST frame the camera can deliver. The stereo
-      # USB camera falls back to its native 3840x1080 RAW (12.44 MB/frame) when
-      # the requested MJPEG mode drops; the previous 8 MB default slot was too
-      # small, so every RAW frame was dropped ("RAW frame dropped ... exceeds
-      # SHM slot") → frozen stream. 16 MB covers 3840x1080x3 with headroom.
+      # The SHM slot must fit the LARGEST frame the camera can deliver: the
+      # stereo USB camera falls back to native 3840x1080 RAW (12.44 MB/frame)
+      # when the MJPEG mode drops, and a smaller slot drops every RAW frame.
+      # 16 MB covers 3840x1080x3 with headroom.
       - SHM_SLOT_MIN_BYTES=16777216
-    # NO static `devices:` mapping. A `- /dev/video0:/dev/video0` mapping makes
-    # the container FAIL TO START when the camera is unplugged (the host node
-    # doesn't exist → "error gathering device information") — so the whole app
-    # came up broken. `privileged: true` already grants access to all /dev/video*
-    # (incl. nodes that appear on hot-plug), so webcam-server starts with no
-    # camera (publishing the `no_camera` health, no frames) and picks the camera
-    # up when it reappears (see the 5s retry loop in capture.rs). Not
-    # bind-mounting /dev — that would shadow the IPC /dev/shm.
+    # NO static `devices:` mapping: a `/dev/video0` mapping stops the container
+    # from starting while the camera is unplugged. `privileged: true` grants
+    # every /dev/video* (hot-plugged nodes included), so webcam-server starts
+    # without a camera (`no_camera` health, no frames) and retries every 5 s.
+    # /dev is not bind-mounted — that would shadow the IPC /dev/shm.
     privileged: true
     restart: unless-stopped
     networks:
@@ -84,9 +87,9 @@ services:
     container_name: conecsa-inference-service
     runtime: nvidia
     # No privileged / host PID: the GPU comes from `runtime: nvidia` +
-    # NVIDIA_VISIBLE_DEVICES, GPIO goes through the /run/conecsa-gpio socket
-    # volume, and host metrics moved to the os hardware agent. The dev
-    # compose has always run this same image without either flag.
+    # NVIDIA_VISIBLE_DEVICES, GPIO goes through the /run/conecsa-gpio SHM
+    # channel, and host metrics come from the `os-base` hardware agent. The dev
+    # compose runs this same image without either flag.
     ipc: "service:webcam-server"
     environment:
       # GPU Configuration
@@ -156,27 +159,37 @@ services:
       # baked into os-base instead.
       - YOLO_AUTOINSTALL=false
       - TENSORRT_AUTO_REBUILD_ENGINE=1
-      # 192 MB is enough for 640 engines; a 1280 engine build usually needs
-      # 512 (the builder still retries 256/192/128 before giving up).
+      # 512 MB so a 1280 engine build fits (192 MB, the dev compose value, is
+      # enough for 640 engines; the builder still retries 256/192/128 before
+      # giving up).
       - TENSORRT_WORKSPACE_MB=512
       # Number of parallel TensorRT inference contexts. >1 runs that many worker
       # subprocesses (ports 5501, 5502, …) and that many decode+infer pipeline
       # lanes, overlapping CPU/GPU across cores. Measured ~1.8x GPU scaling at 2.
       - TENSORRT_CONTEXTS=2
 
-      # Memory containment via jemalloc (paired with zram-swap + THP=madvise
-      # on the Yocto host). Replaces the earlier attempt to cap glibc arenas
-      # (MALLOC_ARENA_MAX=2), which trimmed RSS but serialized every
-      # cv2.imdecode/imencode malloc/free on a single mutex and dropped FPS
-      # from 27 to 10. jemalloc:
-      #   - multi-thread performance without the few-arenas bottleneck;
-      #   - returns pages to the OS via dirty_decay_ms/muzzy_decay_ms (default
-      #     10s; 5s here to favor low RSS) without needing malloc_trim-style
-      #     hacks;
-      #   - background_thread=true enables the internal thread that runs the
-      #     decay periodically instead of only during free().
-      # libjemalloc2 is installed in os-base/Dockerfile.os-base. LD_PRELOAD propagates
-      # to every subprocess (TRT worker, _pt_onnx_converter).
+      # Face recognition (the `face` application type), per model unless the
+      # operator changes them in Settings. The embedder runs on its own worker
+      # (TENSORRT_WORKER_PORT+17, past the contexts above and the labeling
+      # worker at +16, or past the last lane when TENSORRT_CONTEXTS exceeds
+      # 16); the gallery build uses the next two ports while it runs.
+      # FACE_MATCH_THRESHOLD is the cosine similarity a face must beat to take
+      # an enrolled person's name — SFace's published operating point; raising
+      # it rejects more, lowering it confuses lookalikes.
+      - FACE_MATCH_THRESHOLD=0.363
+      # Faces whose shorter side is below this many pixels are ignored.
+      - FACE_MIN_SIZE_PX=40
+      # Faces embedded per frame, largest (nearest) first — the stage C budget.
+      - FACE_MAX_FACES=5
+
+      # Memory containment via jemalloc (paired with zram-swap + THP=madvise on
+      # the Yocto host). Capping glibc arenas (MALLOC_ARENA_MAX=2) instead puts
+      # every cv2 encode/decode allocation behind one mutex and costs most of
+      # the FPS. jemalloc returns pages to the OS after dirty/muzzy_decay_ms
+      # (5 s here, favoring low RSS), and background_thread runs that decay
+      # periodically instead of only during free().
+      # libjemalloc2 is installed in os-base/Dockerfile.os-base. LD_PRELOAD
+      # propagates to every subprocess (TensorRT worker, _pt_onnx_converter).
       # PYTORCH_CUDA_ALLOC_CONF only affects the .pt -> .onnx conversion subprocess.
       - LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
       - MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
@@ -185,7 +198,7 @@ services:
     # the api-gateway over the compose network); the processed frames cross via
     # SHM. The public API/SSE/MJPEG is served by the api-gateway.
     volumes:
-      # Shared models volume (owned by the `os` container)
+      # Shared models volume (owned by the `os-base` container)
       - models-data:/data/models
       # Offline detection buffer (store-and-forward while the hub is offline)
       - detections-data:/data/detections
@@ -246,8 +259,8 @@ services:
       - /usr/local/cuda-12.6/lib/libcudla.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcudla.so.1:ro
       - /usr/local/cuda-12.6/lib/libcudla.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcudla.so:ro
 
-      # GPIO is owned by the `os` agent now; inference only shares the
-      # shared-memory hot-path channel (trigger gate + count output).
+      # GPIO is owned by the `os-base` hardware agent; inference only shares
+      # the SHM channel (trigger gate + count output).
       - gpio-shm:/run/conecsa-gpio
 
     depends_on:
@@ -296,7 +309,7 @@ services:
       - GATEWAY_PORT=5000
       # Device software version, surfaced on /api/v1/status + /api/v1/health for
       # the conecsa-hub-vision hub to display.
-      - DEVICE_VERSION=2026.5-LTS
+      - DEVICE_VERSION=2026.6-LTS
       # Thread-per-connection: above the worst-case concurrent MJPEG + SSE
       # streams (per web tab: processed video + unified SSE; plus Node-RED).
       - WAITRESS_THREADS=32
@@ -471,10 +484,6 @@ services:
       context: .
       dockerfile: system-vision/Dockerfile.system-vision
     container_name: conecsa-system-vision
-    environment:
-      # Legacy/unused for the WASM build (the frontend resolves the API host at
-      # runtime via get_api_base_url()); points at the api-gateway for clarity.
-      - API_BASE_URL=${API_BASE_URL:-http://api-gateway:5000}
     ports:
       # Only the :443 mTLS terminator is published, so the device is reachable
       # solely through the hub. nginx still listens on :80 inside the container

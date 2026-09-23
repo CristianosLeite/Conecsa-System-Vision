@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Object-class management (HTTP/JSON).
 
 use serde::Deserialize;
@@ -5,9 +9,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::api::wasm32::http::fetch_api;
 
-/// Get classes.
 pub async fn get_classes() -> Result<Vec<String>, String> {
-    /// A `ClassesResponse` struct.
     #[derive(Deserialize)]
     struct ClassesResponse {
         classes: Vec<String>,
@@ -17,7 +19,6 @@ pub async fn get_classes() -> Result<Vec<String>, String> {
     Ok(response.classes)
 }
 
-/// Upload classes.
 pub async fn upload_classes(classes: Vec<String>) -> Result<(), String> {
     let body = serde_json::json!({ "classes": classes }).to_string();
     fetch_api::<serde_json::Value>("/api/v1/classes", "POST", Some(&body))
@@ -25,7 +26,6 @@ pub async fn upload_classes(classes: Vec<String>) -> Result<(), String> {
         .map(|_| ())
 }
 
-/// Clear classes.
 pub async fn clear_classes() -> Result<(), String> {
     fetch_api::<serde_json::Value>("/api/v1/classes", "DELETE", None)
         .await

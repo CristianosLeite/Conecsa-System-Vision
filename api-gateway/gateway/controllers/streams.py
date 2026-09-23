@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """SSE controllers: the stats stream and the unified invalidation-event stream."""
 import json
 
@@ -16,7 +20,9 @@ def stream_stats():
         stats_version, snap = event_service.stats_snapshot()
         yield f"data: {json.dumps(snap)}\n\n"
         while True:
-            _v, _events, stats_version, stats, changed = event_service.wait_for_changes(
+            # Advance ``track`` too: a stale event version makes every wait
+            # return at once, spinning keepalives after the first invalidation.
+            track, _events, stats_version, stats, changed = event_service.wait_for_changes(
                 track, stats_version, timeout=15.0
             )
             if changed and stats is not None:

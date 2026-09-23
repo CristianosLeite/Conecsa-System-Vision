@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Capture-loop orchestration: owns the camera config, the SHM producer and the
 //! restart flag, and runs the acquire→process→publish loop (with camera
 //! re-attach when the device is absent).
@@ -9,13 +13,13 @@ pub mod shm;
 
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
-pub use config::CameraConfig;
+pub use config::{CameraConfig, CameraSource};
 
 /// Path (in the shared `/dev/shm` tmpfs) where the supported camera formats are
-/// published as JSON for the inference-service to expose through its API.
+/// published as JSON; the inference-service reports them over gRPC and the
+/// api-gateway serves them over HTTP.
 pub const CAMERA_FORMATS_PATH: &str = "/dev/shm/conecsa_camera_formats.json";
 
-/// A `WebcamServer` struct.
 pub struct WebcamServer {
     pub shm: Arc<shm::ShmProducer>,
     pub config: Arc<Mutex<CameraConfig>>,
@@ -24,9 +28,8 @@ pub struct WebcamServer {
 }
 
 impl WebcamServer {
-    /// New.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let cfg = CameraConfig::default();
+        let cfg = CameraConfig::from_env()?;
         let shm = shm::ShmProducer::new(&cfg.shm_name, cfg.width, cfg.height)
             .map_err(|e| format!("Failed to create shared memory: {e}"))?;
 
@@ -44,15 +47,20 @@ impl WebcamServer {
     }
 }
 
-/// Run server.
 pub fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let server = Arc::new(WebcamServer::new()?);
 
     let cfg = server.config.lock().unwrap().clone();
-    eprintln!(
-        "[webcam] Capture daemon started — camera {} @ {}x{} {} fps",
-        cfg.camera_index, cfg.width, cfg.height, cfg.framerate
-    );
+    match cfg.source {
+        CameraSource::Local => eprintln!(
+            "[webcam] Capture daemon started — camera {} @ {}x{} {} fps",
+            cfg.camera_index, cfg.width, cfg.height, cfg.framerate
+        ),
+        CameraSource::Network => eprintln!(
+            "[webcam] Capture daemon started — network camera {}:{}",
+            cfg.network_host, cfg.network_port
+        ),
+    }
     eprintln!("[webcam] Frames written to SHM /{}", cfg.shm_name);
     drop(cfg);
 

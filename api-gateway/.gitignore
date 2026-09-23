@@ -4,3 +4,8 @@ gateway/proto/*_pb2.pyi
 gateway/proto/*_pb2_grpc.py
 __pycache__/
 *.py[cod]
+
+# Tests certificates
+*.crt
+*.key
+*.pem

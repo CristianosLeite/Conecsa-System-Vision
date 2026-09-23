@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """SAM3 worker lifecycle + segmentation requests.
 
 Lazy: the worker subprocess (and the ~2-3GB of GPU memory it pins) exists only
@@ -133,8 +137,8 @@ class SamService:
         text_prompt: str,
         points: List[Dict[str, Any]],
         threshold: Optional[float] = None,
-    ) -> Tuple[List[Dict[str, float]], List[float]]:
-        """Segment."""
+    ) -> Tuple[List[Dict[str, float]], List[float], List[List[List[List[float]]]]]:
+        """Boxes, scores and each box's mask rings (``[]`` from an older worker)."""
         with self._lock:
             if not self.is_loaded():
                 self.load()
@@ -151,7 +155,9 @@ class SamService:
             self._touch()
         if resp.get("status") != "ok":
             raise RuntimeError(resp.get("error", "Segmentation failed"))
-        return resp.get("boxes", []), resp.get("scores", [])
+        boxes = resp.get("boxes", [])
+        polygons = resp.get("polygons") or [[] for _ in boxes]
+        return boxes, resp.get("scores", []), polygons
 
     # ── internals ─────────────────────────────────────────────────────────────
 

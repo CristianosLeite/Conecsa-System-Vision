@@ -55,6 +55,7 @@ Thumbs.db
 # Documentation
 docs/
 *.md
+manual/
 
 # Test files
 **/tests

@@ -1,12 +1,15 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 syntax = "proto3";
 
 package hardware;
 
-// gRPC contract between `inference-service` (client) and the `os` container's
-// hardware-management agent (server). The agent owns all host hardware access:
-// network/Wi-Fi configuration (systemd-networkd + wpa_supplicant) and — once
-// migrated — GPIO control. This is the first real gRPC *service* in the repo;
-// the other .proto files define message schemas only.
+// gRPC contract between the api-gateway (client) and the `os-base` hardware
+// agent (server). The agent owns all host hardware access: network/Wi-Fi
+// configuration (systemd-networkd + wpa_supplicant), GPIO, system metrics,
+// power and the system clock.
 
 message Empty {}
 
@@ -35,7 +38,7 @@ message InterfaceConfig {
   bool present = 7;            // false when no such interface exists on the host
 }
 
-// Current Wi-Fi association state (subset of `wpa_cli status`).
+// Current Wi-Fi association state (subset of wpa_supplicant's STATUS).
 message WifiStatus {
   string ssid = 1;             // associated SSID ("" when not connected)
   string state = 2;            // wpa_state, e.g. "COMPLETED", "SCANNING", "DISCONNECTED"
@@ -87,10 +90,59 @@ message WifiForgetRequest {
   string ssid = 1;
 }
 
+// ── Wi-Fi access point ─────────────────────────────────────────────────────
+//
+// The device can turn its single radio into a WPA2 access point so a remote
+// camera running the Conecsa camera app can join it directly, with no router
+// on site. While the access point is up the device is **off its Wi-Fi network**: the hub
+// reaches it over the wired port only. The agent therefore requires a wired
+// link with an IPv4 address (link-local included: a hub on a direct cable has
+// nothing else) before starting, never persists the access
+// point (an agent restart or a reboot returns the radio to station mode) and
+// stops it by itself when no remote camera has joined within five minutes.
+
+// One remote camera (station) joined to the access point. Identified by the
+// address the device's DHCP server leased it — never by its hardware address.
+message ApStation {
+  string address = 1;          // leased IPv4 address, "" while the lease is pending
+  string hostname = 2;         // as sent in the DHCP request, "" when none
+  int32 signal = 3;            // RSSI dBm as seen by the device (0 when unknown)
+}
+
+// State of the access point (GetApStatus). Never carries the passphrase.
+message ApStatus {
+  bool active = 1;             // the radio is an access point with an address
+  string ssid = 2;             // the network name served ("" when inactive)
+  uint32 frequency_mhz = 3;    // 5180 / 5200 / 5220 / 5240 for channels 36 / 40 / 44 / 48
+  string address = 4;          // the device's address on the access point
+  uint32 prefix = 5;
+  repeated ApStation stations = 6;
+  // Seconds left before the access point stops for lack of a remote camera. 0
+  // once one has joined (a later disconnect does not stop it) and when inactive.
+  uint32 join_deadline_remaining_secs = 7;
+  bool wired_ready = 8;        // the wired precondition (carrier + an IPv4 address) holds now
+  string message = 9;          // why the last start or stop ended the way it did
+  // Channels (36, 40, 44, 48) the radio may start a network on right now. The
+  // regulatory NO_IR flag moves with the beacons the driver has heard, so this
+  // changes over time; empty when the daemon cannot say.
+  repeated uint32 channels = 10;
+}
+
+// StartAp parameters. The channel is 36, 40, 44 or 48 (the non-DFS block), or
+// 0 for automatic: the agent then takes a channel the radio may initiate a
+// network on right now, preferring the one the station link uses. An explicit
+// channel that is blocked at the moment (NO_IR) is refused before the radio
+// is touched, naming the usable ones.
+message ApRequest {
+  string ssid = 1;             // 1–32 bytes of UTF-8
+  string passphrase = 2;       // WPA2 passphrase, 8–63 printable ASCII characters
+  uint32 channel = 3;          // 36 / 40 / 44 / 48, or 0 = automatic
+}
+
 // ── GPIO ─────────────────────────────────────────────────────────────────────
-// The 7 output pins are now freely-controllable digital outputs (driven on
-// demand from Node-RED over gRPC), not a binary detection counter. The pin-7
-// trigger gate is unchanged and still rides the per-frame SHM channel.
+// Output pins 29, 31 and 33 (BOARD numbering) are digital outputs driven on
+// demand over gRPC. The pin-7 trigger gate is read per frame from the GPIO SHM
+// channel, not over gRPC.
 
 // Current driven level of a single output pin (BOARD numbering).
 message GpioPinState {
@@ -101,7 +153,7 @@ message GpioPinState {
 message GpioStatus {
   bool available = 1;
   bool enabled = 2;            // trigger/gate mode on
-  reserved 3;                  // was: uint32 count (binary detection counter)
+  reserved 3;                  // was count
   repeated GpioPinState pins = 4;  // current level of each controllable output pin
 }
 
@@ -116,9 +168,8 @@ message GpioPinRequest {
 }
 
 // ── System metrics (host introspection — CPU/RAM/disk/temp/GPU from sysfs) ────
-// Lives with the hardware agent (it already owns host introspection). The
-// `optional` floats are absent when the sensor/metric is unavailable, so the
-// gateway can relay JSON `null` (matching the previous shape).
+// The `optional` floats are absent when the sensor/metric is unavailable, so
+// the gateway can relay JSON `null`.
 message SystemStatus {
   float  cpu_usage = 1;            // percent
   float  ram_usage = 2;            // percent
@@ -167,6 +218,11 @@ service HardwareService {
   rpc ScanWifi(Empty) returns (WifiScanResult);
   rpc ConnectWifi(WifiConnectRequest) returns (WifiConnectResult);
   rpc ForgetWifi(WifiForgetRequest) returns (Result);
+  // Wi-Fi access point for the remote camera (see ApStatus). StartAp is
+  // rollback-safe: any failed step returns the radio to station mode.
+  rpc GetApStatus(Empty) returns (ApStatus);
+  rpc StartAp(ApRequest) returns (Result);
+  rpc StopAp(Empty) returns (Result);
 
   // GPIO control. The pin-7 trigger gate uses SHM per-frame; the rest are
   // config/event-style ops served here: enable the gate, drive output pins,

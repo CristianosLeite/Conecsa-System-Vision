@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tests for conecsa_common.atomic — power-cut-safe persistence."""
 import json
 import os

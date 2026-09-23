@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Existing device models as fine-tuning bases and labeling assistants.
 
 The inference-service owns the model directory and keeps, next to each
@@ -12,10 +16,11 @@ result back.
 import logging
 import os
 import tempfile
-from typing import List
+from typing import Dict
 from urllib.parse import quote
 
 import requests
+from conecsa_common.tasks import task_or_default
 
 from .dataset_service import DatasetError
 
@@ -53,19 +58,24 @@ def model_stem(name: str) -> str:
     return os.path.splitext(name)[0]
 
 
-def list_models_with_weights(gateway_addr: str) -> List[str]:
-    """Device model names that keep a training checkpoint (``has_weights``)."""
+def list_models_with_weights(gateway_addr: str) -> Dict[str, str]:
+    """Device models that keep a training checkpoint (``has_weights``), name → task.
+
+    A fine-tune must start from a model of the dataset's task. A model listed
+    without a task (an inference-service that predates application types)
+    is a detection model.
+    """
     resp = requests.get(f"{gateway_addr}/api/v1/models", timeout=_LIST_TIMEOUT_S)
     resp.raise_for_status()
     try:
         models = resp.json().get("models", [])
     except ValueError as exc:
         raise DatasetError("Could not read the device model list") from exc
-    return [
-        str(m.get("name", ""))
+    return {
+        str(m.get("name", "")): task_or_default(m.get("task"))
         for m in models
         if isinstance(m, dict) and m.get("has_weights") and str(m.get("name", ""))
-    ]
+    }
 
 
 def fetch_weights(gateway_addr: str, model_name: str, dest_dir: str) -> str:

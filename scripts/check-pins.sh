@@ -1,4 +1,9 @@
 #!/bin/bash
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Reject moving build inputs (CI lint gate).
 #
 # 1. No Dockerfile or script may download from a GitHub `releases/latest`
@@ -70,6 +75,21 @@ for df in system-vision/Dockerfile.system-vision system-vision/Dockerfile.system
     done
 done
 
+# The face model pins (scripts/face-models.pin, used by fetch-face-models.sh)
+# must agree with the ARGs the inference-service Dockerfile verifies them with:
+# a drifting checksum there would either fail every build or, worse, accept a
+# graph nobody pinned.
+# shellcheck source=face-models.pin
+. scripts/face-models.pin
+for var in FACE_DETECTOR_FILE FACE_DETECTOR_SHA256 FACE_EMBEDDER_FILE FACE_EMBEDDER_SHA256; do
+    want="${!var}"
+    df=inference-service/Dockerfile.inference-service
+    if [ -f "$df" ] && grep -q "^ARG ${var}=" "$df" && ! grep -q "^ARG ${var}=${want}$" "$df"; then
+        echo "check-pins: $df pins ${var} differently from scripts/face-models.pin" >&2
+        status=1
+    fi
+done
+
 # CI tools: `cargo install <tool>` compiles the tool from source on every run
 # (wasm-pack 148s, cargo-audit 325s before this gate existed). Use
 # taiki-e/install-action with an explicit `tool: name@version` instead.
@@ -129,6 +149,17 @@ if bad="$(find .github/workflows -name '*.yml' -o -name '*.yaml' | sort | xargs 
     echo "check-pins: taiki-e/install-action steps must pin every tool and set 'fallback: none':" >&2
     echo "$bad" >&2
     status=1
+fi
+
+# The cargo-about pin (third-party notices) must match the version the CI
+# workflow installs. The pin file is absent where the notices are not built.
+if [ -f scripts/cargo-about.pin ]; then
+    # shellcheck source=cargo-about.pin
+    . scripts/cargo-about.pin
+    if ! grep -rqE "cargo-about@${CARGO_ABOUT_VERSION//./\\.}([^0-9.]|$)" .github/workflows/; then
+        echo "check-pins: no workflow installs cargo-about@${CARGO_ABOUT_VERSION} (scripts/cargo-about.pin)" >&2
+        status=1
+    fi
 fi
 
 if [ "$status" -eq 0 ]; then

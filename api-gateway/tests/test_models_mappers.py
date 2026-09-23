@@ -1,8 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the model/conversion gRPC message -> JSON mapper."""
 from types import SimpleNamespace
 
 import pytest
-from gateway.controllers.models import _conversion_dict, _train_geometry_from_form
+from gateway.controllers.models import (
+    _conversion_dict,
+    _model_dict,
+    _task_from_form,
+    _train_geometry_from_form,
+)
 
 
 def _job(**kw):
@@ -52,3 +61,32 @@ class TestTrainGeometryForm:
     ])
     def test_only_well_formed_values_pass(self, raw, expected):
         assert _train_geometry_from_form(raw) == expected
+
+
+class TestModelDict:
+    def _model(self, **kw):
+        base = dict(name="m.engine", size=10, modified=1.5, is_active=True,
+                    has_weights=False, task="detect")
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_relays_every_field(self):
+        assert _model_dict(self._model()) == {
+            "name": "m.engine", "size": 10, "modified": 1.5, "is_active": True,
+            "has_weights": False, "task": "detect",
+        }
+
+    def test_an_empty_task_is_detect(self):
+        # An inference-service that predates application types sends none.
+        assert _model_dict(self._model(task=""))["task"] == "detect"
+
+    def test_an_unknown_task_is_relayed_verbatim(self):
+        assert _model_dict(self._model(task="pose"))["task"] == "pose"
+
+
+class TestTaskForm:
+    @pytest.mark.parametrize("raw,expected", [
+        (None, ""), ("", ""), (" Detect ", "detect"), ("classify", "classify"),
+    ])
+    def test_normalizes(self, raw, expected):
+        assert _task_from_form(raw) == expected

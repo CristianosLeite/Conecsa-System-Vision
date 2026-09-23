@@ -1,14 +1,37 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Pure decision helpers for the dataset editor.
 //!
 //! No signals, no i18n, no DOM: the async callbacks in `actions`/`ai`/`tasks`
 //! call these for every non-trivial decision, so the rules are unit-tested in
 //! `tests.rs` without mounting a component.
 
-use crate::api::{LabelModelStatusResponse, TrainingImageInfo, TrainingJobStatus};
+use crate::api::{
+    LabelBox, LabelModelStatusResponse, LabelPolygon, TrainingImageInfo, TrainingJobStatus,
+};
 use crate::class_color::class_display_name;
 use crate::components::configuration::model_conversion::PendingConversion;
+use crate::models::Task;
 
+use super::super::label_geometry::{box_ring, Pt};
 use super::state::Assistant;
+
+/// The instance id for a new object in a segmentation image: one past the
+/// highest in use, so the rings of different objects never share one.
+pub(crate) fn next_instance(polygons: &[LabelPolygon]) -> u32 {
+    polygons.iter().map(|p| p.instance + 1).max().unwrap_or(0)
+}
+
+/// The rings an accepted suggestion becomes in a segmentation dataset: its
+/// mask's rings, or its box promoted to a rectangle when it has no mask.
+pub(crate) fn suggestion_rings(b: &LabelBox, rings: Option<&Vec<Vec<Pt>>>) -> Vec<Vec<Pt>> {
+    match rings {
+        Some(rings) if !rings.is_empty() => rings.clone(),
+        _ => vec![box_ring(b.cx, b.cy, b.w, b.h)],
+    }
+}
 
 /// Index of the dataset class whose display name matches `name`
 /// (case-insensitive; class entries may carry a trailing color).
@@ -37,10 +60,15 @@ pub(crate) enum JobTransition {
 /// Classify a polled status against the previous one. `had_job` is whether
 /// the page already holds a job snapshot (a stale terminal status from a
 /// previous session counts, which is what the poll's seeding relies on).
-pub(crate) fn job_transition(prev: &str, next: &TrainingJobStatus, had_job: bool) -> JobTransition {
+pub(crate) fn job_transition(
+    prev: &str,
+    next: &TrainingJobStatus,
+    had_job: bool,
+    task: Task,
+) -> JobTransition {
     match next.status.as_str() {
         "done" if prev != "done" => JobTransition::Finished {
-            pending: pending_conversion(next),
+            pending: pending_conversion(next, task),
         },
         "failed" if prev != "failed" && !prev.is_empty() => JobTransition::Failed,
         "canceled" if prev != "canceled" && !prev.is_empty() => JobTransition::Canceled,
@@ -49,11 +77,17 @@ pub(crate) fn job_transition(prev: &str, next: &TrainingJobStatus, had_job: bool
     }
 }
 
-/// The conversion job a finished run handed off, if it produced one.
-pub(crate) fn pending_conversion(job: &TrainingJobStatus) -> Option<PendingConversion> {
+/// The conversion job a finished run handed off, if it produced one. A face
+/// run uploads a `.faces` package (the photos the gallery is built from), every
+/// other task the trained `.pt` weights.
+pub(crate) fn pending_conversion(
+    job: &TrainingJobStatus,
+    task: Task,
+) -> Option<PendingConversion> {
+    let ext = if task == Task::Face { "faces" } else { "pt" };
     (!job.conversion_job_id.is_empty()).then(|| PendingConversion {
         job_id: job.conversion_job_id.clone(),
-        filename: format!("{}.pt", job.model_name),
+        filename: format!("{}.{ext}", job.model_name),
         elapsed_secs: 0.0,
     })
 }
@@ -164,6 +198,27 @@ pub(crate) fn can_train(
     has_classes: bool,
 ) -> bool {
     image_count >= min_images && has_classes && labeled > 0
+}
+
+/// Distinct classes that label at least one image (classification).
+pub(crate) fn labeled_class_count(images: &[TrainingImageInfo]) -> u32 {
+    let mut classes: Vec<u32> = images.iter().filter_map(|i| i.image_class).collect();
+    classes.sort_unstable();
+    classes.dedup();
+    classes.len() as u32
+}
+
+/// A classifier trains with enough images and labeled images of at least two
+/// classes — one class is nothing to tell apart (the training-service refuses
+/// it too).
+pub(crate) fn can_train_classify(image_count: u32, min_images: u32, labeled_classes: u32) -> bool {
+    image_count >= min_images && labeled_classes >= 2
+}
+
+/// A face gallery is built, not trained: one person with one labeled photo is
+/// already a gallery, so there is no image minimum to meet.
+pub(crate) fn can_train_face(labeled_people: u32) -> bool {
+    labeled_people >= 1
 }
 
 #[cfg(test)]

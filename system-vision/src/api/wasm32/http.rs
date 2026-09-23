@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Backend access layer (HTTP/SSE on wasm, Tauri IPC on native).
 
 /// Low-level HTTP transport helpers used by all wasm32 services.
@@ -10,7 +14,6 @@ use web_sys::{Request, RequestInit, RequestMode, Response};
 use crate::app::get_api_base_url;
 use crate::components::access;
 
-/// Set headers.
 fn set_headers(request: &Request, headers: &[(&str, &str)]) -> Result<(), String> {
     for (name, value) in headers {
         request
@@ -39,6 +42,26 @@ pub async fn fetch_api<T: for<'de> Deserialize<'de>>(
     method: &str,
     body: Option<&str>,
 ) -> Result<T, String> {
+    fetch_api_inner(endpoint, method, body, true).await
+}
+
+/// `fetch_api` for a request body that carries a secret: the body is sent but
+/// never written to the browser console. The response is still logged, so use
+/// this only with endpoints whose responses are secret-free.
+pub async fn fetch_api_secret_body<T: for<'de> Deserialize<'de>>(
+    endpoint: &str,
+    method: &str,
+    body: &str,
+) -> Result<T, String> {
+    fetch_api_inner(endpoint, method, Some(body), false).await
+}
+
+async fn fetch_api_inner<T: for<'de> Deserialize<'de>>(
+    endpoint: &str,
+    method: &str,
+    body: Option<&str>,
+    log_body: bool,
+) -> Result<T, String> {
     let window = web_sys::window().ok_or("No window object")?;
     let base_url = get_api_base_url();
     let url = format!("{}{}", base_url, endpoint);
@@ -50,7 +73,9 @@ pub async fn fetch_api<T: for<'de> Deserialize<'de>>(
     opts.set_mode(RequestMode::Cors);
 
     if let Some(body_str) = body {
-        web_sys::console::log_1(&format!("Request body: {}", body_str).into());
+        if log_body {
+            web_sys::console::log_1(&format!("Request body: {}", body_str).into());
+        }
         opts.set_body(&JsValue::from_str(body_str));
     }
 

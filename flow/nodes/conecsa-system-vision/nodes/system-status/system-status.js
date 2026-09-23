@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file system-status node — collects system metrics (CPU, RAM, disk,
  *   temperature, GPU) from `/api/system/status` on demand or on an interval.

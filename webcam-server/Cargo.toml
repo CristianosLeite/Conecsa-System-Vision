@@ -1,7 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 [package]
 name = "webcam-server"
-version = "2026.5.0"
+version = "2026.6.0"
 edition = "2024"
+license = "AGPL-3.0-only"
 
 [[bin]]
 name = "webcam_server"

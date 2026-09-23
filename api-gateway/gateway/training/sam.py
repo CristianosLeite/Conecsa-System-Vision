@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """SAM (Segment Anything) assisted-labeling routes: status, load/unload of the
 checkpoint and point/text-prompted segmentation."""
 import logging
@@ -7,7 +11,7 @@ from flask import request
 
 from ..grpc_clients import clients, inf, trn
 from . import training_bp
-from .helpers import _grpc_error, _json, _json_error, _result
+from .helpers import _grpc_error, _json, _json_error, _pairs, _result
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +89,13 @@ def training_sam_segment():
         return _grpc_error(exc)
     if not r.success:
         return _json_error(r.message, 400)
+    # Each box's mask as normalized rings, parallel to boxes ([] without one).
+    rings: list = [[] for _ in r.boxes]
+    for polygon in r.polygons:
+        if polygon.instance < len(rings):
+            rings[polygon.instance].append(_pairs(polygon.points))
     return _json({
         "boxes": [{"cx": b.cx, "cy": b.cy, "w": b.w, "h": b.h} for b in r.boxes],
         "scores": list(r.scores),
+        "polygons": rings,
     })

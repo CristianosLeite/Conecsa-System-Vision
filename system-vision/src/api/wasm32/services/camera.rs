@@ -1,8 +1,15 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Backend access layer (HTTP/SSE on wasm, Tauri IPC on native).
 
-use crate::api::wasm32::http::fetch_api;
+use crate::api::wasm32::http::{fetch_api, fetch_api_secret_body};
 
-/// A `SupportedFormat` struct.
+/// Capture source values of `current_source` / the `source` request field.
+pub const SOURCE_LOCAL: &str = "local";
+pub const SOURCE_NETWORK: &str = "network";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SupportedFormat {
     pub format: String,
@@ -12,7 +19,6 @@ pub struct SupportedFormat {
     pub fps: Vec<u32>,
 }
 
-/// A `CameraDevice` struct.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CameraDevice {
     pub path: String,
@@ -22,7 +28,17 @@ pub struct CameraDevice {
     pub supported_formats: Vec<SupportedFormat>,
 }
 
-/// A `CameraDevicesResponse` struct.
+/// Payload of the `camera_health_changed` event: the webcam-server's health and
+/// the capture source it refers to. Never carries the token.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CameraHealth {
+    pub status: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub source: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CameraDevicesResponse {
     pub devices: Vec<CameraDevice>,
@@ -51,23 +67,40 @@ pub struct CameraDevicesResponse {
     pub current_stereo_offset: f32,
     #[serde(default)]
     pub current_stereo_offset_y: f32,
+    /// `starting` | `capturing` | `no_camera`.
+    #[serde(default)]
+    pub camera_status: String,
+    /// Why a network source is not capturing (`unauthorized`, `stalled`, ...).
+    #[serde(default)]
+    pub camera_detail: String,
+    /// `local` or `network`; a backend that predates the field is local.
+    #[serde(default = "default_source")]
+    pub current_source: String,
+    #[serde(default)]
+    pub current_network_host: String,
+    #[serde(default)]
+    pub current_network_port: u32,
+    /// Whether a stream token is stored. The token itself is write-only: no
+    /// response ever carries it.
+    #[serde(default)]
+    pub network_token_set: bool,
 }
 
-/// Default stereo alpha.
+fn default_source() -> String {
+    SOURCE_LOCAL.to_string()
+}
+
 fn default_stereo_alpha() -> f32 {
     0.5
 }
 
-/// Default exposure min.
 fn default_exposure_min() -> u32 {
     1
 }
-/// Default exposure max.
 fn default_exposure_max() -> u32 {
     300_000
 }
 
-/// Default gain.
 fn default_gain() -> u32 {
     0
 }
@@ -75,6 +108,42 @@ fn default_gain() -> u32 {
 /// GET /api/v1/camera/devices — list V4L2 devices + current webcam-server config
 pub async fn get_camera_devices() -> Result<CameraDevicesResponse, String> {
     fetch_api::<CameraDevicesResponse>("/api/v1/camera/devices", "GET", None).await
+}
+
+/// Request body for a capture-source update. `None` fields are omitted; an
+/// omitted token keeps the one the device has stored.
+pub fn camera_source_body(
+    source: &str,
+    host: Option<&str>,
+    port: Option<u32>,
+    token: Option<&str>,
+) -> serde_json::Value {
+    let mut patch = serde_json::Map::new();
+    patch.insert("source".into(), source.into());
+    if let Some(host) = host {
+        patch.insert("network_host".into(), host.into());
+    }
+    if let Some(port) = port {
+        patch.insert("network_port".into(), port.into());
+    }
+    if let Some(token) = token {
+        patch.insert("network_token".into(), token.into());
+    }
+    serde_json::Value::Object(patch)
+}
+
+/// POST /api/v1/camera/config — select the capture source (device-level). The
+/// body may carry the stream token, so it bypasses request-body logging.
+pub async fn update_camera_source(
+    source: &str,
+    host: Option<String>,
+    port: Option<u32>,
+    token: Option<String>,
+) -> Result<(), String> {
+    let body = camera_source_body(source, host.as_deref(), port, token.as_deref()).to_string();
+    fetch_api_secret_body::<serde_json::Value>("/api/v1/camera/config", "POST", &body)
+        .await
+        .map(|_| ())
 }
 
 /// POST /api/v1/camera/config — push partial config to the webcam server

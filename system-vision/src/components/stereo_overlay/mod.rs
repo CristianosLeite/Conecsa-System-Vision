@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Stereo overlay alignment: toggle button, alignment panel, and range control.
 
 mod alignment_panel;

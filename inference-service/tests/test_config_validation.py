@@ -1,4 +1,8 @@
-"""The shared camera/config validation layer and its two consumers (review M2).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""The shared camera/config validation layer and its two consumers.
 
 Both API surfaces — the dedicated camera path and the generic config patch —
 must reject the same values with a 400 and apply the same values the same

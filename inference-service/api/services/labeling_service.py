@@ -1,10 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Model-assisted labeling on the device's own TensorRT runtime.
 
 The training page can pre-label a dataset image with an engine that already
 exists on the device. It runs here, not in the training-service, so the
 suggestions come from exactly the pipeline live detection uses — the same
 ``ModelManager`` preprocessing (letterbox, ``TILING_MODE`` grid), the same
-``YOLODetector`` decode/merge/NMS and the model's own classes sidecar. The
+task postprocessor (``api.postprocess``: decode/merge/NMS for detection) and
+the model's own classes sidecar. The
 engine is pinned to a private worker (``TENSORRT_LABEL_WORKER_PORT``) so it
 never displaces the live model on the base ports; ``ReleaseRuntime`` drops it
 with every other worker, and the training page unloads it on exit.
@@ -13,31 +18,29 @@ import copy
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import cv2
 import numpy as np
 
+from api import postprocess
 from api.model_manager import ModelManager
 from api.model_paths import ENGINE_FILE_EXTENSIONS, validate_model_filename
+from api.postprocess.base import Postprocessor
 from api.repositories.class_labels_repository import ClassLabelsRepository
-from api.yolo_detector import YOLODetector
+from api.worker_ports import LABEL_SLOT, private_worker_port
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_THRESHOLD = 0.5
 #: Offset from ``TENSORRT_WORKER_PORT`` for the private labeling worker —
-#: past any ``TENSORRT_CONTEXTS`` lane the live pipeline can occupy.
-_LABEL_PORT_OFFSET = 16
+#: past every ``TENSORRT_CONTEXTS`` lane the live pipeline can occupy
+#: (``worker_ports``: +16 by default, later when more lanes are configured).
 
 
 def label_worker_port() -> int:
     """Port of the private labeling worker (``TENSORRT_LABEL_WORKER_PORT``)."""
-    base = int(os.environ.get("TENSORRT_WORKER_PORT", "5501"))
-    try:
-        return int(os.environ.get("TENSORRT_LABEL_WORKER_PORT", str(base + _LABEL_PORT_OFFSET)))
-    except ValueError:
-        return base + _LABEL_PORT_OFFSET
+    return private_worker_port(LABEL_SLOT, "TENSORRT_LABEL_WORKER_PORT")
 
 
 class LabelingService:
@@ -53,7 +56,8 @@ class LabelingService:
         self._model_name = ""
         self._label_config: Any = None
         self._manager: Optional[ModelManager] = None
-        self._detector: Optional[YOLODetector] = None
+        self._detector: Optional[Postprocessor] = None
+        self._task: Optional[str] = None
 
     # ── status ────────────────────────────────────────────────────────────────
 
@@ -67,6 +71,11 @@ class LabelingService:
         with self._lock:
             return self._model_name if self._manager is not None else ""
 
+    def loaded_task(self) -> Optional[str]:
+        """Task of the loaded engine, ``None`` when nothing is loaded."""
+        with self._lock:
+            return self._task if self._manager is not None else None
+
     def status(self) -> Dict[str, Any]:
         """Status."""
         with self._lock:
@@ -77,6 +86,7 @@ class LabelingService:
                 "model_name": self._model_name if loaded else "",
                 "class_names": names,
                 "message": "",
+                "task": (self._task or "") if loaded else "",
             }
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
@@ -97,21 +107,28 @@ class LabelingService:
                 return
             self._drop()
             cfg = self._config_for(path)
+            task = self._models.task_of(model_name)
+            if task == "face":
+                raise ValueError("Face recognition models cannot assist labeling")
+            labels = ClassLabelsRepository(cfg.CLASSES_FILE_PATH).load_labels()
             try:
-                manager = ModelManager(cfg, port=self._port)
+                detector = postprocess.create(task, labels, cfg)
+            except postprocess.ContractError as ex:
+                raise ValueError(str(ex)) from None
+            try:
+                manager = ModelManager(cfg, port=self._port, task=task)
             except Exception:
                 # The worker subprocess is spawned before the engine is
                 # validated; a failed load must not leave it (and its CUDA
                 # context) around until the next runtime release.
                 self._close_worker()
                 raise
-            labels = ClassLabelsRepository(cfg.CLASSES_FILE_PATH).load_labels()
-            detector = YOLODetector(labels, cfg)
             detector.set_areas([])  # every object counts when labeling
             self._label_config = cfg
             self._manager = manager
             self._detector = detector
             self._model_name = model_name
+            self._task = task
             logger.info("Labeling engine loaded on port %d: %s (%d classes)",
                         self._port, model_name, len(labels))
         self._publish()
@@ -131,6 +148,7 @@ class LabelingService:
         self._detector = None
         self._label_config = None
         self._model_name = ""
+        self._task = None
 
     def _close_worker(self) -> None:
         # The cached client stays (like every other worker); only its
@@ -158,8 +176,15 @@ class LabelingService:
 
     # ── detection ─────────────────────────────────────────────────────────────
 
-    def detect(self, jpeg: bytes, threshold: float = 0.0) -> List[Dict[str, Any]]:
-        """Detections on one encoded image, as normalized corners on that image."""
+    def detect(self, jpeg: bytes, threshold: float = 0.0) -> Dict[str, Any]:
+        """Suggestions for one encoded image.
+
+        Returns ``{"detections", "image_class", "candidates"}``: a detection
+        engine fills ``detections`` (normalized corners on that image, and
+        for a segmentation engine each detection's ``rings``); a
+        classification engine fills ``image_class`` (the top-1 when above the
+        threshold, else ``None``) and ``candidates`` (its top-k).
+        """
         with self._lock:
             manager, detector, cfg = self._manager, self._detector, self._label_config
             if manager is None or detector is None:
@@ -171,20 +196,15 @@ class LabelingService:
 
             tensors, metas = manager.preprocess_tiles(frame)
             outputs = [manager.run_inference(tensor)[0] for tensor in tensors]
-            if manager.tiling_active:
-                _, _, detections = detector.process_tiled_detections(outputs, frame, metas)
-            else:
-                meta = metas[0]
-                _, _, detections = detector.process_detections(
-                    outputs[0], frame, scale=meta.scale, border_top=meta.border_top,
-                    actual_input_size=meta.input_size,
-                )
+            # Each image is judged on its own: no transition state carries over.
+            detector.reset_state()
+            decoded = detector.process(outputs, frame, metas, manager.tiling_active)
             height, width = frame.shape[:2]
 
         def norm(value: float, extent: int) -> float:
             return min(1.0, max(0.0, float(value) / float(extent)))
 
-        return [
+        detections = [
             {
                 "class_id": int(det.class_id),
                 "class_name": str(det.class_name),
@@ -193,9 +213,23 @@ class LabelingService:
                 "y1": norm(det.bbox[1], height),
                 "x2": norm(det.bbox[2], width),
                 "y2": norm(det.bbox[3], height),
+                "rings": [[[float(x), float(y)] for x, y in ring]
+                          for ring in (det.resolve_polygons() or ())],
             }
-            for det in detections
+            for det in decoded.items
+            if det.bbox is not None
         ]
+        image_class = None
+        if decoded.candidates is not None and decoded.items:
+            top = decoded.items[0]
+            image_class = {"class_id": int(top.class_id), "class_name": str(top.class_name),
+                           "score": float(top.confidence)}
+        candidates = [
+            {"class_id": int(c["class_id"]), "class_name": str(c["class_name"]),
+             "score": float(c["confidence"])}
+            for c in (decoded.candidates or [])
+        ]
+        return {"detections": detections, "image_class": image_class, "candidates": candidates}
 
     def _publish(self) -> None:
         if self._events is None:

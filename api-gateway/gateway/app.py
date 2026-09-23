@@ -1,10 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """API gateway Flask app.
 
-Mirrors the inference-service monolith's REST/SSE/MJPEG surface byte-for-byte,
-but every handler is a thin translation to gRPC (inference control + os hardware
-agent) or POSIX SHM (the two MJPEG feeds). The external contract — routes,
-status codes, JSON shapes, protobuf negotiation, SSE envelopes — is unchanged so
-the Leptos app and Node-RED flows need no edits.
+Owns the device's REST/SSE/MJPEG surface; every handler is a thin translation
+to gRPC (inference-service, training-service, `os-base` hardware agent) or POSIX
+SHM (the two MJPEG feeds).
 
 This module only assembles the app: the handlers live in the `controllers`
 package (per-resource, on `api_bp`), the training surface in `training` and
@@ -12,13 +14,15 @@ device enrollment in `enroll`; shared response/event helpers are in `helpers`.
 """
 import logging
 
-from flask import Flask, request
+from flask import Flask, g, request
 from werkzeug.exceptions import HTTPException
 
 from .config import settings
-from .helpers import _json
+from .helpers import _json, _response_json
 
 logger = logging.getLogger(__name__)
+
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 app = Flask(__name__)
 # Bound multipart uploads (models, dataset ZIPs) before they hit the relays;
@@ -80,6 +84,32 @@ def record_audit(response):
     so a per-handler decorator would miss half of them. See gateway/audit.py.
     """
     audit.record_request(request, response)
+    return response
+
+
+@app.after_request
+def log_refusal(response):
+    """Log why a mutating request was refused (4xx other than 404).
+
+    Central for the same reason as the audit hook, and because refusals come
+    both from the gateway itself (e.g. an application switch during a training
+    handover) and from relayed gRPC statuses; the hub audit trail used to be
+    the only place that explained them. Never raises.
+    """
+    try:
+        if (request.method in _MUTATING_METHODS and 400 <= response.status_code < 500
+                and response.status_code != 404 and not response.is_streamed):
+            if response.is_json:
+                body = _response_json(response)
+                reason = body.get("error") or body.get("message") or ""
+            else:
+                # Protobuf replies (native clients) carry their reason on g;
+                # see helpers._protobuf.
+                reason = g.get("refusal_reason", "")
+            logger.warning("refused %s %s -> %d: %s", request.method, request.path,
+                           response.status_code, reason)
+    except Exception:  # noqa: BLE001 - logging must never break a request
+        logger.exception("failed to log a refused request")
     return response
 
 

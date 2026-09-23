@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Training page — dataset management + on-device YOLO training.
 //!
 //! Replaces the dashboard entirely while `ViewMode::Training` is active.
@@ -18,6 +22,7 @@ mod dataset_gallery;
 mod dataset_name_modal;
 mod dataset_upload_modal;
 mod gallery;
+mod image_class_picker;
 mod label_canvas;
 mod label_editor;
 mod label_geometry;

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file detection-models node — lists available models or selects the active
  *   model by name via the api-gateway (`/api/v1/models`, `/api/v1/model/select`).

@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
@@ -9,8 +11,15 @@ use crate::i18n::*;
 /// or an existing device model's last `best.pt`) and epochs/batch/patience.
 /// `on_start` receives `(model_name, epochs, batch, patience, base_model)`
 /// where `base_model` is a model-list name or empty for the stock weights.
+///
+/// A face dataset builds a gallery instead of training a network: it asks only
+/// for the gallery's name, and the defaults it sends with it are ignored by
+/// the training-service.
 #[component]
 pub(super) fn TrainModal(
+    /// A face dataset: no YOLO parameters, no base model.
+    #[prop(optional)]
+    face: bool,
     visible: ReadSignal<bool>,
     set_visible: WriteSignal<bool>,
     /// Device models with a training checkpoint (fine-tune candidates).
@@ -30,7 +39,7 @@ pub(super) fn TrainModal(
     // still blank, seed it with that model's name — retraining under the same
     // name replaces the model's .pt/.engine, so "improve X" is two clicks.
     Effect::new(move |_| {
-        if !visible.get() {
+        if !visible.get() || face {
             return;
         }
         let base = default_base_model.get_untracked();
@@ -68,11 +77,19 @@ pub(super) fn TrainModal(
                 <div class="ui-modal-backdrop">
                     <div class="ui-card ui-card-pad ui-modal ui-modal-sm">
                         <h3 class="ui-card-title mb-4">
-                            {t_string!(i18n, training::train_model_title)}
+                            {move || if face {
+                                t_string!(i18n, training::build_gallery_title)
+                            } else {
+                                t_string!(i18n, training::train_model_title)
+                            }}
                         </h3>
 
                         <label class="ui-label-xs block mb-1">
-                            {t_string!(i18n, training::model_name_required)}
+                            {move || if face {
+                                t_string!(i18n, training::gallery_name_required)
+                            } else {
+                                t_string!(i18n, training::model_name_required)
+                            }}
                         </label>
                         <input
                             type="text"
@@ -82,9 +99,20 @@ pub(super) fn TrainModal(
                             on:input=move |ev| set_name.set(event_target_value(&ev))
                         />
                         <p class="ui-help-xs mb-4">
-                            {t_string!(i18n, training::model_name_help)}
+                            {move || if face {
+                                t_string!(i18n, training::gallery_name_help)
+                            } else {
+                                t_string!(i18n, training::model_name_help)
+                            }}
                         </p>
 
+                        {face.then(|| view! {
+                            <p class="ui-help-xs mb-6">
+                                {t_string!(i18n, training::build_gallery_help)}
+                            </p>
+                        })}
+
+                        {(!face).then(|| view! {
                         <label class="ui-label-xs block mb-1">
                             {t_string!(i18n, training::base_model)}
                         </label>
@@ -167,6 +195,7 @@ pub(super) fn TrainModal(
                         <p class="ui-help-xs mb-6">
                             {t_string!(i18n, training::patience_help)}
                         </p>
+                        })}
 
                         <div class="flex justify-end gap-2">
                             <button
@@ -180,7 +209,11 @@ pub(super) fn TrainModal(
                                 disabled=move || !name_valid()
                                 on:click=start
                             >
-                                {t_string!(i18n, training::start_training)}
+                                {move || if face {
+                                    t_string!(i18n, training::build_gallery)
+                                } else {
+                                    t_string!(i18n, training::start_training)
+                                }}
                             </button>
                         </div>
                     </div>

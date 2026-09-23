@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the gateway EventService bus."""
 from gateway.events import EventService
 
@@ -13,6 +17,8 @@ class TestPublishSnapshot:
         _v, snap = svc.snapshot()
         assert snap["type"] == "state_snapshot"
         assert "models" in snap["keys"]
+        # A fresh subscriber must re-read the application type too.
+        assert "application" in snap["keys"]
 
     def test_stats_snapshot(self):
         svc = EventService()

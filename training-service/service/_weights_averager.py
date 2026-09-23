@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Standalone FedAvg checkpoint averager (subprocess).
 
 Executed by the AverageWeights RPC so torch state dies with this process

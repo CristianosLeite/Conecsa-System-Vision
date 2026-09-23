@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the device audit trail: the buffer, the request hook and the
 route→event mapping."""
 import sqlite3

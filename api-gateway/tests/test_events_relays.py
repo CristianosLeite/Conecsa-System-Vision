@@ -1,4 +1,8 @@
-"""start_relays() starts its three threads once per process (review L4)."""
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""start_relays() starts its three threads once per process."""
 import threading
 
 from gateway import events

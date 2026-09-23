@@ -1,8 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Per-frame media fan-out — POSIX SHM, never gRPC.
 
 Two rings, both shared with the gateway via the `ipc:` namespace:
   - camera ring (produced by the Rust webcam-server) → raw MJPEG feed;
-  - processed ring (produced by inference-service Stage D) → detection-overlaid
+  - processed ring (produced by inference-service's encode stage) → detection-overlaid
     MJPEG feed.
 
 The ring layouts live in the shared `conecsa_shm` package (in conecsa-os-base:base);

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Shared pytest import setup for the training-service suite.
 
 ``service.dataset_import`` pulls in ``service.capture_service``, which imports

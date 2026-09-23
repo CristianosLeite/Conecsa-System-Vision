@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The container's settings.js must refuse to start without a real
 // credential-encryption secret: the old fallback was a source-known constant,
 // which made every deployment's stored third-party credentials recoverable.

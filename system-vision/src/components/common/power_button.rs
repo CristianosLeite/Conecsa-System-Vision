@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -28,7 +30,6 @@ impl PowerAction {
             Self::Restart => t_string!(i18n, common::restart_confirm),
         }
     }
-    /// Api action.
     fn api_action(self) -> &'static str {
         match self {
             Self::Shutdown => "shutdown",

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file camera-trigger node — enable/disable/toggle frame processing through the
  *   api-gateway (`/api/v1/trigger/*`), with a visual state indicator.

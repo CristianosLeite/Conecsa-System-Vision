@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Backend access layer (HTTP/SSE on wasm, Tauri IPC on native).
 
 /// Training-service HTTP client. Mirrors `/api/v1/training/*` (api-gateway).
@@ -10,7 +14,10 @@ use web_sys::{Request, RequestInit, RequestMode, Response};
 use crate::api::wasm32::http::fetch_api;
 use crate::app::get_api_base_url;
 
-/// A `DatasetSummary` struct.
+fn detect_task() -> String {
+    "detect".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DatasetSummary {
     pub dataset_id: String,
@@ -25,15 +32,17 @@ pub struct DatasetSummary {
     pub labeled_count: u32,
     #[serde(default)]
     pub class_count: u32,
+    /// The task the dataset is labeled for (fixed at creation); older firmware
+    /// sends none, meaning detection.
+    #[serde(default = "detect_task")]
+    pub task: String,
 }
 
-/// A `DatasetsResponse` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatasetsResponse {
     pub datasets: Vec<DatasetSummary>,
 }
 
-/// A `DatasetUploadResponse` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatasetUploadResponse {
     #[serde(default)]
@@ -43,7 +52,6 @@ pub struct DatasetUploadResponse {
     pub dataset: Option<DatasetSummary>,
 }
 
-/// A `TrainingDatasetInfo` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrainingDatasetInfo {
     pub image_count: u32,
@@ -58,7 +66,6 @@ pub struct TrainingDatasetInfo {
     pub cover_image_id: String,
 }
 
-/// A `TrainingImageInfo` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrainingImageInfo {
     pub image_id: String,
@@ -67,15 +74,17 @@ pub struct TrainingImageInfo {
     pub box_count: u32,
     #[serde(default)]
     pub replica: bool,
+    /// A classification image's class (index into the dataset's classes);
+    /// `None` when unlabeled and in every other task.
+    #[serde(default)]
+    pub image_class: Option<u32>,
 }
 
-/// A `TrainingImagesResponse` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrainingImagesResponse {
     pub images: Vec<TrainingImageInfo>,
 }
 
-/// A `LabelBox` struct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelBox {
     #[serde(default)]
@@ -86,20 +95,35 @@ pub struct LabelBox {
     pub h: f32,
 }
 
-/// A `LabelsResponse` struct.
+/// One segmentation label ring: its class, the instance whose rings it groups
+/// and its vertices as normalized `[x, y]` (clockwise, implicitly closed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LabelPolygon {
+    #[serde(default)]
+    pub class_id: u32,
+    #[serde(default)]
+    pub instance: u32,
+    pub points: Vec<[f32; 2]>,
+}
+
+/// An image's labels: boxes (detection), polygon rings (segmentation) or its
+/// class (classification).
 #[derive(Debug, Clone, Deserialize)]
 pub struct LabelsResponse {
     pub image_id: String,
+    #[serde(default)]
     pub boxes: Vec<LabelBox>,
+    #[serde(default)]
+    pub polygons: Vec<LabelPolygon>,
+    #[serde(default)]
+    pub image_class: Option<u32>,
 }
 
-/// A `ClassesResponse` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClassesResponse {
     pub classes: Vec<String>,
 }
 
-/// A `SamStatusResponse` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SamStatusResponse {
     pub available: bool,
@@ -108,12 +132,15 @@ pub struct SamStatusResponse {
     pub message: String,
 }
 
-/// A `SamSegmentResponse` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SamSegmentResponse {
     pub boxes: Vec<LabelBox>,
     #[serde(default)]
     pub scores: Vec<f32>,
+    /// Each box's mask as normalized rings, parallel to `boxes` (empty
+    /// without a mask).
+    #[serde(default)]
+    pub polygons: Vec<Vec<Vec<[f32; 2]>>>,
 }
 
 /// Status of the model labeling assistant: an existing engine on the
@@ -127,20 +154,42 @@ pub struct LabelModelStatusResponse {
     pub class_names: Vec<String>,
     #[serde(default)]
     pub message: String,
+    /// The loaded engine's task ("" when none is loaded).
+    #[serde(default)]
+    pub task: String,
+}
+
+/// A classification engine's whole-image class suggestion; `class_id` is the
+/// MODEL's index, `class_name` what the dataset resolves it by.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LabelClassSuggestion {
+    pub class_id: u32,
+    pub class_name: String,
+    #[serde(default)]
+    pub score: f32,
 }
 
 /// Suggestions from the labeling model: `boxes[i].class_id` is the MODEL's
-/// class index; `class_names[i]` is what the dataset resolves it by.
+/// class index; `class_names[i]` is what the dataset resolves it by. A
+/// classification engine answers `image_class` (the class above the
+/// threshold, if any) and `candidates` instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LabelDetectResponse {
+    #[serde(default)]
     pub boxes: Vec<LabelBox>,
     #[serde(default)]
     pub scores: Vec<f32>,
     #[serde(default)]
     pub class_names: Vec<String>,
+    /// A segmentation engine's masks as normalized rings, parallel to `boxes`.
+    #[serde(default)]
+    pub polygons: Vec<Vec<Vec<[f32; 2]>>>,
+    #[serde(default)]
+    pub image_class: Option<LabelClassSuggestion>,
+    #[serde(default)]
+    pub candidates: Vec<LabelClassSuggestion>,
 }
 
-/// A `TrainingJobStatus` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrainingJobStatus {
     #[serde(default)]
@@ -174,7 +223,6 @@ impl TrainingJobStatus {
     }
 }
 
-/// A `SimpleResult` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SimpleResult {
     #[serde(default)]
@@ -217,7 +265,6 @@ pub fn training_preview_url(reload: u32) -> String {
     ))
 }
 
-/// Training enter.
 pub async fn training_enter() -> Result<SimpleResult, String> {
     fetch_api("/api/v1/training/enter", "POST", Some("{}")).await
 }
@@ -238,18 +285,15 @@ pub async fn training_heartbeat() -> Result<SimpleResult, String> {
 
 // ── dataset registry ─────────────────────────────────────────────────────────
 
-/// List datasets.
 pub async fn list_datasets() -> Result<DatasetsResponse, String> {
     fetch_api("/api/v1/training/datasets", "GET", None).await
 }
 
-/// Create dataset.
 pub async fn create_dataset(name: &str) -> Result<DatasetSummary, String> {
     let body = serde_json::json!({ "name": name }).to_string();
     fetch_api("/api/v1/training/datasets", "POST", Some(&body)).await
 }
 
-/// Rename dataset.
 pub async fn rename_dataset(dataset_id: &str, name: &str) -> Result<DatasetSummary, String> {
     let body = serde_json::json!({ "name": name }).to_string();
     fetch_api(
@@ -260,7 +304,6 @@ pub async fn rename_dataset(dataset_id: &str, name: &str) -> Result<DatasetSumma
     .await
 }
 
-/// Delete dataset.
 pub async fn delete_dataset(dataset_id: &str) -> Result<SimpleResult, String> {
     fetch_api(
         &format!("/api/v1/training/datasets/{}", dataset_id),
@@ -270,7 +313,6 @@ pub async fn delete_dataset(dataset_id: &str) -> Result<SimpleResult, String> {
     .await
 }
 
-/// Set dataset cover.
 pub async fn set_dataset_cover(dataset_id: &str, image_id: &str) -> Result<SimpleResult, String> {
     let body = serde_json::json!({ "image_id": image_id }).to_string();
     fetch_api(
@@ -343,7 +385,6 @@ pub async fn upload_dataset_zip(
 
 // ── dataset-scoped operations ────────────────────────────────────────────────
 
-/// Get training dataset.
 pub async fn get_training_dataset(dataset_id: &str) -> Result<TrainingDatasetInfo, String> {
     fetch_api(
         &format!("/api/v1/training/datasets/{}", dataset_id),
@@ -353,7 +394,6 @@ pub async fn get_training_dataset(dataset_id: &str) -> Result<TrainingDatasetInf
     .await
 }
 
-/// Capture training image.
 pub async fn capture_training_image(dataset_id: &str) -> Result<TrainingImageInfo, String> {
     fetch_api(
         &format!("/api/v1/training/datasets/{}/capture", dataset_id),
@@ -363,7 +403,6 @@ pub async fn capture_training_image(dataset_id: &str) -> Result<TrainingImageInf
     .await
 }
 
-/// List training images.
 pub async fn list_training_images(dataset_id: &str) -> Result<TrainingImagesResponse, String> {
     fetch_api(
         &format!("/api/v1/training/datasets/{}/images", dataset_id),
@@ -373,7 +412,6 @@ pub async fn list_training_images(dataset_id: &str) -> Result<TrainingImagesResp
     .await
 }
 
-/// Delete training image.
 pub async fn delete_training_image(
     dataset_id: &str,
     image_id: &str,
@@ -408,7 +446,6 @@ pub async fn replicate_training_image(
     .await
 }
 
-/// Get training labels.
 pub async fn get_training_labels(
     dataset_id: &str,
     image_id: &str,
@@ -424,7 +461,6 @@ pub async fn get_training_labels(
     .await
 }
 
-/// Set training labels.
 pub async fn set_training_labels(
     dataset_id: &str,
     image_id: &str,
@@ -442,7 +478,42 @@ pub async fn set_training_labels(
     .await
 }
 
-/// Get training classes.
+/// Replace a segmentation image's rings (an empty list clears them).
+pub async fn set_training_polygons(
+    dataset_id: &str,
+    image_id: &str,
+    polygons: &[LabelPolygon],
+) -> Result<SimpleResult, String> {
+    let body = serde_json::json!({ "polygons": polygons }).to_string();
+    fetch_api(
+        &format!(
+            "/api/v1/training/datasets/{}/images/{}/labels",
+            dataset_id, image_id
+        ),
+        "PUT",
+        Some(&body),
+    )
+    .await
+}
+
+/// Set (or, with `None`, clear) a classification image's class.
+pub async fn set_training_image_class(
+    dataset_id: &str,
+    image_id: &str,
+    image_class: Option<u32>,
+) -> Result<SimpleResult, String> {
+    let body = serde_json::json!({ "image_class": image_class }).to_string();
+    fetch_api(
+        &format!(
+            "/api/v1/training/datasets/{}/images/{}/labels",
+            dataset_id, image_id
+        ),
+        "PUT",
+        Some(&body),
+    )
+    .await
+}
+
 pub async fn get_training_classes(dataset_id: &str) -> Result<ClassesResponse, String> {
     fetch_api(
         &format!("/api/v1/training/datasets/{}/classes", dataset_id),
@@ -452,7 +523,6 @@ pub async fn get_training_classes(dataset_id: &str) -> Result<ClassesResponse, S
     .await
 }
 
-/// Add training class.
 pub async fn add_training_class(dataset_id: &str, name: &str) -> Result<ClassesResponse, String> {
     let body = serde_json::json!({ "name": name }).to_string();
     fetch_api(
@@ -463,7 +533,6 @@ pub async fn add_training_class(dataset_id: &str, name: &str) -> Result<ClassesR
     .await
 }
 
-/// Rename training class.
 pub async fn rename_training_class(
     dataset_id: &str,
     index: usize,
@@ -478,7 +547,6 @@ pub async fn rename_training_class(
     .await
 }
 
-/// Remove training class.
 pub async fn remove_training_class(
     dataset_id: &str,
     index: usize,
@@ -491,22 +559,18 @@ pub async fn remove_training_class(
     .await
 }
 
-/// Get sam status.
 pub async fn get_sam_status() -> Result<SamStatusResponse, String> {
     fetch_api("/api/v1/training/sam", "GET", None).await
 }
 
-/// Load sam.
 pub async fn load_sam() -> Result<SimpleResult, String> {
     fetch_api("/api/v1/training/sam/load", "POST", Some("{}")).await
 }
 
-/// Unload sam.
 pub async fn unload_sam() -> Result<SimpleResult, String> {
     fetch_api("/api/v1/training/sam/unload", "POST", Some("{}")).await
 }
 
-/// Sam segment.
 pub async fn sam_segment(
     dataset_id: &str,
     image_id: &str,
@@ -529,7 +593,6 @@ pub async fn sam_segment(
     fetch_api("/api/v1/training/sam/segment", "POST", Some(&body)).await
 }
 
-/// Get label model status.
 pub async fn get_label_model_status() -> Result<LabelModelStatusResponse, String> {
     fetch_api("/api/v1/training/label-model", "GET", None).await
 }
@@ -583,12 +646,10 @@ pub async fn start_training(
     fetch_api("/api/v1/training/train", "POST", Some(&body)).await
 }
 
-/// Get training status.
 pub async fn get_training_status() -> Result<TrainingJobStatus, String> {
     fetch_api("/api/v1/training/train/status", "GET", None).await
 }
 
-/// Cancel training.
 pub async fn cancel_training() -> Result<SimpleResult, String> {
     fetch_api("/api/v1/training/train/cancel", "POST", Some("{}")).await
 }

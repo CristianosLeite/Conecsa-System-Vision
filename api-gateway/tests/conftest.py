@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Shared pytest setup and fixtures for the api-gateway suite.
 
 ``gateway.media`` imports the shared ``conecsa_shm`` package (POSIX SHM rings),

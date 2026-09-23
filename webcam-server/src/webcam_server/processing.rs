@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Software image processing: luminance gain, per-channel RGB levels and
 //! Bayer debayering.
 

@@ -1,8 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tests for the centralized model filename validation (api/model_paths.py).
 
-The traversal matrix here is the regression net for REFACTORING.md C2:
-before centralization only the download path checked for traversal, and
-saving '../escaped.engine' wrote outside the model directory.
+The traversal matrix guards every path that names a model file, so a name
+such as '../escaped.engine' can never write outside the model directory.
 """
 import os
 

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # test.sh — run every host-side unit-test suite in the repo.
 #
@@ -8,6 +13,7 @@
 #   3. Rust native       — webcam-server, hub-vision (`cargo test`)
 #   4. Rust wasm         — system-vision (`wasm-pack test`, headless browser)
 #   5. Node-RED (jest)   — flow custom nodes
+#   6. Licenses          — `reuse lint` + no AGPL imports from Apache layers
 #
 # These are the same suites .github/workflows/test.yml runs on a pull request.
 #
@@ -156,6 +162,12 @@ if [[ "${SKIP_NODE:-0}" != "1" ]]; then
   else
     echo "!! npm not found — skipping Node-RED node tests"
   fi
+fi
+
+# ── 6. Licenses (REUSE + Apache layers never import AGPL code) ──────────────────
+if [[ "${SKIP_LICENSES:-0}" != "1" ]]; then
+  echo "==> license compliance"
+  bash scripts/check-licenses.sh
 fi
 
 echo ""

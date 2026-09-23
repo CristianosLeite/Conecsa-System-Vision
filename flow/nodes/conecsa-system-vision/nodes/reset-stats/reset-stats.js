@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file reset-stats node — resets the detection counter and/or statistics via
  *   the api-gateway. Scope is one of `all`, `counter`, `stats`.
@@ -48,7 +52,6 @@ module.exports = function (RED) {
       } else if (scope === "stats") {
         resetStats(done);
       } else {
-        // "all" — reset both; counter first, then stats
         resetCounter(function (err) {
           if (err) return done(err);
           resetStats(done);

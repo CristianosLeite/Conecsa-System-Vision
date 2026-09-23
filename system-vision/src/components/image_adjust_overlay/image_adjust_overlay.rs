@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Image-adjustment control: a button over the live video that reveals a panel
 //! with Exposure / RGB / Gamma / Gain. Self-fetches its state from the camera
 //! config and applies each change live (none of these trigger a camera restart).
@@ -29,7 +33,6 @@ fn push_exposure(auto: bool, time: u32) {
     });
 }
 
-/// Push rgb.
 fn push_rgb(r: u16, g: u16, b: u16) {
     spawn_local(async move {
         let _ = api::update_camera_config(
@@ -49,7 +52,6 @@ fn push_rgb(r: u16, g: u16, b: u16) {
     });
 }
 
-/// Push gamma.
 fn push_gamma(gamma: u32) {
     spawn_local(async move {
         let _ = api::update_camera_config(
@@ -69,7 +71,6 @@ fn push_gamma(gamma: u32) {
     });
 }
 
-/// Push gain.
 fn push_gain(gain: u32) {
     spawn_local(async move {
         let _ = api::update_camera_config(
@@ -89,7 +90,6 @@ fn push_gain(gain: u32) {
     });
 }
 
-/// The `ImageAdjustOverlay` view component.
 #[component]
 pub fn ImageAdjustOverlay(
     /// Bumped on model select; camera image settings are per-model, so re-fetch.
@@ -108,6 +108,8 @@ pub fn ImageAdjustOverlay(
     let (rgb_blue, set_rgb_blue) = signal(128u16);
     let (gamma, set_gamma) = signal(100u32);
     let (gain, set_gain) = signal(0u32);
+    // Exposure, RGB, gamma and gain are V4L2 controls: a remote camera has none.
+    let (network_source, set_network_source) = signal(false);
 
     // Fetch state on mount and on model change.
     Effect::new(move |_| {
@@ -115,6 +117,7 @@ pub fn ImageAdjustOverlay(
         let _ = camera_refresh.get();
         spawn_local(async move {
             if let Ok(resp) = api::get_camera_devices().await {
+                set_network_source.set(resp.current_source == api::SOURCE_NETWORK);
                 set_auto_exposure.set(resp.current_auto_exposure);
                 set_exposure_time.set(resp.current_exposure_time);
                 set_exp_min.set(resp.exposure_time_min);
@@ -135,6 +138,7 @@ pub fn ImageAdjustOverlay(
     let on_push_gain = Callback::new(move |value: u32| push_gain(value));
 
     view! {
+        <Show when=move || !network_source.get()>
         <ImageAdjustmentToggleButton panel=panel />
         <ImageAdjustmentPanel
             panel=panel
@@ -159,5 +163,6 @@ pub fn ImageAdjustOverlay(
             on_push_gamma=on_push_gamma
             on_push_gain=on_push_gain
         />
+        </Show>
     }
 }

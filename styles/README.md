@@ -40,6 +40,7 @@ globs are tolerated, so each Docker context can carry only its own crate.
 | `ui-feedback.css` | Alerts, progress bars, code block, spinner |
 | `ui-overlays.css` | Stream-stage overlays (tool panel, drawer + container query), overlay controls, segmented buttons, area chips, thumbs, modals |
 | `label-editor.css` | Label-editor canvas (training) SVG presentation |
+| `training.css` | Training pages layout: wrapping top bars and panel headers, the dataset editor's responsive grid (1 / 2 / 3 columns), gallery thumbnails, class names |
 
 Component partials wrap their rules in their own `@layer components { … }`
 block; Tailwind merges same-named layer blocks across files.

@@ -1,4 +1,8 @@
-"""Backend readiness: the gRPC health service of every peer (review H4).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Backend readiness: the gRPC health service of every peer.
 
 ``/api/v1/health`` is a constant document — it proves only that Flask can
 answer. This module asks each backend's standard ``grpc.health.v1`` service

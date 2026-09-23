@@ -1,4 +1,9 @@
 #!/bin/bash
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # init.sh — one-time local development environment bootstrap.
 #
@@ -188,6 +193,21 @@ if command -v rustup >/dev/null 2>&1; then
     fi
 fi
 [ "$RUST_OK" -eq 1 ] && ok "    Rust toolchain looks good."
+
+# ---------------------------------------------------------------------------
+# 5b. Enrollment test certificates (only where the generator exists)
+# ---------------------------------------------------------------------------
+# api-gateway's enrollment tests parse certificates issued by the hub CA. They
+# are generated here and gitignored, never committed; without them those tests
+# skip.
+if [ -f "$SCRIPT_DIR/gen-enroll-fixtures.sh" ] && command -v cargo >/dev/null 2>&1; then
+    info "[5b] Generating enrollment test certificates..."
+    if bash "$SCRIPT_DIR/gen-enroll-fixtures.sh"; then
+        ok "    Written to api-gateway/tests/fixtures/ (gitignored)."
+    else
+        warn "    Could not generate them — the enrollment certificate tests will skip."
+    fi
+fi
 
 echo ""
 echo -e "${GREEN}==================================="

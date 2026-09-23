@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Conversion-overlay state: the app-event handler's terminal-status helper and
 //! the fallback poll that keeps the progress ramp moving.
 //!
@@ -43,14 +47,13 @@ pub struct ConversionPollConfig {
     pub locale: Locale,
 }
 
-/// Consecutive poll failures tolerated before the overlay gives up. A single
-/// failed request used to destroy the overlay, which on a flaky link looked
-/// exactly like "the conversion screen never showed up".
+/// Consecutive poll failures tolerated before the overlay gives up, so a flaky
+/// link does not hide the conversion screen.
 const MAX_POLL_FAILURES: u32 = 5;
 
-/// Multiple of `timeout_secs` after which the overlay finally gives up. The
-/// overlay must not hide a conversion that is still running (that was the whole
-/// bug), but it must not pin the panel — and Start Detection — forever either.
+/// Multiple of `timeout_secs` after which the overlay gives up. The overlay must
+/// not hide a conversion that is still running, nor pin the panel (and Start
+/// Detection) forever.
 const GIVE_UP_MULTIPLIER: f64 = 3.0;
 
 /// Seconds the ramp takes to travel the full bar. The backend reports only

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the training-service config helpers and path properties."""
 import pytest
 from service.config import Config, _env_float, _env_int, parse_train_tile

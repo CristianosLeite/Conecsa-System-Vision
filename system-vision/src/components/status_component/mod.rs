@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +10,6 @@ mod status_component;
 
 pub use status_component::StatusComponent;
 
-/// A `SystemMetrics` struct.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemMetrics {
     pub cpu_usage: f32,

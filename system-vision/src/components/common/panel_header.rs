@@ -1,8 +1,9 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
-/// The `PanelHeader` view component.
 #[component]
 pub fn PanelHeader(
     /// Accepts plain `&str` literals and reactive closures (translated titles

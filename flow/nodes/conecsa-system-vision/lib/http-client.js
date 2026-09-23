@@ -1,9 +1,13 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 "use strict";
 const http = require("http");
 const https = require("https");
 
-// Default base URL of the API gateway (the public HTTP surface). Single source
-// of truth for every node; the inference-service is headless now.
+// Default base URL of the api-gateway, the device's HTTP surface. Single source
+// of truth for every node.
 const DEFAULT_INFERENCE_URL = "http://api-gateway:5000";
 
 /**

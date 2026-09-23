@@ -1,17 +1,44 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 syntax = "proto3";
 
 package conecsa;
 
 // Control structures exchanged through the camera shared-memory segment
-// (produced by the Rust webcam-server, consumed by the inference-service and
-// api-gateway). The per-frame pixel data is NOT described here — it lives in
+// (produced by the Rust webcam-server, consumed by the inference-service,
+// api-gateway and training-service). The per-frame pixel data is NOT described here — it lives in
 // the raw frame region of the SHM ring; these messages are the small
 // config/health structs written into the segment's header so consumers can
 // drive the camera and read its liveness without any HTTP to the webcam-server.
 
+// Where the webcam-server takes its frames from.
+enum CameraSource {
+  CAMERA_SOURCE_LOCAL = 0;    // a local V4L2 camera (/dev/videoN)
+  CAMERA_SOURCE_NETWORK = 1;  // an MJPEG stream pulled from a remote camera (remote camera protocol v1)
+}
+
+// Why the camera is not (yet) capturing. Refines HealthStatus.status for a
+// network source; a local source leaves it unspecified.
+enum CameraHealthDetail {
+  CAMERA_HEALTH_DETAIL_UNSPECIFIED = 0;   // nothing to add to the status
+  CAMERA_HEALTH_DETAIL_CONNECTING = 1;    // connecting or waiting to retry
+  CAMERA_HEALTH_DETAIL_UNAUTHORIZED = 2;  // the remote camera rejected the token (HTTP 401)
+  CAMERA_HEALTH_DETAIL_RATE_LIMITED = 3;  // the remote camera locked authentication out (HTTP 429)
+  CAMERA_HEALTH_DETAIL_UNREACHABLE = 4;   // connection refused, timed out or reset
+  CAMERA_HEALTH_DETAIL_STALLED = 5;       // connected, but no bytes arrived before the deadline
+  CAMERA_HEALTH_DETAIL_BAD_STREAM = 6;    // invalid HTTP, multipart framing or JPEG payload
+}
+
 // Camera settings written back into the SHM header by a consumer
 // (inference-service) and applied by the webcam-server on its next capture
 // loop — no container restart required.
+//
+// The serialized message must fit the 128-byte config region of the segment
+// header. It takes 119 bytes with every field at its validated maximum and 125
+// with every number at the uint32 maximum, so a further field does not fit: it
+// needs a larger region, which is a layout change and a protocol version bump.
 message CameraConfig {
   uint32 camera_index = 1;   // V4L2 device index (/dev/videoN)
   uint32 width = 2;          // capture width in pixels
@@ -24,6 +51,13 @@ message CameraConfig {
   uint32 rgb_blue = 9;       // software blue gain (0-255, 128 = neutral)
   uint32 gamma = 10;         // software gamma correction
   uint32 gain = 11;          // software luminance gain
+  // Active source. Absent = leave the source and the network fields below
+  // unchanged (a writer that only tunes the local camera never switches
+  // sources). Present = fields 13-15 are the complete network state.
+  optional CameraSource source = 12;
+  string network_host = 13;   // remote camera address: IPv4 literal, at most 15 bytes
+  uint32 network_port = 14;   // remote camera TCP port, 1-65535
+  string network_token = 15;  // stream token: normalized Crockford base32, 8-32 bytes; a secret
 }
 
 // Liveness/status published by the webcam-server into the SHM header so
@@ -31,5 +65,6 @@ message CameraConfig {
 // signal the inference-service gates detection on: with no camera the
 // webcam-server publishes no frames at all.
 message HealthStatus {
-  string status = 1;  // "starting" | "capturing" | "no_camera"
+  string status = 1;              // "starting" | "capturing" | "no_camera"
+  CameraHealthDetail detail = 2;  // why a network source is not capturing
 }

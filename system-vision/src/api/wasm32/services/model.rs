@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Model management (HTTP/JSON + multipart upload).
 
 use wasm_bindgen::prelude::*;
@@ -52,8 +56,14 @@ pub async fn get_conversion_status(job_id: &str) -> Result<ConversionStatusRespo
     fetch_api::<ConversionStatusResponse>(&url, "GET", None).await
 }
 
-/// Upload model file from browser – returns rich response (job_id when .pt)
-pub async fn upload_model_file(file: web_sys::File) -> Result<UploadModelResponse, String> {
+/// Upload model file from browser – returns rich response (job_id when .pt).
+///
+/// `task` declares the model's task (the device's application); `None` lets
+/// the backend use the device's task.
+pub async fn upload_model_file(
+    file: web_sys::File,
+    task: Option<&str>,
+) -> Result<UploadModelResponse, String> {
     use web_sys::FormData;
 
     let window = web_sys::window().ok_or("No window object")?;
@@ -64,6 +74,11 @@ pub async fn upload_model_file(file: web_sys::File) -> Result<UploadModelRespons
     form_data
         .append_with_blob("file", &file)
         .map_err(|e| format!("Failed to append file to FormData: {:?}", e))?;
+    if let Some(task) = task {
+        form_data
+            .append_with_str("task", task)
+            .map_err(|e| format!("Failed to append task to FormData: {:?}", e))?;
+    }
 
     let opts = RequestInit::new();
     opts.set_method("POST");
@@ -135,6 +150,10 @@ struct ModelEntry {
     name: String,
     #[serde(default)]
     has_weights: bool,
+    /// The model's task; older firmware sends none, and such a model is a
+    /// detection model.
+    #[serde(default)]
+    task: Option<String>,
 }
 
 /// The device models split by what they can do on the training page:
@@ -153,6 +172,19 @@ pub struct TrainingModelLists {
 pub async fn list_training_models() -> Result<TrainingModelLists, String> {
     let resp = fetch_api::<ModelsResponse>("/api/v1/models", "GET", None).await?;
     Ok(split_training_models(resp.models.into_iter().map(|m| (m.name, m.has_weights))))
+}
+
+/// [`list_training_models`] restricted to models of `task`: the labeling
+/// assistant and the fine-tune base must match the dataset's task (the
+/// backend refuses the others).
+pub async fn list_training_models_for(task: &str) -> Result<TrainingModelLists, String> {
+    let resp = fetch_api::<ModelsResponse>("/api/v1/models", "GET", None).await?;
+    Ok(split_training_models(
+        resp.models
+            .into_iter()
+            .filter(|m| m.task.as_deref().unwrap_or("detect") == task)
+            .map(|m| (m.name, m.has_weights)),
+    ))
 }
 
 fn split_training_models(models: impl Iterator<Item = (String, bool)>) -> TrainingModelLists {

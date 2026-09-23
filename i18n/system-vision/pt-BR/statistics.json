@@ -2,5 +2,7 @@
   "title": "Estatísticas de Desempenho",
   "inference_time": "Tempo de Inferência",
   "detections": "Detecções",
-  "frames_with_detections": "Quadros c/ Detecções"
+  "frames_with_detections": "Quadros c/ Detecções",
+  "classified": "Classificado",
+  "frames_with_class": "Quadros c/ Classe"
 }

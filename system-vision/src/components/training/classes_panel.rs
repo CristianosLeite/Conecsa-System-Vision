@@ -1,8 +1,10 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
-use crate::class_color::{class_color_for, class_display_name};
+use crate::class_color::{class_color_for, class_display_name, is_reserved_person_name};
 use crate::i18n::*;
 
 /// Class CRUD + active-class selection. The active class is the one new boxes
@@ -15,13 +17,32 @@ pub(super) fn ClassesPanel(
     on_add: Callback<String>,
     on_rename: Callback<(usize, String)>,
     on_remove: Callback<usize>,
+    /// The dataset labels whole images (classification, face recognition):
+    /// removing a class unlabels its images instead of deleting boxes.
+    #[prop(optional)]
+    classify: bool,
+    /// A face dataset: the classes are the enrolled people.
+    #[prop(optional)]
+    face: bool,
 ) -> impl IntoView {
     let i18n = use_i18n();
     let (new_name, set_new_name) = signal(String::new());
 
+    // `unknown` is what the device calls a face nobody matches: a person
+    // cannot take that name (the training-service refuses it too).
+    let reserved = move |name: &str| {
+        if face && is_reserved_person_name(name) {
+            if let Some(window) = web_sys::window() {
+                let _ = window.alert_with_message(&t_string!(i18n, training::person_name_reserved));
+            }
+            return true;
+        }
+        false
+    };
+
     let add = move |_| {
         let name = new_name.get_untracked().trim().to_string();
-        if name.is_empty() {
+        if name.is_empty() || reserved(&name) {
             return;
         }
         on_add.run(name);
@@ -36,7 +57,7 @@ pub(super) fn ClassesPanel(
             &current,
         ) {
             let name = name.trim().to_string();
-            if !name.is_empty() && name != current {
+            if !name.is_empty() && name != current && !reserved(&name) {
                 on_rename.run((index, name));
             }
         }
@@ -46,7 +67,13 @@ pub(super) fn ClassesPanel(
         let Some(window) = web_sys::window() else {
             return;
         };
-        let msg = t_string!(i18n, training::remove_class_confirm, name = name);
+        let msg = if face {
+            t_string!(i18n, training::remove_person_confirm, name = name)
+        } else if classify {
+            t_string!(i18n, training::remove_class_confirm_classify, name = name)
+        } else {
+            t_string!(i18n, training::remove_class_confirm, name = name)
+        };
         if window.confirm_with_message(&msg).unwrap_or(false) {
             on_remove.run(index);
         }
@@ -54,19 +81,29 @@ pub(super) fn ClassesPanel(
 
     view! {
         <div class="ui-card ui-card-pad-sm flex flex-col gap-3">
-            <h2 class="ui-card-title">{t!(i18n, training::classes_title)}</h2>
+            <h2 class="ui-card-title">
+                {move || if face {
+                    t_string!(i18n, training::people_title)
+                } else {
+                    t_string!(i18n, training::classes_title)
+                }}
+            </h2>
 
             <div class="flex gap-2">
                 <input
                     type="text"
-                    class="ui-input ui-input-sm flex-1"
-                    placeholder=move || t_string!(i18n, training::new_class_name_placeholder)
+                    class="ui-input ui-input-sm ui-class-input"
+                    placeholder=move || if face {
+                        t_string!(i18n, training::new_person_name_placeholder)
+                    } else {
+                        t_string!(i18n, training::new_class_name_placeholder)
+                    }
                     prop:value=move || new_name.get()
                     on:input=move |ev| set_new_name.set(event_target_value(&ev))
                     on:keydown=move |ev| {
                         if ev.key() == "Enter" {
                             let name = new_name.get_untracked().trim().to_string();
-                            if !name.is_empty() {
+                            if !name.is_empty() && !reserved(&name) {
                                 on_add.run(name);
                                 set_new_name.set(String::new());
                             }
@@ -84,7 +121,11 @@ pub(super) fn ClassesPanel(
             {move || if classes.get().is_empty() {
                 view! {
                     <p class="ui-help italic">
-                        {t_string!(i18n, training::create_class_hint)}
+                        {move || if face {
+                            t_string!(i18n, training::create_person_hint)
+                        } else {
+                            t_string!(i18n, training::create_class_hint)
+                        }}
                     </p>
                 }.into_any()
             } else {
@@ -120,7 +161,7 @@ pub(super) fn ClassesPanel(
                                                 class_color_for(i, c),
                                             ))
                                         />
-                                        <span class="ui-value flex-1 truncate">{display_name}</span>
+                                        <span class="ui-value ui-class-name">{display_name}</span>
                                         <button
                                             class="ui-icon-button p-1 opacity-0 group-hover:opacity-100"
                                             title=move || t_string!(i18n, training::rename_class)
@@ -135,7 +176,11 @@ pub(super) fn ClassesPanel(
                                         </button>
                                         <button
                                             class="ui-icon-button ui-icon-button-danger p-1 opacity-0 group-hover:opacity-100"
-                                            title=move || t_string!(i18n, training::remove_class)
+                                            title=move || if face {
+                                                t_string!(i18n, training::remove_person)
+                                            } else {
+                                                t_string!(i18n, training::remove_class)
+                                            }
                                             on:click=move |ev| {
                                                 ev.stop_propagation();
                                                 remove(i, name_remove.clone());

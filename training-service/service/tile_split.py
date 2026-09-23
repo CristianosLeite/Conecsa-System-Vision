@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Materialise one dataset image as the tile crops the inference-service runs on.
 
 The inference-service slices every frame into overlapping square tiles
@@ -5,8 +9,11 @@ The inference-service slices every frame into overlapping square tiles
 only performs at the scale it was trained at, so the training split has to
 be built from the same crops: :func:`materialize_tiles` decodes one stored
 dataset image, lays the same grid over it, writes ``<stem>_t<k>.jpg`` per
-tile and rewrites the image's YOLO rows per tile (clipped and re-normalised
-by ``conecsa_common.tiling.tile_label_rows``).
+tile and rewrites the image's YOLO rows per tile (clipped and re-normalized
+by ``conecsa_common.tiling.tile_label_rows``; a segmentation image's polygon
+rows are rasterized, cut to the tile and re-extracted by
+``conecsa_common.polygons.clip_polygon_rows``, so a concave outline split by
+the tile edge becomes one ring per visible piece).
 
 Label rules, validated offline before they became the default:
 
@@ -32,7 +39,10 @@ TileSpec = Union[None, str, int]
 """``None`` = whole frames, ``"auto"`` = the image's short side, ``int`` = pixels."""
 
 LabelRow = Tuple[int, float, float, float, float]
-"""``(class_id, cx, cy, w, h)`` normalised to the stored image."""
+"""``(class_id, cx, cy, w, h)`` normalized to the stored image."""
+
+PolygonRow = Tuple[int, Sequence[Sequence[float]]]
+"""``(class_id, [[x, y], …])`` — one ring normalized to the stored image."""
 
 JPEG_QUALITY = 95
 
@@ -80,11 +90,15 @@ def materialize_tiles(
     tile: TileSpec,
     overlap: float = 0.2,
     min_visible: float = 0.25,
+    polygons: Optional[Sequence[PolygonRow]] = None,
 ) -> Tuple[List[Tuple[str, str]], TileSplitStats]:
     """Write the tile crops + labels of one image; returns ``(pairs, stats)``.
 
     ``pairs`` are the ``(image, label)`` paths written, in grid order, and
-    are empty when the image was kept whole (``stats.whole == 1``).
+    are empty when the image was kept whole (``stats.whole == 1``). With
+    ``polygons`` (a segmentation image) those rings are the labels and
+    ``rows`` is ignored; each ring is its own instance, as in the label file,
+    and ``min_visible`` applies to its visible area.
     """
     import cv2  # lazy: see the module docstring
     from conecsa_common.tiling import tile_crop, tile_grid, tile_label_rows
@@ -111,10 +125,26 @@ def materialize_tiles(
     ]
     os.makedirs(images_dir, exist_ok=True)
     os.makedirs(labels_dir, exist_ok=True)
+    rings_px = [
+        (int(class_id), [[float(x) * width, float(y) * height] for x, y in points])
+        for class_id, points in (polygons or ())
+    ]
     written: List[Tuple[str, str]] = []
     for index, region in enumerate(grid):
-        lines, touched = tile_label_rows(class_ids, boxes, region, min_visible)
-        stats.fragments += touched - len(lines)
+        if polygons is not None:
+            from conecsa_common.polygons import clip_polygon_rows
+
+            lines, touched, kept = [], 0, 0
+            for class_id, ring in rings_px:
+                ring_lines, ring_touched = clip_polygon_rows(
+                    [class_id], [[ring]], region, min_visible)
+                lines.extend(ring_lines)
+                touched += ring_touched
+                kept += 1 if ring_lines else 0
+            stats.fragments += touched - kept
+        else:
+            lines, touched = tile_label_rows(class_ids, boxes, region, min_visible)
+            stats.fragments += touched - len(lines)
         if touched and not lines:
             stats.skipped += 1
             continue

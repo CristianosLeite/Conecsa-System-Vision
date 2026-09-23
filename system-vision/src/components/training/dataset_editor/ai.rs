@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! AI-assisted labeling actions: the assistant selector (SAM3 prompts or an
 //! existing device engine), Suggest / Detect, and accepting suggestions into
 //! the open image's labels.
@@ -5,14 +9,21 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use crate::api;
+use crate::api::{self, LabelPolygon};
 use crate::i18n::*;
+use crate::models::Task;
 
-use super::actions::persist_labels;
+use super::actions::{persist_labels, reload_images, write_labels};
 use super::logic::{self, ClassSlot, SamTarget};
 use super::state::{AiState, Assistant, EditorState, I18n};
 
 // ── shared async steps ────────────────────────────────────────────────────────
+
+/// Whether `image_id` is still the open image (false once the editor is gone):
+/// the gallery stays interactive while a suggestion request is in flight.
+fn is_open(st: EditorState, image_id: &str) -> bool {
+    st.images.selected.try_get_untracked().flatten().as_deref() == Some(image_id)
+}
 
 /// Re-read both assistant statuses (the gateway unloads one when the other
 /// loads, so both can change on any load).
@@ -173,13 +184,17 @@ pub(super) fn sam_suggest(st: EditorState, i18n: I18n) -> Callback<()> {
         spawn_local(async move {
             let ds = st.dataset_id.get_value();
             match api::sam_segment(&ds, &id, text.trim(), &points, threshold).await {
+                // Another image was opened meanwhile: these are not its objects.
+                Ok(_) if !is_open(st, &id) => {}
                 Ok(r) if r.boxes.is_empty() => {
                     st.notices
                         .success(td_string!(locale, training::sam_no_objects).to_string());
                     let _ = ai.suggestions.try_set(Vec::new());
                 }
                 Ok(r) => {
+                    let _ = ai.suggestion_polygons.try_set(r.polygons);
                     let _ = ai.suggestions.try_set(r.boxes);
+                    let _ = ai.suggested_for.try_set(Some(id.clone()));
                 }
                 Err(e) => {
                     st.notices
@@ -232,6 +247,17 @@ pub(super) fn model_detect(st: EditorState, i18n: I18n) -> Callback<()> {
                 return;
             }
             match api::label_detect(&ds, &id, threshold).await {
+                // Another image was opened meanwhile: drop the stale result.
+                Ok(_) if !is_open(st, &id) => {}
+                // A classification engine suggests the image's class.
+                Ok(r) if st.task == Task::Classify => {
+                    if r.image_class.is_none() {
+                        st.notices
+                            .success(td_string!(locale, training::model_no_class).to_string());
+                    }
+                    let _ = ai.class_suggestion.try_set(r.image_class);
+                    let _ = ai.suggested_for.try_set(Some(id.clone()));
+                }
                 Ok(r) if r.boxes.is_empty() => {
                     st.notices
                         .success(td_string!(locale, training::model_no_objects).to_string());
@@ -239,8 +265,10 @@ pub(super) fn model_detect(st: EditorState, i18n: I18n) -> Callback<()> {
                     let _ = ai.suggestion_names.try_set(Vec::new());
                 }
                 Ok(r) => {
+                    let _ = ai.suggestion_polygons.try_set(r.polygons);
                     let _ = ai.suggestions.try_set(r.boxes);
                     let _ = ai.suggestion_names.try_set(r.class_names);
+                    let _ = ai.suggested_for.try_set(Some(id.clone()));
                 }
                 Err(e) => st
                     .notices
@@ -262,9 +290,10 @@ pub(super) fn accept(st: EditorState, i18n: I18n) -> Callback<()> {
         if pending.is_empty() {
             return;
         }
-        let Some(image_id) = st.images.selected.get_untracked() else {
-            st.notices
-                .error(t_string!(i18n, training::select_image_first).to_string());
+        // Each suggestion's mask rings (segmentation), parallel to `pending`.
+        let pending_rings = ai.suggestion_polygons.get_untracked();
+        // The image the suggestions were computed for (set together with them).
+        let Some(image_id) = ai.suggested_for.get_untracked() else {
             return;
         };
         let names = ai.suggestion_names.get_untracked();
@@ -292,7 +321,7 @@ pub(super) fn accept(st: EditorState, i18n: I18n) -> Callback<()> {
                         return;
                     };
                     b.class_id = slot.index() as u32;
-                    tagged.push(b);
+                    tagged.push((b, i));
                 }
             } else {
                 let class_id = match logic::sam_accept_target(&prompt, &class_list, active) {
@@ -316,17 +345,85 @@ pub(super) fn accept(st: EditorState, i18n: I18n) -> Callback<()> {
                         return;
                     }
                 };
-                tagged.extend(pending.into_iter().map(|mut b| {
+                tagged.extend(pending.into_iter().enumerate().map(|(i, mut b)| {
                     b.class_id = class_id;
-                    b
+                    (b, i)
                 }));
             }
 
+            // Another image was opened while a class was created: the editor
+            // holds that image's boxes now, and the switch dropped these
+            // suggestions with it.
+            if !is_open(st, &image_id) {
+                return;
+            }
+            if st.task == Task::Segment {
+                // Each accepted object becomes its mask's rings (or its box
+                // promoted to a rectangle), one new instance per object.
+                let mut polygons = st.images.polygons.try_get_untracked().unwrap_or_default();
+                let first = logic::next_instance(&polygons);
+                for (instance, (b, i)) in (first..).zip(&tagged) {
+                    for ring in logic::suggestion_rings(b, pending_rings.get(*i)) {
+                        polygons.push(LabelPolygon {
+                            class_id: b.class_id,
+                            instance,
+                            points: ring,
+                        });
+                    }
+                }
+                let _ = st.images.polygons.try_set(polygons);
+                ai.clear_suggestions();
+                let bs = st.images.boxes.try_get_untracked().unwrap_or_default();
+                persist_labels(st, locale, &ds, &image_id, &bs, false).await;
+                return;
+            }
             let mut bs = st.images.boxes.try_get_untracked().unwrap_or_default();
-            bs.extend(tagged);
+            bs.extend(tagged.into_iter().map(|(b, _)| b));
             let _ = st.images.boxes.try_set(bs.clone());
             ai.clear_suggestions();
             persist_labels(st, locale, &ds, &image_id, &bs, false).await;
+        });
+    })
+}
+
+/// Classification: accept the model's suggested class for the image it was
+/// computed for. The model's class name is resolved against the dataset
+/// (created when missing), then picked like a click on that class — or, when
+/// another image was opened while the class was created, written to the
+/// suggestion's own image without touching the open one.
+pub(super) fn accept_class(
+    st: EditorState,
+    i18n: I18n,
+    pick_class: Callback<Option<u32>>,
+) -> Callback<()> {
+    Callback::new(move |_: ()| {
+        let Some(suggestion) = st.ai.class_suggestion.get_untracked() else {
+            return;
+        };
+        let Some(image_id) = st.ai.suggested_for.get_untracked() else {
+            return;
+        };
+        let locale = i18n.get_locale_untracked();
+        spawn_local(async move {
+            let ds = st.dataset_id.get_value();
+            let mut class_list = st.classes.list.try_get_untracked().unwrap_or_default();
+            let name = suggestion.class_name.trim().to_string();
+            let Ok(slot) = ensure_class(st, locale, &ds, &mut class_list, &name).await else {
+                return;
+            };
+            let class_id = slot.index() as u32;
+            if is_open(st, &image_id) {
+                pick_class.run(Some(class_id));
+                return;
+            }
+            match write_labels(st, &ds, &image_id, &[], &[], Some(class_id)).await {
+                Ok(()) => {
+                    let _ = reload_images(st, &ds).await;
+                }
+                Err(e) => st
+                    .notices
+                    .error(td_string!(locale, training::failed_save_labels, err = e)),
+            }
         });
     })
 }
@@ -340,6 +437,14 @@ pub(super) fn need_class(st: EditorState, i18n: I18n) -> Callback<()> {
     Callback::new(move |_: ()| {
         st.notices
             .error(t_string!(i18n, training::create_class_before_drawing).to_string());
+    })
+}
+
+/// Surfaced by the editor when a drawn or edited ring crosses itself.
+pub(super) fn refused(st: EditorState, i18n: I18n) -> Callback<()> {
+    Callback::new(move |_: ()| {
+        st.notices
+            .error(t_string!(i18n, training::polygon_self_intersects).to_string());
     })
 }
 
@@ -357,6 +462,8 @@ pub(crate) struct LabelActions {
     pub(crate) on_save: Callback<bool>,
     /// Fired when the user tries to draw a box with no class selected.
     pub(crate) on_need_class: Callback<()>,
+    /// Fired when a drawn or edited polygon ring crosses itself.
+    pub(crate) on_refused: Callback<()>,
 }
 
 impl LabelActions {
@@ -369,6 +476,7 @@ impl LabelActions {
             on_clear: clear(st),
             on_save,
             on_need_class: need_class(st, i18n),
+            on_refused: refused(st, i18n),
         }
     }
 }

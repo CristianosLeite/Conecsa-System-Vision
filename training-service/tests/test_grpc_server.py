@@ -1,4 +1,8 @@
-"""serve_grpc binds on the caller's thread and fails loudly (review H4)."""
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""serve_grpc binds on the caller's thread and fails loudly."""
 import socket
 from types import SimpleNamespace
 from typing import Any

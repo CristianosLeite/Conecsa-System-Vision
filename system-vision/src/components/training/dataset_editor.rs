@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Capture → label → train editor for ONE dataset.
 //!
 //! `DatasetEditor` owns the editor's signals ([`state::EditorState`]), spawns
@@ -21,10 +25,12 @@ use crate::components::PopupMessages;
 use crate::components::configuration::model_conversion::PendingConversion;
 use crate::components::control_panel::ViewMode;
 use crate::i18n::*;
+use crate::models::Task;
 
 use super::capture_panel::CapturePanel;
 use super::classes_panel::ClassesPanel;
 use super::gallery::Gallery;
+use super::image_class_picker::ImageClassPicker;
 use super::label_editor::LabelEditor;
 use super::progress_overlay::TrainingProgressOverlay;
 use super::replicate_modal::ReplicateModal;
@@ -32,7 +38,8 @@ use super::train_modal::TrainModal;
 
 pub(super) use actions::GalleryActions;
 pub(super) use ai::LabelActions;
-pub(super) use state::{AiState, Assistant, ClassesState, ImagesState};
+pub(super) use logic::next_instance;
+pub(super) use state::{AiState, Assistant, ClassesState, DrawMode, ImagesState};
 
 use state::EditorState;
 
@@ -91,6 +98,15 @@ pub(super) fn DatasetEditor(
     let on_train_cancel = actions::train_cancel(st, i18n);
     let on_train_finish = actions::train_finish(st, i18n);
     let on_back_click = actions::back(st, i18n, on_back);
+    // Classification labels a whole image with one class, and so does face
+    // recognition (the class is the person).
+    let classify = st.task == Task::Classify;
+    let face = st.task == Task::Face;
+    let picks_class = st.task.uses_image_class();
+    // Segmentation labels every object with polygon rings.
+    let segment = st.task == Task::Segment;
+    let on_pick_class = actions::pick_class(st, i18n);
+    let on_accept_class = ai::accept_class(st, i18n, on_pick_class);
 
     // ── derived ───────────────────────────────────────────────────────────────
 
@@ -98,12 +114,22 @@ pub(super) fn DatasetEditor(
     let image_count = Signal::derive(move || st.images.list.get().len() as u32);
     let min_images = st.training.min_images;
     let can_train = Signal::derive(move || {
-        logic::can_train(
-            image_count.get(),
-            labeled_count.get(),
-            min_images.get(),
-            !st.classes.list.get().is_empty(),
-        )
+        if face {
+            logic::can_train_face(logic::labeled_class_count(&st.images.list.get()))
+        } else if classify {
+            logic::can_train_classify(
+                image_count.get(),
+                min_images.get(),
+                logic::labeled_class_count(&st.images.list.get()),
+            )
+        } else {
+            logic::can_train(
+                image_count.get(),
+                labeled_count.get(),
+                min_images.get(),
+                !st.classes.list.get().is_empty(),
+            )
+        }
     });
     let default_base_model = Signal::derive(move || {
         logic::default_base_model(&st.ai.assistant.get(), &st.training.base_models.get())
@@ -112,8 +138,8 @@ pub(super) fn DatasetEditor(
     view! {
         <div class="flex flex-col h-full min-h-0">
             // ── editor bar ──────────────────────────────────────────────────
-            <div class="ui-topbar flex items-center justify-between px-4 py-3">
-                <div class="flex items-center gap-3">
+            <div class="ui-topbar ui-training-topbar">
+                <div class="ui-training-topbar-group">
                     <button
                         class="ui-button ui-button-neutral ui-button-md"
                         on:click=move |_| on_back_click.run(())
@@ -121,25 +147,44 @@ pub(super) fn DatasetEditor(
                         "← "
                         {t!(i18n, training::back_to_datasets)}
                     </button>
-                    <h1 class="text-lg font-semibold">
+                    <h1 class="ui-training-topbar-title">
                         {dataset_name}
                     </h1>
                 </div>
-                <div class="flex items-center gap-4">
+                <div class="ui-training-topbar-group">
                     <span class="ui-help text-sm">
-                        {move || t_string!(
-                            i18n,
-                            training::images_counter,
-                            count = image_count.get(),
-                            labeled = labeled_count.get(),
-                            min = min_images.get()
-                        )}
+                        {move || if face {
+                            t_string!(
+                                i18n,
+                                training::images_counter_face,
+                                count = image_count.get(),
+                                labeled = labeled_count.get()
+                            )
+                        } else {
+                            t_string!(
+                                i18n,
+                                training::images_counter,
+                                count = image_count.get(),
+                                labeled = labeled_count.get(),
+                                min = min_images.get()
+                            )
+                        }}
                     </span>
                     <button
                         class="ui-button ui-button-success ui-button-md"
                         disabled=move || !can_train.get()
-                        title=move || if can_train.get() {
+                        title=move || if can_train.get() && face {
+                            t_string!(i18n, training::build_gallery_tooltip_ready).to_string()
+                        } else if can_train.get() {
                             t_string!(i18n, training::train_tooltip_ready).to_string()
+                        } else if face {
+                            t_string!(i18n, training::build_gallery_tooltip_requirements).to_string()
+                        } else if classify {
+                            t_string!(
+                                i18n,
+                                training::train_tooltip_requirements_classify,
+                                min = min_images.get()
+                            )
                         } else {
                             t_string!(
                                 i18n,
@@ -149,7 +194,11 @@ pub(super) fn DatasetEditor(
                         }
                         on:click=move |_| on_train_request.run(())
                     >
-                        {t!(i18n, training::train_model)}
+                        {move || if face {
+                            t_string!(i18n, training::build_gallery)
+                        } else {
+                            t_string!(i18n, training::train_model)
+                        }}
                     </button>
                 </div>
             </div>
@@ -167,11 +216,10 @@ pub(super) fn DatasetEditor(
 
             // ── body ────────────────────────────────────────────────────────
             <main class="app-main">
-                // h-full + min-h-0 per column: the app shell is a fixed
-                // viewport (overflow hidden), so each column scrolls on
-                // its own instead of pushing past the window bottom.
-                <div class="grid grid-cols-12 gap-4 w-full h-full min-h-0">
-                    <div class="col-span-3 flex flex-col gap-4 min-h-0 max-h-full overflow-y-auto">
+                // One column below 768 px, two from 768 px, three from 1280 px
+                // (styles/training.css).
+                <div class="ui-training-editor">
+                    <div class="ui-training-side">
                         <CapturePanel
                             on_capture=on_capture
                             capturing=st.images.capturing.read_only()
@@ -183,30 +231,52 @@ pub(super) fn DatasetEditor(
                             on_add=on_class_add
                             on_rename=on_class_rename
                             on_remove=on_class_remove
+                            classify=picks_class
+                            face=face
                         />
                     </div>
 
-                    <div class="col-span-6 min-h-0 max-h-full overflow-y-auto">
-                        <LabelEditor
-                            dataset_id=dataset.dataset_id.clone()
-                            images=st.images
-                            classes=st.classes
-                            ai=st.ai
-                            actions=label
-                        />
+                    <div class="ui-training-work">
+                        {if picks_class {
+                            view! {
+                                <ImageClassPicker
+                                    dataset_id=dataset.dataset_id.clone()
+                                    images=st.images
+                                    classes=st.classes
+                                    ai=st.ai
+                                    actions=label
+                                    on_pick=on_pick_class
+                                    on_accept_class=on_accept_class
+                                    face=face
+                                />
+                            }.into_any()
+                        } else {
+                            view! {
+                                <LabelEditor
+                                    dataset_id=dataset.dataset_id.clone()
+                                    images=st.images
+                                    classes=st.classes
+                                    ai=st.ai
+                                    actions=label
+                                    segment=segment
+                                />
+                            }.into_any()
+                        }}
                     </div>
 
-                    <div class="col-span-3 min-h-0 max-h-full overflow-y-auto">
+                    <div class="ui-training-gallery">
                         <Gallery
                             dataset_id=dataset.dataset_id.clone()
                             images=st.images
                             actions=gallery
+                            classes=st.classes.list.read_only()
                         />
                     </div>
                 </div>
             </main>
 
             <TrainModal
+                face=face
                 visible=st.training.show_modal.read_only()
                 set_visible=st.training.show_modal.write_only()
                 base_models=st.training.base_models.read_only()

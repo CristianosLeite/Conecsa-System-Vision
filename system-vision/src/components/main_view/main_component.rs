@@ -1,6 +1,9 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::app::{ModelInfo, SystemStatus};
+use crate::components::application_select::{use_application, ApplicationSelect};
 use crate::components::configuration::model_conversion::PendingConversion;
 use crate::components::{
     camera_settings::CameraSettings, control_panel::ViewMode, Configuration, ControlPanel, Flow,
@@ -33,6 +36,7 @@ pub(super) fn MainComponent(
     model_refresh: ReadSignal<u32>,
     set_model_refresh: WriteSignal<u32>,
     camera_refresh: ReadSignal<u32>,
+    camera_health: ReadSignal<Option<crate::api::CameraHealth>>,
     network_refresh: ReadSignal<u32>,
     gpio_refresh: ReadSignal<u32>,
     on_training_request: Callback<()>,
@@ -45,6 +49,12 @@ pub(super) fn MainComponent(
     /// True while a training job owns the GPU (disables Start Detection).
     training_active: ReadSignal<bool>,
 ) -> impl IntoView {
+    // A device without an application type (or with one this UI does not
+    // know) shows the selector in place of the dashboard; the pinned header
+    // and the alerts stay. No `ViewMode` of its own: navigation is untouched.
+    let application = use_application();
+    let gated = Memo::new(move |_| application.state.get().gated());
+
     view! {
         <div class="app-scale-viewport">
             <div class="app-scale-content">
@@ -63,6 +73,15 @@ pub(super) fn MainComponent(
                     </div>
 
                     <main class="app-main">
+                        {move || if gated.get() {
+                            view! {
+                                <ApplicationSelect
+                                    set_error_msg=set_error_msg
+                                    set_success_msg=set_success_msg
+                                />
+                            }.into_any()
+                        } else {
+                        view! {
                         <div class="app-dashboard-grid">
                             <div class="app-primary-pane">
                                 {move || match current_view.get() {
@@ -77,6 +96,8 @@ pub(super) fn MainComponent(
                                     ViewMode::CameraSettings => view! {
                                         <CameraSettings
                                             refresh_camera=camera_refresh
+                                            refresh_network=network_refresh
+                                            camera_health=camera_health
                                             set_error_msg=set_error_msg
                                             set_success_msg=set_success_msg
                                         />
@@ -142,6 +163,8 @@ pub(super) fn MainComponent(
                                 <StatusComponent />
                             </div>
                         </div>
+                        }.into_any()
+                        }}
                     </main>
                 </div>
             </div>

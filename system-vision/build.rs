@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Compile protobuf for the WASM frontend.
     std::fs::create_dir_all("src/proto")?;
@@ -26,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "training",
                 "statistics",
                 "flow",
+                "application",
             ])?
             .parse_options(ParseOptions::new().interpolate_display(true));
         let infos = TranslationsInfos::parse(cfg)?;

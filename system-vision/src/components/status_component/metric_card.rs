@@ -1,8 +1,9 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
-/// Usage bar color.
 fn usage_bar_color(value: f32) -> &'static str {
     if value < 50.0 {
         "var(--state-success-text)"
@@ -13,7 +14,6 @@ fn usage_bar_color(value: f32) -> &'static str {
     }
 }
 
-/// Usage bar style.
 fn usage_bar_style(value: f32) -> String {
     let normalized = if value.is_finite() {
         value.clamp(0.0, 100.0)

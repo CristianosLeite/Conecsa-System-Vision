@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Import of a pre-existing YOLO-format dataset uploaded as a ZIP.
 
 Validates the archive (structure, classes, label syntax) and normalizes it
@@ -20,8 +24,25 @@ Accepted layouts inside the ZIP (Roboflow / ultralytics exports):
     classes.txt instead of data.yaml; sibling .txt next to each image as a
     last-resort pairing when no images/ directory exists.
 
-Label rows may be detection ("class cx cy w h") or segmentation
-("class x1 y1 x2 y2 ..."); polygons are collapsed to their bounding box.
+The archive must be laid out for the new dataset's task:
+
+* ``detect`` — label rows are "class cx cy w h"; an archive with
+  segmentation rows ("class x1 y1 x2 y2 ...") or a classification layout is
+  refused (silently turning polygons into boxes would hide that the archive
+  is for another task).
+* ``classify`` — one folder of images per class (the ultralytics layout,
+  ``[train|val|test/]<class>/*.jpg``, optionally inside one wrapper folder);
+  ``classes.txt``, when present, fixes the class order and may list classes
+  without images (the dataset export writes one). A folder whose name begins
+  with a dot is a class only when it holds images (hidden tool folders hold
+  none). An archive with YOLO label files or an ``images/`` directory is a
+  detection export and is refused.
+* ``face`` — the classification layout: one folder of photos per person
+  (the folder name is the person's name).
+* ``segment`` — the detection layout with polygon rows ("class x1 y1 … xn
+  yn", normalized, at least 3 vertices); box rows or a classification
+  layout are refused. Every ring is letterbox-transformed like a box and
+  then normalized at the stored image size (``conecsa_common.polygons``).
 
 All failures raise DatasetImportError with an operator-readable message.
 """
@@ -34,10 +55,11 @@ import stat
 import struct
 import uuid
 import zipfile
-from typing import BinaryIO, List, Optional, Tuple
+from typing import BinaryIO, Iterator, List, Optional, Tuple
 
 import cv2
 import yaml
+from conecsa_common.tasks import FACE, is_reserved_face_name, person_key
 
 from .capture_service import letterbox_square
 from .dataset_service import DatasetError
@@ -45,13 +67,21 @@ from .dataset_service import DatasetError
 logger = logging.getLogger(__name__)
 
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-# Same character policy as class names in dataset_service.
-_NAME_SAFE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.")
+# Same character policy as class names in dataset_service (which admits the
+# "name #rrggbb" color suffix, so an exported dataset re-imports).
+_NAME_SAFE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.#")
+# The tasks an archive can be imported for, as named in refusal messages.
+_TASK_NAMES = {"detect": "object detection", "classify": "classification",
+               "segment": "segmentation", "face": "face recognition"}
+# Tasks whose archives hold one folder of images per class (per person for face).
+_CLASS_FOLDER_TASKS = ("classify", "face")
+# Split folders of a classification archive (ultralytics accepts all of them).
+_CLASS_SPLITS = ("train", "val", "valid", "validation", "test")
 
 # Hard caps on what an uploaded archive may expand into. The total budget
 # counts bytes actually written (the ZIP's declared file_size is attacker-
-# controlled and used to be the only cap, so a header lying about its size
-# bypassed it entirely). Same import-time env pattern as service/config.py.
+# controlled, so a header lying about its size cannot bypass it). Same
+# import-time env pattern as service/config.py.
 _MAX_ZIP_ENTRIES = int(os.environ.get("TRAINING_MAX_ZIP_ENTRIES", "20000"))
 _MAX_ZIP_ENTRY_BYTES = int(
     os.environ.get("TRAINING_MAX_ZIP_ENTRY_MB", "256")) * 1024 * 1024
@@ -67,22 +97,39 @@ class DatasetImportError(DatasetError):
 
 
 def import_dataset_zip(zip_path: str, dest_dir: str, img_size: int = 640,
-                       max_total_mb: int = 512) -> Tuple[List[str], int]:
+                       max_total_mb: int = 512,
+                       task: str = "detect") -> Tuple[List[str], int]:
     """Validate ``zip_path`` and materialize it into ``dest_dir`` (staging).
 
     ``img_size`` selects the storage geometry (letterbox square, or ``0`` for
-    native resolution — see the module docstring). Returns
+    native resolution — see the module docstring); ``task`` is the new
+    dataset's task, which the archive's layout must match. Returns
     (classes, imported_image_count). The caller owns cleanup of ``dest_dir``
     on failure and the atomic rename into place on success.
     """
+    if task not in _TASK_NAMES:
+        raise DatasetImportError(f"Cannot import datasets for the '{task}' task")
     extract_dir = os.path.join(dest_dir, ".extract")
     os.makedirs(os.path.join(dest_dir, "images"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "labels"), exist_ok=True)
     try:
         _extract(zip_path, extract_dir, max_total_mb)
-        classes = _find_classes(extract_dir)
-        pairs = _collect_pairs(extract_dir)
-        count = _normalize(pairs, classes, dest_dir, img_size)
+        if task in _CLASS_FOLDER_TASKS:
+            if _looks_like_detection(extract_dir):
+                unit = "person" if task == "face" else "class"
+                raise DatasetImportError(
+                    "This ZIP is an object-detection dataset (images/ + labels/); this "
+                    f"device runs {_TASK_NAMES[task]}, which imports one folder of "
+                    f"images per {unit}")
+            classes, count = _import_class_folders(extract_dir, dest_dir, img_size, task)
+        else:
+            if _looks_like_classification(extract_dir):
+                raise DatasetImportError(
+                    "This ZIP is a classification dataset (one folder of images per "
+                    f"class); this device runs {_TASK_NAMES[task]}")
+            classes = _find_classes(extract_dir)
+            pairs = _collect_pairs(extract_dir)
+            count = _normalize(pairs, classes, dest_dir, img_size, task)
     finally:
         shutil.rmtree(extract_dir, ignore_errors=True)
 
@@ -200,16 +247,145 @@ def _classes_from_yaml(yaml_path: str) -> List[str]:
     return _validate_classes([str(n) for n in names], yaml_path)
 
 
-def _validate_classes(names: List[str], source: str) -> List[str]:
-    """Validate classes."""
+def _validate_classes(names: List[str], source: str, task: str = "detect") -> List[str]:
+    """Validate classes; for ``face`` the reserved ``unknown`` is refused as a person."""
     if not names:
         raise DatasetImportError(f"No class names found in {os.path.basename(source)}")
     for name in names:
         if not name or len(name) > 64 or not all(c in _NAME_SAFE for c in name):
             raise DatasetImportError(f"Invalid class name '{name}'")
-    if len(set(names)) != len(names):
+        if task == FACE and not person_key(name):
+            raise DatasetImportError(f"'{name}' cannot be a person: a name cannot be a colour alone")
+        if task == FACE and is_reserved_face_name(name):
+            raise DatasetImportError(
+                f"'{name}' cannot be a person: 'unknown' is reserved for a face nobody matches")
+    # Two people whose names differ only in case or colour could not be told apart.
+    keys = [person_key(n) for n in names] if task == FACE else names
+    if len(set(keys)) != len(names):
         raise DatasetImportError("Duplicate class names in the dataset")
     return names
+
+
+# ── layout ────────────────────────────────────────────────────────────────────
+
+def _looks_like_classification(extract_dir: str) -> bool:
+    """True for the ultralytics classification layout: ``<split>/<class>/*.jpg``.
+
+    Images grouped in at least two folders, no ``images/`` directory and no
+    label files at all (a ``classes.txt`` does not count). A detection export
+    always has label files beside or parallel to its images.
+    """
+    image_dirs = set()
+    for dirpath, _dirnames, filenames in os.walk(extract_dir):
+        rel = os.path.relpath(dirpath, extract_dir)
+        for name in filenames:
+            lower = name.lower()
+            if lower.endswith(".txt") and lower != "classes.txt":
+                return False
+            if lower.endswith(_IMAGE_EXTS):
+                if rel == "." or "images" in rel.split(os.sep):
+                    return False
+                image_dirs.add(rel)
+    return len(image_dirs) >= 2
+
+
+def _looks_like_detection(extract_dir: str) -> bool:
+    """True for a YOLO detection export: label files or an ``images/`` directory."""
+    for dirpath, _dirnames, filenames in os.walk(extract_dir):
+        if "images" in os.path.relpath(dirpath, extract_dir).split(os.sep):
+            return True
+        for name in filenames:
+            lower = name.lower()
+            if lower.endswith(".txt") and lower != "classes.txt":
+                return True
+    return False
+
+
+# ── classification (folder per class) ─────────────────────────────────────────
+
+def _holds_images(folder: str) -> bool:
+    """True when ``folder`` holds an image at any depth."""
+    for _dirpath, _dirnames, filenames in os.walk(folder):
+        if any(name.lower().endswith(_IMAGE_EXTS) for name in filenames):
+            return True
+    return False
+
+
+def _is_class_folder(path: str, name: str) -> bool:
+    """Whether the entry ``name`` at ``path`` is a class folder.
+
+    A hidden folder counts only when it holds images: a class name may begin
+    with a dot (``.defective`` exports as ``train/.defective/``), while hidden
+    tool folders (``.git``, ``.ipynb_checkpoints``) hold none.
+    """
+    return os.path.isdir(path) and (not name.startswith(".") or _holds_images(path))
+
+
+def _unwrap(root: str) -> str:
+    """Descend through lone wrapper folders (``pets.zip`` → ``pets/train/cat``).
+
+    Stops at a split folder, at a folder holding images directly (a
+    one-class archive's class folder) or where more than one entry lives.
+    """
+    while True:
+        entries = [e for e in os.listdir(root)
+                   if not e.startswith(".") or _is_class_folder(os.path.join(root, e), e)]
+        if len(entries) != 1 or entries[0] in _CLASS_SPLITS:
+            return root
+        child = os.path.join(root, entries[0])
+        if not os.path.isdir(child):
+            return root
+        if any(name.lower().endswith(_IMAGE_EXTS) for name in os.listdir(child)):
+            return root
+        root = child
+
+
+def _import_class_folders(extract_dir: str, dest_dir: str, img_size: int,
+                          task: str) -> Tuple[List[str], int]:
+    """Import a folder-per-class archive; returns (classes, image count).
+
+    Class folders sit at the archive root or inside split folders (all
+    splits are merged — the device builds its own split per job). Each image
+    is stored like a detection import (same geometry, same caps) and labeled
+    with one line holding its class id.
+    """
+    root = _unwrap(extract_dir)
+    split_roots = [os.path.join(root, s) for s in _CLASS_SPLITS
+                   if os.path.isdir(os.path.join(root, s))]
+    images: List[Tuple[str, str]] = []
+    folders = set()
+    for class_root in split_roots or [root]:
+        for entry in sorted(os.listdir(class_root)):
+            class_dir = os.path.join(class_root, entry)
+            if not _is_class_folder(class_dir, entry):
+                continue
+            folders.add(entry)
+            for dirpath, _dirnames, filenames in os.walk(class_dir):
+                for name in sorted(filenames):
+                    if name.lower().endswith(_IMAGE_EXTS):
+                        images.append((os.path.join(dirpath, name), entry))
+    if not images:
+        raise DatasetImportError(
+            "No images found in class folders — a classification ZIP holds one "
+            "folder of images per class")
+
+    listed = _find_file(root, ("classes.txt",), max_depth=1)
+    if listed is not None:
+        with open(listed, "r") as f:
+            classes = _validate_classes([line.strip() for line in f if line.strip()], listed,
+                                        task)
+        unknown = sorted(folders - set(classes))
+        if unknown:
+            raise DatasetImportError(
+                f"Class folder '{unknown[0]}' is not listed in classes.txt")
+    else:
+        classes = _validate_classes(sorted(folders), "the class folders", task)
+
+    for image_path, class_name in images:
+        image_id = _store_image(image_path, dest_dir, img_size)
+        with open(os.path.join(dest_dir, "labels", f"{image_id}.txt"), "w") as f:
+            f.write(f"{classes.index(class_name)}\n")
+    return classes, len(images)
 
 
 # ── image/label pairing ───────────────────────────────────────────────────────
@@ -251,14 +427,12 @@ def _collect_pairs(extract_dir: str) -> List[Tuple[str, Optional[str]]]:
 
 # ── normalization ─────────────────────────────────────────────────────────────
 
-def _parse_label_file(path: str, n_classes: int) -> List[Tuple[int, float, float, float, float]]:
-    """Parse one YOLO label file into (class, cx, cy, w, h) boxes.
+def _label_rows(path: str, n_classes: int) -> Iterator[Tuple[int, int, List[float]]]:
+    """Yield ``(lineno, class_id, coords)`` per non-blank row of a YOLO label file.
 
-    Accepts both export flavors: detection rows ("class cx cy w h") and
-    segmentation rows ("class x1 y1 x2 y2 ..." polygon) — polygons are
-    converted to their bounding box, since the trainer runs detection.
+    Numbers, the class range and the 0..1 coordinate range are validated
+    here; the row's shape (box or polygon) is the caller's to check.
     """
-    boxes: List[Tuple[int, float, float, float, float]] = []
     with open(path, "r") as f:
         for lineno, line in enumerate(f, 1):
             parts = line.split()
@@ -282,19 +456,57 @@ def _parse_label_file(path: str, n_classes: int) -> List[Tuple[int, float, float
                     f"Invalid label file '{os.path.basename(path)}' line {lineno}: "
                     f"coordinates must be normalized (0..1)"
                 )
-            if len(coords) == 4:
-                boxes.append((cls, coords[0], coords[1], coords[2], coords[3]))
-            elif len(coords) >= 6 and len(coords) % 2 == 0:
-                xs, ys = coords[0::2], coords[1::2]
-                w, h = max(xs) - min(xs), max(ys) - min(ys)
-                boxes.append((cls, min(xs) + w / 2, min(ys) + h / 2, w, h))
-            else:
-                raise DatasetImportError(
-                    f"Invalid label file '{os.path.basename(path)}' line {lineno}: "
-                    f"expected 'class cx cy w h' or 'class x1 y1 x2 y2 ...' "
-                    f"(polygon), got {len(parts)} values"
-                )
+            yield lineno, cls, coords
+
+
+def _is_polygon(coords: List[float]) -> bool:
+    return len(coords) >= 6 and len(coords) % 2 == 0
+
+
+def _parse_label_file(path: str, n_classes: int) -> List[Tuple[int, float, float, float, float]]:
+    """Parse one YOLO detection label file into (class, cx, cy, w, h) boxes.
+
+    A segmentation row ("class x1 y1 x2 y2 ..." polygon) is refused: the
+    archive belongs to a segmentation dataset, not to this detection one.
+    """
+    boxes: List[Tuple[int, float, float, float, float]] = []
+    for lineno, cls, coords in _label_rows(path, n_classes):
+        if len(coords) == 4:
+            boxes.append((cls, coords[0], coords[1], coords[2], coords[3]))
+        elif _is_polygon(coords):
+            raise DatasetImportError(
+                f"Label file '{os.path.basename(path)}' line {lineno} is a "
+                f"segmentation polygon; this device runs object detection"
+            )
+        else:
+            raise DatasetImportError(
+                f"Invalid label file '{os.path.basename(path)}' line {lineno}: "
+                f"expected 'class cx cy w h', got {len(coords) + 1} values"
+            )
     return boxes
+
+
+def _parse_polygon_file(path: str, n_classes: int) -> List[Tuple[int, List[List[float]]]]:
+    """Parse one YOLO segmentation label file into (class, [[x, y], …]) rings.
+
+    A detection row ("class cx cy w h") is refused: the archive belongs to a
+    detection dataset, not to this segmentation one.
+    """
+    rings: List[Tuple[int, List[List[float]]]] = []
+    for lineno, cls, coords in _label_rows(path, n_classes):
+        if _is_polygon(coords):
+            rings.append((cls, [[coords[i], coords[i + 1]] for i in range(0, len(coords), 2)]))
+        elif len(coords) == 4:
+            raise DatasetImportError(
+                f"Label file '{os.path.basename(path)}' line {lineno} is a "
+                f"detection box; this device runs segmentation"
+            )
+        else:
+            raise DatasetImportError(
+                f"Invalid label file '{os.path.basename(path)}' line {lineno}: "
+                f"expected 'class x1 y1 x2 y2 x3 y3 ...', got {len(coords) + 1} values"
+            )
+    return rings
 
 
 def _image_dimensions(path: str) -> Optional[Tuple[int, int]]:
@@ -347,36 +559,87 @@ def _dimensions_from_stream(f: BinaryIO) -> Optional[Tuple[int, int]]:
     return None
 
 
-def _normalize(pairs, classes: List[str], dest_dir: str, img_size: int) -> int:
+def _decode_and_store(image_path: str, dest_dir: str,
+                      img_size: int) -> Tuple[str, int, int]:
+    """Decode one archive image, store it in the ``img_size`` geometry.
+
+    Returns ``(image_id, source width, source height)``.
+    """
+    # Bound the decode before cv2.imread allocates the full raster.
+    dims = _image_dimensions(image_path)
+    if dims is not None and dims[0] * dims[1] > _MAX_IMAGE_PIXELS:
+        raise DatasetImportError(
+            f"Image '{os.path.basename(image_path)}' is too large "
+            f"({dims[0]}x{dims[1]}; limit {_MAX_IMAGE_PIXELS} pixels)"
+        )
+    img = cv2.imread(image_path)
+    if img is None:
+        raise DatasetImportError(
+            f"Could not decode image '{os.path.basename(image_path)}'"
+        )
+    h, w = img.shape[:2]
+    stored = letterbox_square(img, img_size) if img_size > 0 else img
+    ok, buf = cv2.imencode(".jpg", stored, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        raise DatasetImportError(
+            f"Could not re-encode image '{os.path.basename(image_path)}'"
+        )
+    image_id = str(uuid.uuid4())
+    with open(os.path.join(dest_dir, "images", f"{image_id}.jpg"), "wb") as f:
+        f.write(buf.tobytes())
+    return image_id, w, h
+
+
+def _store_image(image_path: str, dest_dir: str, img_size: int) -> str:
+    """Store one archive image in the ``img_size`` geometry; returns its id."""
+    return _decode_and_store(image_path, dest_dir, img_size)[0]
+
+
+def _polygon_lines(rings: List[Tuple[int, List[List[float]]]], w: int, h: int,
+                   img_size: int) -> List[str]:
+    """Segmentation rows for one stored image: letterbox-mapped, then normalized.
+
+    Each archive row is its own instance (the YOLO file has no instance
+    column); normalization (rasterize and re-extract) may drop a tiny ring
+    or split one.
+    """
+    from conecsa_common.polygons import normalize_rings
+
+    if img_size > 0:
+        # Same rounding as letterbox_square, like the box transform below.
+        scale = min(img_size / w, img_size / h)
+        nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+        left, top = (img_size - nw) // 2, (img_size - nh) // 2
+        size_w = size_h = img_size
+    else:
+        nw, nh, left, top, size_w, size_h = w, h, 0, 0, w, h
+    lines = []
+    for cls, points in rings:
+        mapped = [[(x * nw + left) / size_w, (y * nh + top) / size_h] for x, y in points]
+        for ring in normalize_rings([mapped], size_w, size_h):
+            lines.append(f"{cls} " + " ".join(f"{x:.6f} {y:.6f}" for x, y in ring))
+    return lines
+
+
+def _normalize(pairs, classes: List[str], dest_dir: str, img_size: int,
+               task: str = "detect") -> int:
     """Re-encode every image into ``dest_dir`` in the ``img_size`` geometry and
-    write its label file (letterbox-transformed, or verbatim for native)."""
+    write its label file (letterbox-transformed, or verbatim for native;
+    polygon rows are also normalized for a segmentation dataset)."""
     count = 0
     letterbox = img_size > 0
     for image_path, label_path in pairs:
+        if task == "segment":
+            rings = _parse_polygon_file(label_path, len(classes)) if label_path else []
+            image_id, w, h = _decode_and_store(image_path, dest_dir, img_size)
+            lines = _polygon_lines(rings, w, h, img_size) if rings else []
+            if lines:
+                with open(os.path.join(dest_dir, "labels", f"{image_id}.txt"), "w") as f:
+                    f.write("\n".join(lines) + "\n")
+            count += 1
+            continue
         boxes = _parse_label_file(label_path, len(classes)) if label_path else []
-        # Bound the decode before cv2.imread allocates the full raster.
-        dims = _image_dimensions(image_path)
-        if dims is not None and dims[0] * dims[1] > _MAX_IMAGE_PIXELS:
-            raise DatasetImportError(
-                f"Image '{os.path.basename(image_path)}' is too large "
-                f"({dims[0]}x{dims[1]}; limit {_MAX_IMAGE_PIXELS} pixels)"
-            )
-        img = cv2.imread(image_path)
-        if img is None:
-            raise DatasetImportError(
-                f"Could not decode image '{os.path.basename(image_path)}'"
-            )
-        h, w = img.shape[:2]
-        stored = letterbox_square(img, img_size) if letterbox else img
-        ok, buf = cv2.imencode(".jpg", stored, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        if not ok:
-            raise DatasetImportError(
-                f"Could not re-encode image '{os.path.basename(image_path)}'"
-            )
-
-        image_id = str(uuid.uuid4())
-        with open(os.path.join(dest_dir, "images", f"{image_id}.jpg"), "wb") as f:
-            f.write(buf.tobytes())
+        image_id, w, h = _decode_and_store(image_path, dest_dir, img_size)
 
         if boxes:
             if letterbox:

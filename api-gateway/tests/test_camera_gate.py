@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the gateway's camera gate on StatusResponse.
 
 `camera_connected` has explicit presence precisely so a version skew (new

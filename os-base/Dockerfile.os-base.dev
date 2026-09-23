@@ -1,18 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # ============================================================================
 # DEV base image for the Conecsa stack on x86_64 + NVIDIA GPU.
 #
-# Mirrors os/Dockerfile.os (the Jetson/aarch64 production base) but for local
+# Mirrors os-base/Dockerfile.os-base (the Jetson/aarch64 production base) but for local
 # development on an x86_64 workstation with an NVIDIA GPU. The differences:
 #
 #   - GPU wheels come from PyPI (torch / torchvision / onnxruntime-gpu /
 #     tensorrt-cu12 / pycuda) instead of the aarch64 jetson-ai-lab index.
-#   - No hardware-management agent layer (wpa_supplicant / jeepney / Jetson.GPIO)
-#     — the `os` service runs only as the shared base + named-volume owner in
-#     docker-compose.dev.yml; the Wi-Fi/GPIO agent is Jetson-only.
+#   - No `os-base` hardware agent layer (wpa_supplicant / jeepney / Jetson.GPIO)
+#     — the `os-base` service runs only as the shared base + named-volume owner
+#     in docker-compose.dev.yml; the agent runs only on the Jetson.
 #   - No Tegra LD_LIBRARY_PATH; the standard CUDA paths are enough off-device.
 #
 # Used as `FROM base` by the *.dev service images (the dev compose maps
-# base=service:os via additional_contexts, exactly like production).
+# base=service:os-base via additional_contexts, exactly like production).
 # ============================================================================
 
 FROM nvidia/cuda:12.6.0-devel-ubuntu22.04
@@ -70,23 +74,15 @@ ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 ENV CUDA_MODULE_LOADING=LAZY
 ENV PYTHONUNBUFFERED=1
 
-# Dependencies follow scripts/init.sh (the local x86_64 dev setup), NOT the
-# Jetson wheels — the deps that actually differ off-device are tensorrt and
-# pycuda. Install order: the shared ML stack from requirements-common.txt, then
-# the x86 GPU stack `tensorrt-cu12` + `pycuda` + `onnx` from PyPI (init.sh's
-# `--gpu` step), then force numpy back to 1.26.4 for the pycuda/tensorrt ABI
-# (exactly the downgrade the requirements-dev.txt note describes for the base).
+# Dependencies follow scripts/init.sh, not the Jetson wheels: the shared ML
+# stack from requirements-common.txt, then `tensorrt-cu12` + `pycuda` + `onnx`
+# from PyPI (init.sh's `--gpu` step), then numpy forced back to 1.26.4 for the
+# pycuda/tensorrt ABI.
 #
-# tensorrt-cu12 is PINNED to 10.3.0 — the SAME version as the Jetson base
-# (tensorrt-10.3.0-...aarch64.whl). Newer TensorRT 10.x removed the
-# `NetworkDefinitionCreationFlag.EXPLICIT_BATCH` enum that the engine builder
-# uses (api/runtime_management/_trt_engine_builder.py), so an unpinned install
-# breaks engine conversion with "no attribute 'EXPLICIT_BATCH'". pycuda is
-# pinned to the Jetson's 2024.1 for the same parity.
-#
-# torch is NOT installed explicitly: it arrives transitively via ultralytics as
-# a CPU build on x86 — which is fine, since TensorRT + pycuda drive the GPU
-# inference path and torch only runs the one-off .pt→.onnx conversion subprocess.
+# tensorrt-cu12 and pycuda are pinned to the Jetson base versions (10.3.0,
+# 2024.1): newer TensorRT 10.x removed the `EXPLICIT_BATCH` flag the engine
+# builder uses. torch arrives transitively via ultralytics as a CPU build; it
+# only runs the .pt→.onnx conversion.
 COPY os-base/requirements-common.txt /app/
 RUN pip install --no-cache-dir --root-user-action=ignore \
         -r /app/requirements-common.txt && \
@@ -103,6 +99,9 @@ RUN mkdir -p /data/models /data/runs /data/training
 # service. Kept on the default import path for parity with production; the dev
 # services also see the live os-base/conecsa_shm via the bind-mounted /workspace.
 COPY os-base/conecsa_shm/ /usr/local/lib/python3.10/dist-packages/conecsa_shm/
+
+# Third-party notices, at the same path as the production base image.
+COPY os-base/THIRD-PARTY-NOTICES.md /usr/share/doc/conecsa/THIRD-PARTY-NOTICES-os-base.md
 
 # Keep the container alive so it stays the canonical owner of the volumes when
 # used as a plain base image (the dev compose does not run the hardware agent).

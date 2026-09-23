@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Dataset image capture from the camera SHM ring.
 
 Replicates the live detector's view: the side-by-side stereo frame is blended
@@ -17,7 +21,7 @@ two formats are never mixed inside one dataset.
 """
 import logging
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -145,3 +149,19 @@ def corners_to_letterbox(
     cx, cy = _clamp((lx1 + lx2) / 2.0), _clamp((ly1 + ly2) / 2.0)
     w, h = _clamp(lx2 - lx1), _clamp(ly2 - ly1)
     return cx, cy, w, h
+
+
+def points_to_letterbox(
+    points: List[List[float]], src_w: int, src_h: int, size: int,
+) -> List[List[float]]:
+    """Map normalized ``[[x, y], …]`` points on a src_w×src_h frame onto the
+    size×size letterboxed image, with ``corners_to_letterbox``'s rounding."""
+    scale = min(size / src_w, size / src_h)
+    nw, nh = max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale)))
+    top = (size - nh) // 2
+    left = (size - nw) // 2
+    return [
+        [min(1.0, max(0.0, (float(x) * nw + left) / size)),
+         min(1.0, max(0.0, (float(y) * nh + top) / size))]
+        for x, y in points
+    ]

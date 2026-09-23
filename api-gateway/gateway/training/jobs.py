@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Training-job routes: start (with GPU-handover re-assert), status polling,
 cancel and finish."""
 import grpc
@@ -53,7 +57,7 @@ def training_start():
     except (TypeError, ValueError):
         return _json_error("'epochs', 'batch' and 'patience' must be non-negative integers")
     # Covers clients that skipped /training/enter (the handover was re-asserted
-    # above): a run is now active, so the orphan watchdog must be armed.
+    # above): a run is active, so the orphan watchdog must be armed.
     tracker.arm()
     return _json(_job_dict(job), 202)
 

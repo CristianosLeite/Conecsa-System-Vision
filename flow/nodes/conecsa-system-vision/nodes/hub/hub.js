@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file conecsa-hub config node — how the other nodes reach devices through a
  *   Conecsa hub's Developer API (`https://<hub>:<port>/devices/<id>/api/...`,

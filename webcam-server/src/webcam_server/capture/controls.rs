@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! V4L2 hardware controls applied via `v4l2-ctl`: exposure, gamma, gain and
 //! RGB white-balance levels, with detection of the software fallback for
 //! cameras lacking per-channel balance controls.
@@ -5,7 +9,6 @@
 use super::super::{CameraConfig, WebcamServer};
 
 impl WebcamServer {
-    /// Query v4l2 control range.
     fn query_v4l2_control_range(dev: &str, control: &str) -> Option<(u32, u32)> {
         let output = std::process::Command::new("v4l2-ctl")
             .args(["--device", dev, "--list-ctrls"])
@@ -37,7 +40,6 @@ impl WebcamServer {
         }
     }
 
-    /// Set v4l2 control.
     fn set_v4l2_control(dev: &str, ctrl: &str) -> bool {
         match std::process::Command::new("v4l2-ctl")
             .args(["--device", dev, "--set-ctrl", ctrl])

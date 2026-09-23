@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Pure box-decoding helpers for YOLO output post-processing.
 
@@ -8,10 +12,10 @@ state and no drawing here.
 from typing import Optional
 
 # noinspection PyPackageRequirements
-import cv2  # Package is included on os build.
+import cv2  # ships in conecsa-os-base:base
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import numpy as np  # ships in conecsa-os-base:base
 
 
 def sigmoid(x):
@@ -133,22 +137,33 @@ def apply_nms(boxes, confidences, class_ids, overlay_threshold=0.45):
     confidences_np = np.asarray(confidences, dtype=np.float32)
     class_ids_np = np.asarray(class_ids, dtype=np.int32)
 
-    # OpenCV NMSBoxes expects [x, y, w, h]
-    bboxes_xywh = []
-    for x1, y1, x2, y2 in boxes_np:
-        bboxes_xywh.append([int(x1), int(y1), int(max(1, x2 - x1)), int(max(1, y2 - y1))])
-
-    # Confidence filtering already happened upstream (CONFIDENCE_THRESHOLD in
-    # YOLODetector); here NMS must only suppress by IoU, so keep every box.
-    score_threshold = 0.0
-    indices = cv2.dnn.NMSBoxes(bboxes_xywh, confidences_np.tolist(), score_threshold, float(overlay_threshold))
-
-    if indices is None or len(indices) == 0:
+    keep = nms_indices(boxes_np, confidences_np, overlay_threshold)
+    if keep.size == 0:
         return [], [], []
-
-    keep = np.array(indices).reshape(-1)
     return (
         boxes_np[keep].tolist(),
         confidences_np[keep].astype(float).tolist(),
         class_ids_np[keep].astype(int).tolist(),
     )
+
+
+def nms_indices(boxes, confidences, overlay_threshold=0.45) -> np.ndarray:
+    """Indices of the boxes the overlay NMS keeps, for callers carrying per-box data.
+
+    The suppression behind :func:`apply_nms`: class-agnostic
+    ``cv2.dnn.NMSBoxes`` on integer boxes, IoU only. Confidence filtering
+    already happened upstream (``CONFIDENCE_THRESHOLD``), so the score
+    threshold is 0 and every box takes part. Segmentation uses the indices
+    to keep each instance's mask with its box.
+    """
+    if len(boxes) == 0:
+        return np.empty(0, dtype=np.int64)
+    boxes_np = np.asarray(boxes, dtype=np.int32)
+    # OpenCV NMSBoxes expects [x, y, w, h].
+    bboxes_xywh = [[int(x1), int(y1), int(max(1, x2 - x1)), int(max(1, y2 - y1))]
+                   for x1, y1, x2, y2 in boxes_np]
+    indices = cv2.dnn.NMSBoxes(bboxes_xywh, np.asarray(confidences, dtype=np.float32).tolist(),
+                               0.0, float(overlay_threshold))
+    if indices is None or len(indices) == 0:
+        return np.empty(0, dtype=np.int64)
+    return np.asarray(indices, dtype=np.int64).reshape(-1)

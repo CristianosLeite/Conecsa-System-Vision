@@ -1,8 +1,12 @@
-"""Shared plain-Python helpers for every FROM-base service.
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
 
-Unlike ``conecsa_shm`` (which pulls numpy/cv2 at import), this package has no
-third-party dependencies, so lightweight consumers — notably the api-gateway's
-audit trail — can import it without growing their footprint.
+"""Shared plain-Python helpers for every service built on `conecsa-os-base:base`.
+
+The package root has no third-party dependencies (unlike ``conecsa_shm``, which
+pulls numpy/cv2 at import), so lightweight consumers such as the api-gateway's
+audit trail can import it without growing their footprint.
 
 Modules:
 
@@ -10,10 +14,15 @@ Modules:
   loading that reports corruption instead of silently defaulting.
 - ``bounded_sqlite``: the bounded SQLite ring queue shared by the detection
   buffer and the audit trail.
+- ``events``: the in-process event bus shared by the inference and training
+  services.
+- ``tasks``: the application task ids (detect / classify / segment).
 - ``tiling``: SAHI-style tile grid + cross-tile merge for small-object
-  detection. It needs numpy, so it is deliberately NOT re-exported here —
-  import ``conecsa_common.tiling`` explicitly to keep the package root
-  dependency-free.
+  detection (needs numpy).
+- ``polygons``: segmentation polygon normalization (needs numpy/cv2).
+
+Only ``atomic`` and ``bounded_sqlite`` are re-exported here; import the other
+modules explicitly so the package root stays dependency-free.
 """
 
 from .atomic import atomic_write_bytes, atomic_write_json, fsync_dir, read_json

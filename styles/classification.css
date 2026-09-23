@@ -1,0 +1,220 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Classification result under the live video: the class above the threshold
+   and the top-k candidates. The class is always named in text — the swatch and
+   the bars only add colour — and long pt-BR/es labels or class names wrap,
+   never truncate. Result over candidates below 1280 px, side by side above. */
+
+@layer components {
+  .ui-classify-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+    background: var(--surface-panel-raised);
+  }
+
+  .ui-classify-result,
+  .ui-classify-top {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    min-width: 0;
+  }
+
+  @media (min-width: 1280px) {
+    .ui-classify-panel {
+      flex-direction: row;
+      align-items: flex-start;
+      gap: 1.5rem;
+    }
+
+    .ui-classify-result {
+      flex: 0 0 16rem;
+    }
+
+    .ui-classify-top {
+      flex: 1 1 auto;
+    }
+  }
+
+  .ui-classify-class {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text-strong);
+    font-size: 1.125rem;
+    font-weight: 650;
+    overflow-wrap: anywhere;
+  }
+
+  .ui-classify-swatch {
+    flex: none;
+    width: 0.875rem;
+    height: 0.875rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.25rem;
+  }
+
+  .ui-classify-score {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ui-classify-muted {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+  }
+
+  .ui-classify-candidates {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .ui-classify-candidate {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(4rem, 2fr) 3rem;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+  }
+
+  .ui-classify-candidate.is-top {
+    color: var(--text-strong);
+    font-weight: 650;
+  }
+
+  .ui-classify-candidate-name {
+    overflow-wrap: anywhere;
+  }
+
+  .ui-classify-bar {
+    height: 0.5rem;
+    overflow: hidden;
+    border-radius: 9999px;
+    background: var(--track-muted);
+  }
+
+  .ui-classify-bar-fill {
+    display: block;
+    height: 100%;
+    background: var(--accent-cyan);
+  }
+
+  .ui-classify-candidate-score {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Class picker of a classification dataset (training page): one button
+     per class, the picked one outlined and pressed. */
+  .ui-class-picker-image {
+    width: 100%;
+    max-height: 28rem;
+    object-fit: contain;
+    border-radius: 0.375rem;
+    background: var(--surface-control);
+  }
+
+  .ui-class-picker-classes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .ui-class-picker-class {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.25rem;
+    max-width: 100%;
+    padding: 0.375rem 0.75rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.375rem;
+    background: var(--surface-control);
+    color: var(--text-strong);
+    font-size: 0.875rem;
+    text-align: left;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+    transition: border-color 120ms ease, background-color 120ms ease;
+  }
+
+  .ui-class-picker-class:hover:not(:disabled) {
+    border-color: var(--border-accent);
+    background: var(--surface-control-hover);
+  }
+
+  .ui-class-picker-class:active:not(:disabled) {
+    background: var(--surface-control-active);
+  }
+
+  .ui-class-picker-class:focus-visible {
+    outline: 2px solid var(--accent-cyan);
+    outline-offset: 2px;
+  }
+
+  .ui-class-picker-class:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .ui-class-picker-class.is-picked {
+    border-color: var(--accent-cyan);
+    background: var(--state-info-bg);
+    font-weight: 650;
+  }
+
+  .ui-class-picker-swatch {
+    flex: none;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 9999px;
+  }
+
+  .ui-class-picker-key {
+    flex: none;
+    padding: 0 0.3rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.25rem;
+    color: var(--text-muted);
+    font-size: 0.6875rem;
+    font-family: inherit;
+  }
+
+  .ui-class-picker-name {
+    min-width: 0;
+  }
+
+  .ui-class-picker-status,
+  .ui-class-picker-suggestion {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .ui-class-picker-suggestion {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--state-info-border);
+    border-radius: 0.375rem;
+    background: var(--state-info-bg);
+    color: var(--state-info-text);
+    font-size: 0.875rem;
+  }
+}

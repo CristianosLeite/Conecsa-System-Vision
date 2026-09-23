@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api;
 use crate::api::NetworkConfig;
@@ -6,6 +8,7 @@ use crate::i18n::*;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
+use super::ap_panel::AccessPointPanel;
 use super::tabs::NetworkSettingsTabs;
 use super::wifi_panel::{WifiNetworkPanel, WifiPanelState};
 use super::wired_panel::WiredNetworkPanel;
@@ -66,6 +69,16 @@ pub fn NetworkSettings(
                     return view! { <div /> }.into_any();
                 };
 
+                if active_tab.get() == "ap" {
+                    return view! {
+                        <AccessPointPanel
+                            refresh_network=refresh_network
+                            set_error_msg=set_error_msg
+                            set_success_msg=set_success_msg
+                        />
+                    }
+                        .into_any();
+                }
                 if active_tab.get() == "wired" {
                     view! {
                         <WiredNetworkPanel

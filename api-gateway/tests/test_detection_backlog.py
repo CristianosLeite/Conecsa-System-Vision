@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the detection-backlog relay endpoints (offline buffer drain)."""
 import json
 
@@ -111,6 +115,16 @@ class TestSnapshotHubHeartbeat:
                    headers={"X-Conecsa-Client-Verify": "SUCCESS"},
                    environ_base={"REMOTE_ADDR": TERMINATOR_IP})
         assert stub.snapshot_requests[-1].hub_pull is True
+
+    def test_a_passive_pull_is_never_marked_as_hub(self, client, stub, trusted_proxy):
+        # The device UI's classification panel polls through the terminator
+        # while the device is open in the hub: a verified
+        # peer, yet never the hub's heartbeat.
+        client.get("/api/v1/detections/snapshot?passive=true&include_frame=false",
+                   headers={"X-Conecsa-Client-Verify": "SUCCESS"},
+                   environ_base={"REMOTE_ADDR": TERMINATOR_IP})
+        assert stub.snapshot_requests[-1].hub_pull is False
+        assert stub.snapshot_requests[-1].include_frame is False
 
 
 class TestListBacklog:

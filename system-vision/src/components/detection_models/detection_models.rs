@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api;
 use crate::app::{load_models, ModelInfo};
@@ -15,7 +17,6 @@ use super::context_menu::ModelContextMenu;
 use super::model_list::ModelList;
 use super::section_header::ModelSectionHeader;
 
-/// The `DetectionModels` view component.
 #[component]
 pub fn DetectionModels(
     models: ReadSignal<Vec<ModelInfo>>,
@@ -32,9 +33,9 @@ pub fn DetectionModels(
     set_success_msg: WriteSignal<String>,
 ) -> impl IntoView {
     let i18n = use_i18n();
+    let application = crate::components::application_select::use_application();
     let file_input_ref = NodeRef::<leptos::html::Input>::new();
 
-    // State for context menu
     let (context_menu_visible, set_context_menu_visible) = signal(false);
     let (context_menu_x, set_context_menu_x) = signal(0);
     let (context_menu_y, set_context_menu_y) = signal(0);
@@ -47,9 +48,8 @@ pub fn DetectionModels(
     spawn_local(async move {
         let jobs = match api::list_active_conversions().await {
             Ok(resp) => resp.jobs,
-            // Never silent: a failure here used to look exactly like "there is
-            // no conversion running", which is indistinguishable from the bug
-            // this recovery exists to avoid.
+            // Log the failure: silently returning would look exactly like
+            // "no conversion is running".
             Err(e) => {
                 leptos::logging::error!("Could not list active conversions: {}", e);
                 return;
@@ -141,10 +141,6 @@ pub fn DetectionModels(
                     let file_name = file.name();
 
                     let allowed_extensions = [".pt", ".onnx", ".engine", ".plan"];
-                    // Temporary local variant that also accepted .pt intentionally disabled.
-                    // let allowed_extensions = [".pt", ".onnx", ".engine", ".plan"];
-                    // Deprecated formats intentionally rejected in TensorRT-only mode.
-                    // let allowed_extensions = [".tflite", ".pt", ".onnx", ".h5", ".engine", ".plan"];
                     let has_valid_ext = allowed_extensions
                         .iter()
                         .any(|ext| file_name.ends_with(ext));
@@ -166,9 +162,12 @@ pub fn DetectionModels(
                         name = file_name.clone()
                     ));
                     set_overlay_progress.set(0);
+                    // The upload declares the device's task, verified at
+                    // activation; unknown → the backend uses the device's own.
+                    let task = application.state.get_untracked().task().map(|t| t.id());
 
                     spawn_local(async move {
-                        match api::upload_model_file(file).await {
+                        match api::upload_model_file(file, task).await {
                             Ok(resp) if resp.status == "converting" => {
                                 if let Some(job_id) = resp.job_id.clone() {
                                     // The event stream usually adopts the job
@@ -247,7 +246,6 @@ pub fn DetectionModels(
         }
     };
 
-    /// A `ModelOp` enum.
     enum ModelOp {
         Select,
         Delete,
@@ -306,19 +304,21 @@ pub fn DetectionModels(
 
     view! {
         <div
-            class="flex-1 flex flex-col min-h-0"
+            // Never shrink: the list caps its own height (max-h + scroll), so
+            // this block only needs its content's height. As `flex-1 min-h-0`
+            // it absorbed the panel's leftover space instead, and once the
+            // sections above filled the card — the face settings were what
+            // tipped it over — that leftover was zero and the models vanished.
+            class="shrink-0 flex flex-col"
             on:click=move |_| {
                 if context_menu_visible.get() {
                     set_context_menu_visible.set(false);
                 }
             }
         >
-            // Hidden file input for browser-based model upload
             <input
                 type="file"
-                accept="*.pt,*.onnx,*.engine,*.plan"
-                // Legacy accept values intentionally disabled in TensorRT-only mode.
-                // accept=".tflite,.pt,.onnx,.h5,.engine,.plan"
+                accept=".pt,.onnx,.engine,.plan"
                 disabled=!privileged
                 node_ref=file_input_ref
                 on:change=on_file_change

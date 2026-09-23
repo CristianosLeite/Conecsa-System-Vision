@@ -1,10 +1,55 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tests for the app-level error handlers (sanitized 500s, preserved HTTP
-semantics) — REFACTORING.md M1."""
+semantics)."""
+import logging
 from types import SimpleNamespace
 
+import grpc
 import pytest
 from gateway import grpc_clients
 from gateway.config import settings
+
+
+class _Refused(grpc.RpcError):
+    """A FAILED_PRECONDITION the gateway relays as 409."""
+
+    def code(self):
+        return grpc.StatusCode.FAILED_PRECONDITION
+
+    def details(self):
+        return "A training handover is in progress"
+
+
+class TestRefusalLog:
+    def test_a_refused_mutation_logs_its_reason(self, real_app, monkeypatch, caplog):
+        def refuse(*args, **kwargs):
+            raise _Refused()
+
+        monkeypatch.setattr(grpc_clients.clients, "detection", SimpleNamespace(ResetStats=refuse))
+        with caplog.at_level(logging.WARNING, logger="gateway.app"):
+            resp = real_app.test_client().post("/api/v1/stats/reset")
+        assert resp.status_code == 409
+        assert ("refused POST /api/v1/stats/reset -> 409: "
+                "A training handover is in progress") in caplog.text
+
+    def test_a_protobuf_refusal_logs_its_reason(self, real_app, monkeypatch, caplog):
+        # Native clients get protobuf 4xx bodies; the log must still name why.
+        monkeypatch.setattr(grpc_clients.clients, "detection",
+                            SimpleNamespace(GetStatus=lambda _req: SimpleNamespace(is_running=True)))
+        with caplog.at_level(logging.WARNING, logger="gateway.app"):
+            resp = real_app.test_client().post(
+                "/api/v1/start", headers={"Accept": "application/x-protobuf"})
+        assert resp.status_code == 400
+        assert resp.mimetype == "application/x-protobuf"
+        assert "refused POST /api/v1/start -> 400: Detection already running" in caplog.text
+
+    def test_a_missing_route_is_not_logged(self, real_app, caplog):
+        with caplog.at_level(logging.WARNING, logger="gateway.app"):
+            assert real_app.test_client().post("/api/v1/no-such-route").status_code == 404
+        assert "refused" not in caplog.text
 
 
 @pytest.fixture

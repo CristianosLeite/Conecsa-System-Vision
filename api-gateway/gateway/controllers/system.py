@@ -1,5 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """System controller: inference config get/put, the health probe, host metrics
-and host power actions (shutdown/restart via the os hardware agent)."""
+and host power actions (shutdown/restart via the `os-base` hardware agent)."""
 import json
 import logging
 
@@ -71,7 +75,7 @@ def readiness_check():
 
 @api_bp.route('/api/system/status', methods=['GET'])
 def get_system_status():
-    # Host metrics come from the os hardware agent (it owns host introspection).
+    # Host metrics come from the `os-base` hardware agent (it owns host introspection).
     """GET /api/system/status — gateway relay."""
     try:
         return _json(hardware.get_system_status())

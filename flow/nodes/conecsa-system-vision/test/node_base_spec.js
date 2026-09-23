@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The shared node scaffold must register the node, work out how to reach the
 // api-gateway (through a hub or directly), and seed the status ring exactly
 // like the copies it replaced.

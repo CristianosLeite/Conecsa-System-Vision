@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 "use strict";
 // Tiny mock of the api-gateway for node behaviour tests. Not a spec file (the
 // leading underscore keeps it out of the jest testMatch glob).

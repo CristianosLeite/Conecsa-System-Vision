@@ -1,9 +1,11 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
- * @file Shared node scaffolding. Every Conecsa node starts the same way —
- *   createNode, work out where the api-gateway is (through a hub, or directly),
- *   paint an initial ring status — and that boilerplate lived copied in each
- *   node. The HTTP/SSE transport is in ./http-client; this module owns only the
- *   node lifecycle scaffold.
+ * @file Shared node scaffolding: createNode, resolve how the node reaches the
+ *   api-gateway (through a hub, or directly) and paint the initial ring status.
+ *   The HTTP/SSE transport lives in ./http-client.
  */
 "use strict";
 
@@ -15,7 +17,7 @@ const { inferenceBaseUrl } = require("./http-client");
  * Hub mode: the node references a `conecsa-hub` config node and names a
  * device — requests go to `https://<hub>:<port>/devices/<device>/api/...`
  * with the hub's API key and CA. Direct mode (no hub, or a hub without a
- * device): the legacy base URL chain — per-node "API endpoint" →
+ * device): the base URL chain — per-node "API endpoint" →
  * `INFERENCE_URL` → `http://api-gateway:5000` — which is what the Flow
  * container on the device itself uses.
  *

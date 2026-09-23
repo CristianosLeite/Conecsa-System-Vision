@@ -1,18 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Server-side role authorization for mutating routes.
 
 The device authenticates nobody itself: the only identity that exists here is
 the ``X-Conecsa-Role`` header the hub stamps onto requests it relays for a
 logged-in operator, trusted only when the request came through the mTLS
-terminator (``_hub_verified``). Until now that header was read for audit
-attribution only, so the role checks in the device UI were purely cosmetic —
-any operator could reach every mutating endpoint. This module makes the role
-an enforced boundary.
+terminator (``_hub_verified``). This module enforces that role on the server,
+so the device UI's role checks are not the only boundary.
 
 Three request classes, decided per mutating request:
 
 * **Not hub-verified** — a caller on the internal compose network or a dev
-  deployment. No role exists to enforce; the pre-existing network boundary
-  applies unchanged.
+  deployment. No role exists to enforce; the network boundary applies.
 * **Hub-verified without a role header** — the hub acting on its own behalf
   (applying a recipe, draining backlogs, pairing). The hub's command layer
   authorizes those before issuing them, and its proxy always stamps a role on
@@ -58,6 +59,8 @@ ROUTE_POLICIES = {
     ("POST", "/api/threshold"): ROLE_USER,
     ("POST", "/api/v1/overlay_threshold"): ROLE_USER,
     ("POST", "/api/overlay_threshold"): ROLE_USER,
+    ("POST", "/api/v1/segment/max_instances"): ROLE_USER,
+    ("POST", "/api/v1/face/settings"): ROLE_USER,
     ("POST", "/api/v1/stats/reset"): ROLE_USER,
     ("POST", "/api/v1/counter/reset"): ROLE_USER,
     ("POST", "/api/v1/trigger/enable"): ROLE_USER,
@@ -69,6 +72,9 @@ ROUTE_POLICIES = {
     # ── hub housekeeping (normally issued without an operator) ───────────────
     ("POST", "/api/v1/detections/backlog/ack"): ROLE_ADMIN,
     ("POST", "/api/v1/audit/backlog/ack"): ROLE_ADMIN,
+
+    # ── application type (configure) ─────────────────────────────────────────
+    ("PUT", "/api/v1/application"): ROLE_ADMIN,
 
     # ── models / classes (configure) ─────────────────────────────────────────
     ("POST", "/api/v1/model"): ROLE_ADMIN,
@@ -96,6 +102,8 @@ ROUTE_POLICIES = {
     ("POST", "/api/v1/network/config"): ROLE_ADMIN,
     ("POST", "/api/v1/network/wifi/connect"): ROLE_ADMIN,
     ("POST", "/api/v1/network/wifi/forget"): ROLE_ADMIN,
+    ("POST", "/api/v1/network/ap/start"): ROLE_ADMIN,
+    ("POST", "/api/v1/network/ap/stop"): ROLE_ADMIN,
 
     # ── training session + jobs ──────────────────────────────────────────────
     ("POST", "/api/v1/training/enter"): ROLE_ADMIN,

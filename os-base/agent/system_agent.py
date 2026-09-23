@@ -1,15 +1,18 @@
-"""System metrics for the hardware agent.
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""System metrics for the `os-base` hardware agent.
 
 Host introspection — CPU / RAM / disk / temperature / GPU — read from psutil and
-Jetson sysfs. Moved verbatim from the inference-service's old
-`SystemController`; it belongs with the `os` hardware agent (privileged, sees the
-host `/sys`). Returned as a dict; the gRPC server maps it onto `SystemStatus`.
+Jetson sysfs; it lives in the privileged agent because that container sees the
+host `/sys`. Returned as a dict; the gRPC server maps it onto `SystemStatus`.
 """
 import logging
 import os
 from typing import List, Optional
 
-import psutil  # in conecsa-os:base
+import psutil  # in conecsa-os-base:base
 
 # noinspection PyPackageRequirements
 from jeepney import DBusAddress, new_method_call
@@ -160,7 +163,7 @@ class SystemAgent:
 
     @staticmethod
     def get_system_status() -> dict:
-        """CPU / RAM / disk / temperature / GPU. Same shape the old endpoint served."""
+        """CPU / RAM / disk / temperature / GPU as a dict (see ``SystemStatus``)."""
         try:
             cpu_percent = psutil.cpu_percent(interval=0.5)
             ram = psutil.virtual_memory()

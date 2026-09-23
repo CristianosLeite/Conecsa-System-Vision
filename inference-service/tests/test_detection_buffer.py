@@ -1,5 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the offline detection buffer (store-and-forward)."""
 import base64
+import json
 import sqlite3
 
 import api.services.detection_buffer as buffer_mod
@@ -39,10 +44,13 @@ def clock():
 
 
 def make_buffer(tmp_path, clock, max_records: int = 100,
-                max_bytes: int = 10_000_000) -> buffer_mod.DetectionBufferService:
+                max_bytes: int = 10_000_000,
+                sample_interval_s: float = 0.0) -> buffer_mod.DetectionBufferService:
+    # Every frame is a sample unless a test exercises the offline sampling.
     return buffer_mod.DetectionBufferService(
         str(tmp_path / "buffer.db"), max_records=max_records,
-        max_bytes=max_bytes, offline_threshold_s=THRESHOLD, clock=clock)
+        max_bytes=max_bytes, offline_threshold_s=THRESHOLD, clock=clock,
+        sample_interval_s=sample_interval_s)
 
 
 def go_offline(buf: buffer_mod.DetectionBufferService, clock: FakeClock) -> None:
@@ -76,6 +84,15 @@ class TestSignature:
         b = [dict(a[0], confidence=0.1, bbox=[0.5, 0.5, 0.9, 0.9], color=None)]
         assert buffer_mod.signature(a, 1, "m") == buffer_mod.signature(b, 1, "m")
 
+    def test_ignores_segmentation_polygons(self):
+        # Polygon outlines jitter frame to frame; the same instances must not
+        # count as a change.
+        a = [dict(d, polygons=[[[0.1, 0.2], [0.3, 0.2], [0.2, 0.4]]]) for d in dets("cap")]
+        b = [dict(a[0], polygons=[[[0.11, 0.21], [0.3, 0.19], [0.25, 0.4], [0.2, 0.41]]])]
+        c = dets("cap")
+        assert buffer_mod.signature(a, 1, "m") == buffer_mod.signature(b, 1, "m")
+        assert buffer_mod.signature(a, 1, "m") == buffer_mod.signature(c, 1, "m")
+
     def test_distinguishes_class_total_and_model(self):
         base = buffer_mod.signature(dets("cap"), 1, "m")
         assert buffer_mod.signature(dets("bottle"), 1, "m") != base
@@ -102,6 +119,27 @@ class TestGating:
         go_offline(buf, clock)
         buf.observe(dets("cap"), 1, "m", RAW, ANNOTATED)
         assert buf.pending_count() == 1
+
+    def test_the_record_is_built_only_when_one_is_written(self, tmp_path, clock):
+        # The pipeline passes light items for the signature and a provider for
+        # the stored items (segmentation rings are extracted only then).
+        buf = make_buffer(tmp_path, clock)
+        calls = []
+
+        def full():
+            calls.append(1)
+            return [dict(dets("cap")[0], polygons=[[[0.1, 0.2], [0.3, 0.2], [0.2, 0.4]]])]
+
+        buf.note_snapshot_pull()
+        buf.observe(dets("cap"), 1, "m", RAW, ANNOTATED, record_detections=full)  # online
+        assert calls == []
+        clock.advance(THRESHOLD + 1)
+        buf.observe(dets("bottle"), 1, "m", RAW, ANNOTATED, record_detections=full)
+        assert calls == [1] and buf.pending_count() == 1
+        with sqlite3.connect(str(tmp_path / "buffer.db")) as db:
+            (payload,) = db.execute("SELECT payload FROM buffered_detections").fetchone()
+        assert json.loads(payload)["detections"][0]["polygons"] == [[[0.1, 0.2], [0.3, 0.2],
+                                                                     [0.2, 0.4]]]
 
     def test_a_reboot_mid_outage_buffers_the_scene_it_wakes_up_to(
             self, tmp_path, clock):
@@ -153,6 +191,30 @@ class TestGating:
         assert buf.pending_count() == 0
         buf.observe(dets("bottle"), 1, "m", RAW, ANNOTATED)
         assert buf.pending_count() == 1
+
+
+class TestOfflineSampling:
+    """Offline, frames are compared at the hub's cadence, not every frame."""
+
+    def test_a_flickering_set_writes_at_most_one_row_per_interval(self, tmp_path, clock):
+        # Regression: A/B flips at 30 fps wrote one row per flip (499 in ~2 min).
+        buf = make_buffer(tmp_path, clock, sample_interval_s=1.0)
+        go_offline(buf, clock)
+        for i in range(60):  # two seconds at 30 fps
+            buf.observe(dets("cap") if i % 2 else dets("bottle"), 1, "m", RAW, ANNOTATED)
+            clock.advance(1 / 30)
+        assert 1 <= buf._count <= 3
+
+    def test_a_change_inside_the_interval_is_taken_at_the_next_sample(self, tmp_path, clock):
+        buf = make_buffer(tmp_path, clock, sample_interval_s=1.0)
+        go_offline(buf, clock)
+        buf.observe(dets("cap"), 1, "m", RAW, ANNOTATED)
+        clock.advance(0.5)
+        buf.observe(dets("bottle"), 1, "m", RAW, ANNOTATED)
+        assert buf._count == 1
+        clock.advance(0.6)
+        buf.observe(dets("bottle"), 1, "m", RAW, ANNOTATED)
+        assert buf._count == 2
 
 
 class TestBacklogProtocol:
@@ -222,6 +284,32 @@ class TestBacklogProtocol:
         rec = buf.list_backlog()["records"][0]
         assert rec["raw_frame"] is None
         assert rec["frame"] == base64.b64encode(b"ANNJPEG").decode()
+
+    def test_each_record_keeps_the_task_it_was_captured_under(self, tmp_path, clock):
+        # Records outlive an application switch: a classification record
+        # buffered before a switch to detection still drains as one.
+        buf = make_buffer(tmp_path, clock)
+        go_offline(buf, clock)
+        busy = [{"class_name": "busy", "confidence": 0.93, "area": None,
+                 "color": "#3b82f6"}]
+        buf.observe(busy, 1, "states.engine", RAW, ANNOTATED, task="classify")
+        buf.observe(dets("cap"), 1, "boxes.engine", RAW, ANNOTATED, task="detect")
+        records = buf.list_backlog()["records"]
+        assert [r["task"] for r in records] == ["classify", "detect"]
+        assert "bbox" not in records[0]["detections"][0]
+
+    def test_a_row_from_older_firmware_has_no_task(self, tmp_path, clock):
+        make_buffer(tmp_path, clock)  # creates the schema
+        payload = '{"detections": [], "total": 1, "model": "m"}'
+        conn = sqlite3.connect(tmp_path / "buffer.db")
+        conn.execute(
+            "INSERT INTO buffered_detections"
+            " (captured_at, payload, frame, frame_is_raw, size_bytes)"
+            " VALUES (1.0, ?, NULL, 1, ?)", (payload, len(payload)))
+        conn.commit()
+        conn.close()
+        record = make_buffer(tmp_path, clock).list_backlog()["records"][0]
+        assert "task" not in record
 
     def test_survives_a_reopen(self, tmp_path, clock):
         self._filled(tmp_path, clock, n=2)

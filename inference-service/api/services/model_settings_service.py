@@ -1,40 +1,53 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Model settings service.
 
-Persists per-model tuning — confidence/overlay thresholds and
-camera configuration — to a sibling JSON file next to the model file
-(e.g. weights.engine -> weights.settings.json), and applies them when a
-model is activated.
+Persists per-model tuning to a sibling JSON file (weights.engine ->
+weights.settings.json), like the per-model classes file and detection areas,
+and applies it on selection and at startup. Keys, all preserved by ``save()``:
 
-This mirrors the per-model classes file (weights.txt) and per-model
-detection areas (weights.areas.json): each model carries its own tuning,
-restored automatically on selection and at startup.
-
-The file may also carry an informational ``"imgsz"`` (int) written by the
-conversion job when a ``.pt`` is exported (640 or 1280). It is never applied to
-anything — the engine dictates its own input size — but it survives every
-``save()`` so the UI/logs can tell the builds apart. Files without the key load
-unchanged.
-
-The conversion job also records ``"training": {"geometry": ...}`` when the
-uploader declared how the weights were trained (``"frames"``, ``"tiles:auto"``
-or ``"tiles:<px>"``; the training-service always does). A model only performs
-at the scale it was trained at, so ``switch_model`` compares that geometry with
-the live ``TILING_MODE``/``TILING_TILE`` and logs a warning on a mismatch —
-a whole-frame model under grid tiling, or a tile model with tiling off. The
-geometry is never applied either; an unknown geometry is silent.
+- confidence/overlay thresholds and camera configuration;
+- ``"segment": {"max_instances": n}``, only once the operator set one (absent
+  means the ``SEGMENT_MAX_MASKS`` defaults);
+- ``"face": {"match_threshold", "min_size_px", "max_faces"}``, each only once
+  the operator set it (absent means the ``FACE_*`` defaults);
+- ``"imgsz"`` (640 or 1280), written by the ``.pt`` conversion; informational,
+  since the engine dictates its own input size;
+- ``"training": {"geometry": ...}`` (``"frames"``, ``"tiles:auto"`` or
+  ``"tiles:<px>"``) when the uploader declared it; ``switch_model`` warns when it
+  disagrees with the live ``TILING_MODE``/``TILING_TILE`` and never applies it;
+- ``"task"`` ("detect", "classify", "segment", "face"), declared at upload, verified at
+  activation and never rewritten; a file without it (older firmware) means
+  ``"detect"``.
 """
 import json
 import logging
 import os
 from threading import Lock
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 from conecsa_common.atomic import atomic_write_json
+from conecsa_common.tasks import task_or_default
 
-from ..config import Config
+from ..config import (
+    Config,
+    face_settings_from_env,
+    valid_face_match_threshold,
+    valid_face_max_faces,
+    valid_face_min_size,
+)
 
 logger = logging.getLogger(__name__)
+
+#: Per-model face settings: Config attribute → (key in the "face" block, validator).
+_FACE_SETTINGS = (
+    ("FACE_MATCH_THRESHOLD", "match_threshold", valid_face_match_threshold),
+    ("FACE_MIN_SIZE_PX", "min_size_px", valid_face_min_size),
+    ("FACE_MAX_FACES", "max_faces", valid_face_max_faces),
+)
 
 GEOMETRY_FRAMES = "frames"
 GEOMETRY_TILES_AUTO = "tiles:auto"
@@ -90,9 +103,7 @@ class ModelSettingsService:
         self._settings_path: Optional[str] = None
         self._lock = Lock()
 
-    # ------------------------------------------------------------------
-    # Model switching
-    # ------------------------------------------------------------------
+    # ── Model switching ──
 
     def switch_model(self, settings_path: str) -> None:
         """Point at a model's settings file and apply it.
@@ -115,7 +126,24 @@ class ModelSettingsService:
             # alone, as before.
             if data is None or "thresholds" in data:
                 return
+        else:
+            # The seeded snapshot inherits the thresholds, but the instance
+            # limit and the face settings belong to one model: a new model
+            # starts on the defaults.
+            self._config.SEGMENT_MAX_INSTANCES = None
+            self._apply_face({})
         self.save()
+
+    def _apply_face(self, face: dict) -> None:
+        """Apply a model's ``face`` block; a missing or invalid value is the default."""
+        for (attr, key, valid), default in zip(_FACE_SETTINGS, face_settings_from_env(),
+                                               strict=True):
+            stored = face.get(key)
+            value: float = default
+            if (isinstance(stored, (int, float)) and not isinstance(stored, bool)
+                    and valid(stored)):
+                value = stored
+            setattr(self._config, attr, float(value) if key == "match_threshold" else value)
 
     @staticmethod
     def _warn_on_geometry_mismatch(path: str, data: Optional[dict]) -> None:
@@ -146,9 +174,15 @@ class ModelSettingsService:
             return None
         return cls.training_geometry_of(cls._read_payload(path))
 
-    # ------------------------------------------------------------------
-    # Load / apply
-    # ------------------------------------------------------------------
+    @classmethod
+    def task_of(cls, settings_path: str) -> str:
+        """Read a model's task without activating it (``"detect"`` when unrecorded)."""
+        path = os.path.abspath(settings_path)
+        if not os.path.exists(path):
+            return task_or_default(None)
+        return task_or_default((cls._read_payload(path) or {}).get("task"))
+
+    # ── Load / apply ──
 
     def load_and_apply(self) -> Optional[dict]:
         """Read the active model's settings file and apply it to live state.
@@ -172,6 +206,14 @@ class ModelSettingsService:
             self._config.CONFIDENCE_THRESHOLD = float(conf)
         if isinstance(overlay, (int, float)) and 0.0 <= overlay <= 1.0:
             self._config.OVERLAY_THRESHOLD = float(overlay)
+        # A model without its own limit runs on the SEGMENT_MAX_MASKS defaults,
+        # never on the limit of the model active before it.
+        segment = data.get("segment")
+        limit = segment.get("max_instances") if isinstance(segment, dict) else None
+        valid = isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 255
+        self._config.SEGMENT_MAX_INSTANCES = limit if valid else None
+        face = data.get("face")
+        self._apply_face(face if isinstance(face, dict) else {})
 
         camera = data.get("camera")
         if camera and self._video_service is not None:
@@ -191,20 +233,48 @@ class ModelSettingsService:
         logger.info("Applied per-model settings from %s", path)
         return data
 
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
+    # ── Save ──
 
-    def save(self) -> None:
+    #: Config attributes :meth:`save` can write on their own, and where they live.
+    _FIELDS = {
+        "OVERLAY_THRESHOLD": ("thresholds", "overlay", float),
+        "SEGMENT_MAX_INSTANCES": ("segment", "max_instances", int),
+        "FACE_MATCH_THRESHOLD": ("face", "match_threshold", float),
+        "FACE_MIN_SIZE_PX": ("face", "min_size_px", int),
+        "FACE_MAX_FACES": ("face", "max_faces", int),
+    }
+
+    def save(self, only: Union[str, Sequence[str], None] = None) -> bool:
         """Snapshot the live thresholds + camera config to the model's file.
 
-        The informational ``imgsz`` and ``training`` already in the file (if
-        any) are carried over so a threshold edit never erases them.
+        The informational ``imgsz`` and ``training`` and the model's ``task``
+        already in the file (if any) are carried over so a threshold edit
+        never erases them. Returns False only when the file could not be
+        written; with no model scoped there is nothing to save.
+
+        ``only`` names one ``Config`` attribute, or several (see ``_FIELDS``),
+        to write into the file as it is on disk in one write, leaving every
+        other value alone: changing the overlay threshold must not also
+        persist a confidence threshold that ``SetThreshold`` deliberately
+        kept in memory. A missing or unreadable file falls back to the full
+        snapshot.
         """
         with self._lock:
             path = self._settings_path
         if not path:
-            return
+            return True
+
+        names = [only] if isinstance(only, str) else list(only or ())
+        fields = [(name, self._FIELDS[name]) for name in names if name in self._FIELDS]
+        if fields and len(fields) == len(names) and os.path.exists(path):
+            existing = self._read_payload(path)
+            values = [(getattr(self._config, name, None), field) for name, field in fields]
+            if isinstance(existing, dict) and all(v is not None for v, _ in values):
+                for value, (section, key, cast) in values:
+                    if not isinstance(existing.get(section), dict):
+                        existing[section] = {}
+                    existing[section][key] = cast(value)
+                return self._write_payload(path, existing)
 
         payload: dict = {
             "thresholds": {
@@ -212,8 +282,12 @@ class ModelSettingsService:
                 "overlay": self._config.OVERLAY_THRESHOLD,
             },
         }
+        limit = getattr(self._config, "SEGMENT_MAX_INSTANCES", None)
+        if limit is not None:
+            payload["segment"] = {"max_instances": int(limit)}
         if self._video_service is not None:
-            camera = self._video_service.get_current_camera_config()
+            # Local tuning only: the capture source is device-level state.
+            camera = self._video_service.get_model_camera_config()
             if camera:
                 payload["camera"] = camera
             payload["stereo"] = self._video_service.get_stereo_config()
@@ -225,27 +299,40 @@ class ModelSettingsService:
         geometry = self.training_geometry_of(existing)
         if geometry is not None:
             payload["training"] = {"geometry": geometry}
+        task = (existing or {}).get("task")
+        if isinstance(task, str) and task:
+            payload["task"] = task
+        face = (existing or {}).get("face")
+        if isinstance(face, dict) and face:
+            # Only values the operator set are kept, as their live values.
+            payload["face"] = {key: getattr(self._config, attr)
+                               for attr, key, _ in _FACE_SETTINGS if key in face}
 
-        self._write_payload(path, payload)
+        return self._write_payload(path, payload)
 
     @classmethod
-    def record_training(cls, settings_path: str, imgsz: int,
-                        train_geometry: Optional[str] = None) -> None:
-        """Store the export image size and training geometry of a freshly converted model.
+    def record_training(cls, settings_path: str, imgsz: Optional[int],
+                        train_geometry: Optional[str] = None,
+                        task: Optional[str] = None) -> None:
+        """Store what a freshly uploaded or converted model was built as.
 
-        Called by the conversion job when the engine is written, before the
-        model is ever activated: merges ``"imgsz"`` (and ``"training"`` when
-        the geometry is known and well-formed) into an existing settings file
-        or creates one holding just those keys (``switch_model`` completes it
-        with the threshold snapshot on first activation). Best-effort, like
-        ``save``.
+        Called before the model is ever activated — by the conversion job when
+        the engine is written, or by the upload of a prebuilt engine: merges
+        ``"imgsz"`` (when known), ``"training"`` (when the geometry is known
+        and well-formed) and the model's ``"task"`` into an existing settings
+        file or creates one holding just those keys (``switch_model``
+        completes it with the threshold snapshot on first activation).
+        Best-effort, like ``save``.
         """
         path = os.path.abspath(settings_path)
         payload = (cls._read_payload(path) if os.path.exists(path) else None) or {}
-        payload["imgsz"] = int(imgsz)
+        if imgsz is not None:
+            payload["imgsz"] = int(imgsz)
         geometry = parse_train_geometry(train_geometry)
         if geometry is not None:
             payload["training"] = {"geometry": geometry}
+        if task:
+            payload["task"] = task
         cls._write_payload(path, payload)
 
     @classmethod
@@ -253,9 +340,7 @@ class ModelSettingsService:
         """``record_training`` without a geometry (kept for callers that only know the size)."""
         cls.record_training(settings_path, imgsz)
 
-    # ------------------------------------------------------------------
-    # File helpers
-    # ------------------------------------------------------------------
+    # ── File helpers ──
 
     @staticmethod
     def _read_payload(path: str) -> Optional[dict]:
@@ -272,9 +357,11 @@ class ModelSettingsService:
         return data
 
     @staticmethod
-    def _write_payload(path: str, payload: dict) -> None:
-        """Durably write ``payload`` as JSON (``conecsa_common.atomic``; best-effort)."""
+    def _write_payload(path: str, payload: dict) -> bool:
+        """Durably write ``payload`` as JSON (``conecsa_common.atomic``); False (logged) on failure."""
         try:
             atomic_write_json(path, payload, indent=2)
         except Exception as exc:  # noqa: BLE001 - best-effort persist
             logger.error("Failed to persist model settings to %s: %s", path, exc)
+            return False
+        return True

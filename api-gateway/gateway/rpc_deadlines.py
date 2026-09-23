@@ -1,12 +1,14 @@
-"""Default deadlines for every gateway-to-service gRPC call (review H3).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
 
-Waitress is thread-per-connection, and most controllers used to call their
-stub with no ``timeout=``: a backend that stayed connected but stopped
-answering parked the request thread forever, and a handful of such calls
-exhausted the pool behind the only HTTP surface. Rather than touching ~70
-call sites, the channels are wrapped with this interceptor, which fills in a
-deadline whenever a call has none. An explicit ``timeout=`` at the call site
-always wins (the bulk transfers pass their own).
+"""Default deadlines for every gateway-to-service gRPC call.
+
+Waitress is thread-per-connection, so a call to a backend that stays connected
+but stops answering would park its request thread forever, and a handful of
+those would exhaust the pool. The channels are wrapped with this interceptor,
+which fills in a deadline whenever a call has none. An explicit ``timeout=`` at
+the call site always wins (the bulk transfers pass their own).
 
 Deadline classes:
 
@@ -27,11 +29,12 @@ import grpc
 from .config import settings
 
 # Unary methods (proto rpc names) that legitimately take longer than a control
-# call: engine (de)serialization, GPU handover, training start/stop, dataset
-# tree removal, camera capture, SAM unload.
+# call: engine (de)serialization, GPU handover, an application switch (drains
+# the pipeline), training start/stop, dataset tree removal, camera capture,
+# SAM unload.
 LONG_UNARY_METHODS = frozenset({
     "SelectModel", "ReloadModel", "DeleteModel",
-    "Start", "ReleaseRuntime", "ResumeRuntime",
+    "Start", "ReleaseRuntime", "ResumeRuntime", "SetApplication",
     "StartTraining", "CancelTraining", "FinishTraining",
     "DeleteDataset", "CaptureImage", "ReplicateImage", "UnloadSam",
 })

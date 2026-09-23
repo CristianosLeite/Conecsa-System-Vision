@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """System-clock control for the hardware agent.
 
 The Jetson has no RTC battery, so on a LAN with no internet it boots with a

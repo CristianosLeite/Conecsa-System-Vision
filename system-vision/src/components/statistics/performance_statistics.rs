@@ -1,15 +1,20 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use super::stat_card::StatCard;
+use crate::components::application_select::use_application;
 use crate::components::panel_header::PanelHeader;
 use crate::i18n::*;
-use crate::models::PerformanceStats;
+use crate::models::{PerformanceStats, Task};
 use leptos::prelude::*;
 
-/// The `PerformanceStatistics` view component.
 #[component]
 pub fn PerformanceStatistics(stats: ReadSignal<Option<PerformanceStats>>) -> impl IntoView {
     let i18n = use_i18n();
+    // A classifier reports one class per frame, not objects.
+    let application = use_application();
+    let classify = move || application.task() == Some(Task::Classify);
 
     let fps = Signal::derive(move || {
         stats
@@ -53,14 +58,22 @@ pub fn PerformanceStatistics(stats: ReadSignal<Option<PerformanceStats>>) -> imp
                     <polyline points="12 6 12 12 16 14" stroke-width="2"/>
                 </StatCard>
                 <StatCard
-                    label=move || t_string!(i18n, statistics::detections)
+                    label=move || if classify() {
+                        t_string!(i18n, statistics::classified)
+                    } else {
+                        t_string!(i18n, statistics::detections)
+                    }
                     value=detections
                 >
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                 </StatCard>
                 <StatCard
-                    label=move || t_string!(i18n, statistics::frames_with_detections)
+                    label=move || if classify() {
+                        t_string!(i18n, statistics::frames_with_class)
+                    } else {
+                        t_string!(i18n, statistics::frames_with_detections)
+                    }
                     value=frames_with_detections
                 >
                     <rect x="2" y="3" width="20" height="14" rx="2" stroke-width="2"/>

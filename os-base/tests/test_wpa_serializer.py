@@ -1,5 +1,9 @@
-"""Wi-Fi credentials never reach the wpa_supplicant control grammar unescaped
-(review M9): SSIDs go as hex, passphrases as escaped quoted strings, raw PSKs
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Wi-Fi credentials never reach the wpa_supplicant control grammar unescaped:
+SSIDs go as hex, passphrases as escaped quoted strings, raw PSKs
 bare, and anything the grammar cannot carry is refused before the socket."""
 import pytest
 from agent import network_agent as mod
@@ -52,7 +56,7 @@ class TestEncodePsk:
             encode_psk(bad)
 
 
-class FakeWpa:
+class FakeWpaCtrl:
     """Records SET_NETWORK arguments; association completes immediately."""
 
     instances = []
@@ -62,7 +66,7 @@ class FakeWpa:
         self.set_calls = []
         self.saved = False
         self._ssid = ""
-        FakeWpa.instances.append(self)
+        FakeWpaCtrl.instances.append(self)
 
     def find_network_id(self, ssid):
         return None
@@ -102,8 +106,8 @@ class FakeWpa:
 
 @pytest.fixture
 def agent(monkeypatch):
-    FakeWpa.instances.clear()
-    monkeypatch.setattr(mod, "WpaCli", FakeWpa)
+    FakeWpaCtrl.instances.clear()
+    monkeypatch.setattr(mod, "WpaCtrl", FakeWpaCtrl)
     monkeypatch.setattr(NetworkAgent, "_wifi_iface", classmethod(lambda cls: "wlP1p1s0"))
     monkeypatch.setattr(mod, "_POLL_INTERVAL_S", 0.0)
     return NetworkAgent()
@@ -113,7 +117,7 @@ class TestConnectWifi:
     def test_sends_the_hex_ssid_and_the_escaped_passphrase(self, agent):
         result = agent.connect_wifi('Caf" Wi-Fi', 'pa"ss\\word')
         assert result["success"] is True
-        wpa = FakeWpa.instances[0]
+        wpa = FakeWpaCtrl.instances[0]
         assert wpa.set_calls[:2] == [
             ("0", "ssid", 'Caf" Wi-Fi'.encode().hex()),
             ("0", "psk", '"pa\\"ss\\\\word"'),
@@ -123,7 +127,7 @@ class TestConnectWifi:
     def test_a_raw_psk_goes_bare(self, agent):
         key = "0f" * 32
         assert agent.connect_wifi("plain", key)["success"] is True
-        assert ("0", "psk", key) in FakeWpa.instances[0].set_calls
+        assert ("0", "psk", key) in FakeWpaCtrl.instances[0].set_calls
 
     @pytest.mark.parametrize("ssid,password,fragment", [
         ("", "longenough", "SSID is required"),
@@ -136,4 +140,4 @@ class TestConnectWifi:
         result = agent.connect_wifi(ssid, password)
         assert result["success"] is False
         assert fragment in result["message"]
-        assert FakeWpa.instances == []
+        assert FakeWpaCtrl.instances == []

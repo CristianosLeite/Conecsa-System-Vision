@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! SVG overlay layers for the label canvas.
 //!
 //! These are plain view-builder functions (no component owners), so the
@@ -7,10 +11,13 @@
 
 use leptos::prelude::*;
 
-use crate::api::LabelBox;
+use crate::api::{LabelBox, LabelPolygon};
 use crate::i18n::*;
 
-use super::label_geometry::{handle_rects, label_anchor, norm_coords, Corner, HANDLE};
+use super::label_geometry::{
+    capture_pointer, handle_rects, label_anchor, norm_coords, ring_bbox, Corner, PolyDraft,
+    PolyPress, Pt, HANDLE, VERTEX_HIT_PX, VERTEX_R,
+};
 use crate::class_color::{class_color_for, class_display_name};
 
 /// Committed boxes: each as a class-colored rect with its class name drawn
@@ -194,6 +201,203 @@ pub(super) fn status_bar(
         <div class="flex items-center">
             <span class="ui-help">
                 {move || t_string!(i18n, training::boxes_drawing_as, count = boxes.get().len())}
+                <span class="font-semibold" style=move || classes.with(|c| format!(
+                    "color: {}", class_color_for(active_class.get(), c)
+                ))>
+                    {move || classes.with(|c| c
+                        .get(active_class.get())
+                        .map(|e| class_display_name(e))
+                        .unwrap_or_else(|| t_string!(i18n, training::no_class_yet).to_string()))}
+                </span>
+            </span>
+        </div>
+    }
+}
+
+// ── polygons (segmentation) ──────────────────────────────────────────────────
+
+/// SVG `points` attribute for a ring on the rendered canvas.
+fn svg_points(points: &[Pt], (cw, ch): (f32, f32)) -> String {
+    points
+        .iter()
+        .map(|p| format!("{},{}", p[0] * cw, p[1] * ch))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Committed polygons: each ring as a class-colored outline with a light
+/// tint and its class name outside its bounding box (text, never color only).
+/// The selected ring is tinted stronger and, outside SAM mode, shows the wide
+/// edge hit strokes a vertex is inserted through and its vertex
+/// handles (an invisible hit circle sized to the hit radius, then the small
+/// visible dot). Presses report up with what was hit and the normalized click;
+/// in SAM mode the rings are pointer-transparent so clicks become prompts.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn committed_polygons_layer(
+    i18n: leptos_i18n::I18nContext<Locale>,
+    canvas: RwSignal<(f32, f32)>,
+    polygons: RwSignal<Vec<LabelPolygon>>,
+    selected: RwSignal<Option<usize>>,
+    selected_vertex: RwSignal<Option<usize>>,
+    sam_mode: Signal<bool>,
+    classes: ReadSignal<Vec<String>>,
+    on_press: Callback<(usize, PolyPress, Pt)>,
+) -> impl IntoView {
+    let press = move |ev: &leptos::ev::PointerEvent, idx: usize, what: PolyPress| {
+        ev.stop_propagation();
+        ev.prevent_default();
+        // The drag that may follow keeps reporting past the canvas edge.
+        capture_pointer(ev);
+        if let Some((x, y)) = norm_coords(ev) {
+            on_press.run((idx, what, [x, y]));
+        }
+    };
+    move || {
+        let sel = selected.get();
+        let sel_vertex = selected_vertex.get();
+        let in_sam = sam_mode.get();
+        let cls = classes.get();
+        let (cw, ch) = canvas.get();
+        polygons.get().into_iter().enumerate().map(|(i, p)| {
+            let color = class_color_for(p.class_id as usize, &cls);
+            let label = cls.get(p.class_id as usize)
+                .map(|e| class_display_name(e))
+                .unwrap_or_else(|| t_string!(i18n, training::class_fallback, id = p.class_id));
+            let is_sel = sel == Some(i);
+            let editing = is_sel && !in_sam;
+            let (left, top, _, bottom) = ring_bbox(&p.points);
+            let name = (!editing).then(|| {
+                let (tx, ty) = label_anchor(left * cw, top * ch, bottom * ch, ch);
+                view! { <text class="ui-label-text" x=tx y=ty fill=color.clone()>{label}</text> }
+            });
+            let n = p.points.len();
+            let edges = editing.then(|| (0..n).map(|e| {
+                let (a, b) = (p.points[e], p.points[(e + 1) % n]);
+                view! {
+                    <line
+                        class="ui-label-polygon-edge"
+                        x1=a[0] * cw y1=a[1] * ch x2=b[0] * cw y2=b[1] * ch
+                        on:pointerdown=move |ev: leptos::ev::PointerEvent| press(&ev, i, PolyPress::Edge(e))
+                    />
+                }
+            }).collect::<Vec<_>>());
+            let vertices = editing.then(|| p.points.iter().enumerate().map(|(v, pt)| {
+                let class = if sel_vertex == Some(v) {
+                    "ui-label-vertex ui-label-vertex-selected"
+                } else {
+                    "ui-label-vertex"
+                };
+                view! {
+                    <circle
+                        class="ui-label-vertex-hit"
+                        cx=pt[0] * cw cy=pt[1] * ch r=VERTEX_HIT_PX
+                        on:pointerdown=move |ev: leptos::ev::PointerEvent| press(&ev, i, PolyPress::Vertex(v))
+                    />
+                    <circle class=class cx=pt[0] * cw cy=pt[1] * ch r=VERTEX_R stroke=color.clone()/>
+                }
+            }).collect::<Vec<_>>());
+            view! {
+                <polygon
+                    class=if in_sam { "ui-label-polygon-locked" } else { "ui-label-polygon" }
+                    points=svg_points(&p.points, (cw, ch))
+                    fill=if is_sel { format!("{color}40") } else { format!("{color}1a") }
+                    stroke=color.clone()
+                    stroke-width=if is_sel { 2.0 } else { 1.25 }
+                    on:pointerdown=move |ev: leptos::ev::PointerEvent| press(&ev, i, PolyPress::Body)
+                />
+                {name}
+                {edges}
+                {vertices}
+            }
+        }).collect::<Vec<_>>()
+    }
+}
+
+/// AI suggestions in a segmentation dataset: each suggestion's mask rings,
+/// dashed until accepted; a suggestion without a mask shows as its dashed box
+/// (it is accepted as that rectangle). Model suggestions carry their class name.
+pub(super) fn polygon_suggestions_layer(
+    canvas: RwSignal<(f32, f32)>,
+    suggestions: ReadSignal<Vec<LabelBox>>,
+    rings: ReadSignal<Vec<Vec<Vec<Pt>>>>,
+    names: ReadSignal<Vec<String>>,
+) -> impl IntoView {
+    move || {
+        let rings = rings.get();
+        let names = names.get();
+        let (cw, ch) = canvas.get();
+        suggestions.get().into_iter().enumerate().map(|(i, b)| {
+            let masks = rings.get(i).filter(|r| !r.is_empty()).cloned();
+            let x = (b.cx - b.w / 2.0) * cw;
+            let y = (b.cy - b.h / 2.0) * ch;
+            let bottom = (b.cy + b.h / 2.0) * ch;
+            let (tx, ty) = label_anchor(x, y, bottom, ch);
+            let label = names.get(i).filter(|n| !n.is_empty()).cloned();
+            let shape = match masks {
+                Some(masks) => masks.into_iter().map(|ring| view! {
+                    <polygon class="ui-label-polygon-suggestion" points=svg_points(&ring, (cw, ch))/>
+                }).collect::<Vec<_>>().into_any(),
+                None => view! {
+                    <rect class="ui-label-suggestion" x=x y=y width=b.w * cw height=b.h * ch/>
+                }.into_any(),
+            };
+            view! {
+                {shape}
+                {label.map(|n| view! { <text class="ui-label-text" x=tx y=ty>{n}</text> })}
+            }
+        }).collect::<Vec<_>>()
+    }
+}
+
+/// The polygon being drawn: its vertices so far, the rubber band from the last
+/// placed vertex to the pointer (click mode) and the first vertex marked as
+/// the target that closes it once there are three.
+pub(super) fn polygon_draft_layer(
+    canvas: RwSignal<(f32, f32)>,
+    draft: RwSignal<Option<PolyDraft>>,
+    classes: ReadSignal<Vec<String>>,
+    active_class: ReadSignal<usize>,
+) -> impl IntoView {
+    move || draft.get().map(|d| {
+        let (cw, ch) = canvas.get();
+        let color = class_color_for(active_class.get_untracked(), &classes.get_untracked());
+        let rubber = if d.freehand { None } else { d.points.last().copied().zip(d.hover) }
+            .map(|(a, b)| view! {
+                <line
+                    class="ui-label-polygon-rubber"
+                    x1=a[0] * cw y1=a[1] * ch x2=b[0] * cw y2=b[1] * ch
+                    stroke=color.clone()
+                />
+            });
+        let close_r = VERTEX_R + 2.0;
+        let close = (!d.freehand && d.points.len() >= 3).then(|| {
+            let first = d.points[0];
+            view! { <circle class="ui-label-vertex-close" cx=first[0] * cw cy=first[1] * ch r=close_r/> }
+        });
+        view! {
+            <polyline
+                class="ui-label-polygon-draft"
+                points=svg_points(&d.points, (cw, ch))
+                stroke=color.clone()
+            />
+            {rubber}
+            {close}
+        }
+    })
+}
+
+/// Footer status of a segmentation image: ring count + the class new polygons
+/// are drawn as.
+pub(super) fn polygon_status_bar(
+    i18n: leptos_i18n::I18nContext<Locale>,
+    polygons: RwSignal<Vec<LabelPolygon>>,
+    classes: ReadSignal<Vec<String>>,
+    active_class: ReadSignal<usize>,
+) -> impl IntoView {
+    view! {
+        <div class="flex items-center">
+            <span class="ui-help">
+                {move || t_string!(i18n, training::boxes_drawing_as, count = polygons.get().len())}
                 <span class="font-semibold" style=move || classes.with(|c| format!(
                     "color: {}", class_color_for(active_class.get(), c)
                 ))>

@@ -1,9 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Performance clock pinning for the Jetson host.
 
 Without `jetson_clocks`, the Tegra dynamic governors (GPU `nvhost_podgov`, CPU
 `schedutil`) keep clocks low for the bursty TensorRT inference workload — the GPU
 sits at its minimum (306 of 918 MHz), roughly doubling per-frame inference time.
-The privileged `os` hardware agent owns host hardware, so it pins the performance
+The privileged `os-base` hardware agent owns host hardware, so it pins the performance
 clocks at startup (the container can write the host `/sys` clock nodes). This is
 the core of what `jetson_clocks` does (GPU + CPU); it persists for the life of the
 agent and re-applies on every restart.

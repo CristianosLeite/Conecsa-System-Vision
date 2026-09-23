@@ -1,4 +1,8 @@
-"""Tests for the transactional model activation (REFACTORING.md H5).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Tests for the transactional model activation.
 
 A failed activation used to leave detection stopped, persist the broken model
 as the boot default, and keep the new model's areas/settings stores switched

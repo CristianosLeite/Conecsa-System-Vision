@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // OpenCV.js integration for webcam processing
 // This module handles webcam capture and frame processing using OpenCV.js
 

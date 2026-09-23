@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::i18n::*;
 use leptos::prelude::*;
@@ -10,7 +12,7 @@ pub(super) fn ModelSectionHeader(
     on_upload: Callback<()>,
 ) -> impl IntoView {
     let i18n = use_i18n();
-    // Role gating: model download/upload are admin-only; selection stays open.
+    // Role gating: model download/upload are admin-only (selection too, see ModelRow).
     let privileged = crate::components::access::privileged();
     let restricted_title = move || {
         if privileged {

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the best-effort labeling-assistant unloads in POST /api/v1/start.
 
 Training's assistants (SAM3 in the training-service, the labeling engine on

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Camera shared-memory ring reader (produced by the Rust webcam-server).
 
 Single source of the camera-ring header layout — must match
@@ -32,7 +36,7 @@ from typing import Optional, Tuple, Union
 
 import cv2
 
-# numpy/cv2 ship in conecsa-os:base.
+# numpy/cv2 ship in conecsa-os-base:base.
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -40,7 +44,7 @@ logger = logging.getLogger(__name__)
 # Header constants — must match webcam-server/src/webcam_server/shm.rs.
 SHM_MAGIC = 0xC04E5A01
 # Version 2 = the seqlock publication protocol above. A version-1 producer is
-# rejected at open() so mixed old/new services fail loudly, not by tearing.
+# rejected at open() so mismatched services fail loudly, not by tearing.
 SHM_VERSION = 2
 
 # Torn reads are rare (the writer's window is one memcpy); a handful of
@@ -88,6 +92,10 @@ class CameraRingReader:
         self._identity: Optional[Tuple[int, int]] = None
         self._seq_offset = 0
         self._max_adj_seq = 0
+        # Bumped on every successful mapping. The producer recreates its
+        # segment on start, which discards the config region: a writer compares
+        # this to know it must publish its config again.
+        self._attach_generation = 0
         self.open()
 
     def open(self) -> None:
@@ -120,6 +128,7 @@ class CameraRingReader:
             self._slot_size = struct.unpack_from("<I", mm, OFF_MAX_FRAME_BYTES)[0]
             self._identity = (stat.st_dev, stat.st_ino)
             self._mm = mm
+            self._attach_generation += 1
             logger.info("[camera-shm] opened %s (%dx%d, slot=%d)",
                         self._path, self._width, self._height, self._slot_size)
         except Exception as exc:  # noqa: BLE001
@@ -134,13 +143,13 @@ class CameraRingReader:
         return (stat.st_dev, stat.st_ino) == self._identity
 
     def _reopen_if_recreated(self) -> None:
-        """Recover from a producer restart (REFACTORING.md H4).
+        """Recover from a producer restart.
 
         The webcam-server unlinks and recreates its segment on every start,
         so a mapping held across that restart points at a deleted inode whose
         sequence never advances — video and inference stay frozen until the
         consumer restarts. Cheap ``os.stat`` per read: when the pathname's
-        ``(st_dev, st_ino)`` no longer matches the mapping, drop it and remap.
+        ``(st_dev, st_ino)`` differs from the mapping, drop it and remap.
 
         The fresh segment counts its seq from 0 again, but callers hold the
         last seq they saw, so ``_seq_offset`` keeps the values handed out
@@ -162,6 +171,15 @@ class CameraRingReader:
         """True while the mapped camera segment is the live one."""
         self._reopen_if_recreated()
         return self._mm is not None
+
+    @property
+    def attach_generation(self) -> int:
+        """How many times a segment was mapped; 0 while none ever was.
+
+        A change means the producer (re)created the segment, so whatever
+        config was written before is gone and has to be published again.
+        """
+        return self._attach_generation
 
     # ── frames ────────────────────────────────────────────────────────────────
 
@@ -241,17 +259,22 @@ class CameraRingReader:
 
     # ── camera config / health (opaque payloads; writable mapping) ─────────────
 
-    def write_config_bytes(self, payload: bytes) -> None:
-        """Publish a serialized camera-config payload for the producer to apply."""
+    def write_config_bytes(self, payload: bytes) -> bool:
+        """Publish a serialized camera-config payload for the producer to apply.
+
+        Returns whether the payload reached the segment: ``False`` while no
+        segment is mapped, on a read-only mapping, or for an oversized payload.
+        """
         if self._mm is None or not self._writable:
-            return
+            return False
         if len(payload) > CONFIG_PAYLOAD_MAX:
             logger.error("[camera-shm] config payload too large (%d)", len(payload))
-            return
+            return False
         self._mm[OFF_CONFIG_PAYLOAD:OFF_CONFIG_PAYLOAD + len(payload)] = payload
         struct.pack_into("<I", self._mm, OFF_CONFIG_SIZE, len(payload))
         cur = struct.unpack_from("<I", self._mm, OFF_CONFIG_WRITE_SEQ)[0]
         struct.pack_into("<I", self._mm, OFF_CONFIG_WRITE_SEQ, cur + 1)
+        return True
 
     def read_health_bytes(self) -> Optional[bytes]:
         """Return the latest serialized health payload, or ``None``."""

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tests for the processed-frame seqlock ring (conecsa_shm.processed_ring, v2)."""
 import hashlib
 import struct

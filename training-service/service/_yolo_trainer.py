@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Standalone ultralytics YOLO trainer (subprocess).
 
 Executed by training_service.TrainingService so torch/ultralytics state dies

@@ -1,11 +1,15 @@
-"""
-Standalone TensorRT engine builder script.
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
 
-Intended to be executed by the PyTorch venv Python interpreter via subprocess,
-since tensorrt is only available inside that venv.
+"""
+TensorRT engine builder.
+
+``build_engine`` runs inside the TensorRT worker process (imported by
+``tensorrt_interpreter``); ``main`` builds an engine from the command line.
 
 Usage:
-    <pytorch_venv>/bin/python -m api.runtime_management._trt_engine_builder \
+    python3 -m api.runtime_management._trt_engine_builder \
         --onnx <path_to.onnx> \
         --engine <path_to.engine> \
         --workspace-mb 256

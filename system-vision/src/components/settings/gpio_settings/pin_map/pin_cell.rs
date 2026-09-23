@@ -1,9 +1,11 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::i18n::*;
 use leptos::prelude::*;
 
-/// Role of a header pin, used to colour the cell and label it.
+/// Role of a header pin, used to color the cell and label it.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum PinKind {
     Power,

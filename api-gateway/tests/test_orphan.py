@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the orphaned-training watchdog (gateway/training/orphan.py)."""
 import time
 from types import SimpleNamespace

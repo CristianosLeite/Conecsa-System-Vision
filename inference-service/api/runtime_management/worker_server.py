@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Worker server for the TensorRT runtime subprocess."""
 import argparse
 import ctypes
@@ -6,10 +10,13 @@ import logging
 import sys
 import traceback
 from multiprocessing.connection import Listener
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import numpy as np  # ships in conecsa-os-base:base
+
+from .tensor_shm import TensorBuffer, layout_for, size_fd
 
 
 def _malloc_trim() -> None:
@@ -130,11 +137,45 @@ def _deserialize_input(input_info: Dict[str, Any]) -> np.ndarray:
     return data.reshape(input_info["shape"])
 
 
+def _unmap_buffer(shm) -> None:
+    """Drop the worker's view of the shared tensor buffer, if any."""
+    if shm is not None and shm.buffer is not None:
+        shm.buffer.close()
+        shm.buffer = None
+
+
+def _map_buffer(shm, interpreter) -> Optional[Dict[str, Any]]:
+    """Lay the loaded engine out in the shared buffer; returns the layout for the client.
+
+    ``None`` (tensors keep going over the connection) without a shared file,
+    for an engine with a dynamic shape, or when the file cannot be sized or
+    mapped. The file only ever grows: the client may still map a previous,
+    larger layout until it reads this answer, and shrinking under it would
+    fault on access.
+    """
+    _unmap_buffer(shm)
+    if shm is None or shm.fd is None:
+        return None
+    layout = layout_for(interpreter.get_input_details(), interpreter.get_output_details())
+    if layout is None:
+        logger.info("Engine has a dynamic tensor shape; tensors go over the connection")
+        return None
+    try:
+        size_fd(shm.fd, layout["size"])
+        shm.buffer = TensorBuffer(shm.fd, layout)
+    except (OSError, ValueError) as exc:
+        logger.warning(f"Shared tensor buffer unavailable ({exc}); tensors go over the connection")
+        shm.buffer = None
+        return None
+    return layout
+
+
 def _handle_load_command(
     conn,
     msg: Dict[str, Any],
     prev_runtime: Optional[Any],
     prev_interpreter: Optional[Any],
+    shm: Optional[Any] = None,
 ) -> Tuple[Optional[Any], Optional[Any]]:
     """
     Handle load model command.
@@ -144,11 +185,15 @@ def _handle_load_command(
     pycuda bindings form reference cycles that defeat CPython refcount-based
     GC, so each model swap would leak the previous engine's device memory.
 
+    With a shared tensor buffer (``shm``), the answer also carries the new
+    engine's ``shm_layout`` (``None`` when the buffer cannot serve it).
+
     Args:
         conn: Connection object
         msg: Message dictionary
         prev_runtime: Previously-loaded runtime (or None on first load)
         prev_interpreter: Previously-loaded interpreter (or None on first load)
+        shm: The worker's shared-buffer state (``fd``, ``buffer``), if any
 
     Returns:
         Tuple of (runtime, interpreter)
@@ -160,6 +205,7 @@ def _handle_load_command(
 
     # Explicit teardown of the prior model before allocating the new one,
     # so peak memory does not double during the swap.
+    _unmap_buffer(shm)
     if prev_interpreter is not None:
         try:
             close = getattr(prev_interpreter, "close", None)
@@ -182,6 +228,7 @@ def _handle_load_command(
             conn,
             input_details=interpreter.get_input_details(),
             output_details=interpreter.get_output_details(),
+            shm_layout=_map_buffer(shm, interpreter),
         )
         # Trim again after a successful load — the TRT deserialize step
         # allocates and frees substantial transient buffers.
@@ -218,6 +265,42 @@ def _handle_infer_command(conn, msg: Dict[str, Any], interpreter) -> None:
         interpreter.set_tensor(0, data)
         interpreter.invoke()
         _send_success(conn, outputs=_serialize_outputs(interpreter))
+    except Exception as exc:
+        logger.error(f"Inference failed: {exc}")
+        logger.error(traceback.format_exc())
+        _send_error(conn, str(exc))
+
+
+def _handle_infer_shm_command(conn, interpreter, shm) -> None:
+    """
+    Handle an inference whose tensors live in the shared buffer.
+
+    The client has written the input slot; the outputs are copied into
+    their slots and the answer is ``shm=True``. Should an output not match
+    its slot, the outputs travel in the answer instead (``shm=False``).
+    """
+    if interpreter is None:
+        _send_error(conn, "model not loaded")
+        return
+    buffer = shm.buffer if shm is not None else None
+    if buffer is None:
+        _send_error(conn, "shared tensor buffer not mapped")
+        return
+
+    try:
+        interpreter.set_tensor(0, buffer.input)
+        interpreter.invoke()
+        outputs = [interpreter.get_tensor(detail['index'])
+                   for detail in interpreter.get_output_details()]
+        slots = buffer.outputs
+        if len(outputs) == len(slots) and all(
+                out.shape == slot.shape and out.dtype == slot.dtype
+                for out, slot in zip(outputs, slots, strict=True)):
+            for out, slot in zip(outputs, slots, strict=True):
+                np.copyto(slot, out)
+            _send_success(conn, shm=True)
+        else:
+            _send_success(conn, shm=False, outputs=_serialize_outputs(interpreter))
     except Exception as exc:
         logger.error(f"Inference failed: {exc}")
         logger.error(traceback.format_exc())
@@ -287,13 +370,14 @@ def _handle_build_engine_command(conn, msg: Dict[str, Any], interpreter) -> None
         _malloc_trim()
 
 
-def run_server(host: str, port: int) -> None:
+def run_server(host: str, port: int, shm_fd: Optional[int] = None) -> None:
     """
     Run the TensorRT worker server.
 
     Args:
         host: Host address to bind to
         port: Port to bind to
+        shm_fd: Inherited shared-memory file for the tensors, if the client made one
     """
     logger.info(f"Starting TensorRT worker server on {host}:{port}")
 
@@ -307,6 +391,7 @@ def run_server(host: str, port: int) -> None:
 
     interpreter = None
     runtime = None
+    shm = SimpleNamespace(fd=shm_fd, buffer=None)
 
     try:
         while True:
@@ -323,8 +408,11 @@ def run_server(host: str, port: int) -> None:
 
                         if cmd == "load":
                             runtime, interpreter = _handle_load_command(
-                                conn, msg, runtime, interpreter
+                                conn, msg, runtime, interpreter, shm
                             )
+
+                        elif cmd == "infer_shm":
+                            _handle_infer_shm_command(conn, interpreter, shm)
 
                         elif cmd == "infer":
                             _handle_infer_command(conn, msg, interpreter)
@@ -369,6 +457,7 @@ def run_server(host: str, port: int) -> None:
         logger.error(traceback.format_exc())
     finally:
         logger.info("Server shutting down")
+        _unmap_buffer(shm)
         try:
             listener.close()
         except Exception as close_err:
@@ -380,10 +469,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="TensorRT worker server")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, required=True, help="Port to bind to")
+    parser.add_argument("--shm-fd", type=int, default=-1,
+                        help="Inherited shared-memory file descriptor for the tensors")
     args = parser.parse_args()
 
     try:
-        run_server(args.host, args.port)
+        run_server(args.host, args.port, args.shm_fd if args.shm_fd >= 0 else None)
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         logger.error(traceback.format_exc())

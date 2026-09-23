@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Signal bundles for the dataset editor.
 //!
 //! Everything here is `Copy` (arena signals and a `StoredValue`), so the task
@@ -8,10 +12,11 @@
 use leptos::prelude::*;
 
 use crate::api::{
-    DatasetSummary, LabelBox, LabelModelStatusResponse, SamStatusResponse, TrainingImageInfo,
-    TrainingJobStatus,
+    DatasetSummary, LabelBox, LabelClassSuggestion, LabelModelStatusResponse, LabelPolygon,
+    SamStatusResponse, TrainingImageInfo, TrainingJobStatus,
 };
 use crate::i18n::*;
+use crate::models::Task;
 
 use super::MIN_IMAGES_DEFAULT;
 
@@ -30,7 +35,18 @@ pub(crate) enum Assistant {
     Model(String),
 }
 
-/// The dataset's images, the open one and its boxes.
+/// How a new polygon is drawn in a segmentation dataset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DrawMode {
+    /// Click to place vertices; click the first vertex or double-click to close.
+    Click,
+    /// Press, trace the outline and release.
+    Freehand,
+    /// Drag a rectangle, stored as a four-vertex polygon.
+    Rect,
+}
+
+/// The dataset's images, the open one and its labels.
 #[derive(Clone, Copy)]
 pub(crate) struct ImagesState {
     pub(crate) list: RwSignal<Vec<TrainingImageInfo>>,
@@ -38,6 +54,11 @@ pub(crate) struct ImagesState {
     pub(crate) selected: RwSignal<Option<String>>,
     /// Committed boxes of the open image (autosaved on image switch).
     pub(crate) boxes: RwSignal<Vec<LabelBox>>,
+    /// Committed polygon rings of the open image in a segmentation dataset
+    /// (saved after every completed gesture, and on image switch).
+    pub(crate) polygons: RwSignal<Vec<LabelPolygon>>,
+    /// The open image's class in a classification dataset (saved per pick).
+    pub(crate) image_class: RwSignal<Option<u32>>,
     pub(crate) cover_image_id: RwSignal<String>,
     pub(crate) capturing: RwSignal<bool>,
 }
@@ -63,6 +84,16 @@ pub(crate) struct AiState {
     /// for `suggestions[i]` (empty for SAM, whose prompt is the class).
     pub(crate) suggestions: RwSignal<Vec<LabelBox>>,
     pub(crate) suggestion_names: RwSignal<Vec<String>>,
+    /// Each suggestion's mask as normalized rings, parallel to `suggestions`
+    /// (SAM and segmentation engines); a suggestion without one is accepted
+    /// in a segmentation dataset as its box promoted to a rectangle.
+    pub(crate) suggestion_polygons: RwSignal<Vec<Vec<Vec<[f32; 2]>>>>,
+    /// A classification engine's suggested class for the open image.
+    pub(crate) class_suggestion: RwSignal<Option<LabelClassSuggestion>>,
+    /// The image the pending suggestions were computed for: a response that
+    /// settles after another image was opened is dropped, and an accepted
+    /// suggestion is written to this image, not to whichever one is open.
+    pub(crate) suggested_for: RwSignal<Option<String>>,
     /// A load/unload/segment/detect request is in flight.
     pub(crate) busy: RwSignal<bool>,
     pub(crate) sam_status: RwSignal<Option<SamStatusResponse>>,
@@ -77,6 +108,9 @@ impl AiState {
     pub(crate) fn clear_suggestions(self) {
         let _ = self.suggestions.try_set(Vec::new());
         let _ = self.suggestion_names.try_set(Vec::new());
+        let _ = self.suggestion_polygons.try_set(Vec::new());
+        let _ = self.class_suggestion.try_set(None);
+        let _ = self.suggested_for.try_set(None);
         let _ = self.sam_points.try_set(Vec::new());
     }
 }
@@ -134,6 +168,9 @@ pub(crate) struct EditorState {
     /// Copy-able handle so every closure can grab the id without
     /// clone-per-closure boilerplate.
     pub(crate) dataset_id: StoredValue<String>,
+    /// The dataset's task: boxes for detection, polygon rings for
+    /// segmentation, one class per image for classification.
+    pub(crate) task: Task,
     pub(crate) images: ImagesState,
     pub(crate) classes: ClassesState,
     pub(crate) ai: AiState,
@@ -146,10 +183,13 @@ impl EditorState {
     pub(crate) fn new(dataset: &DatasetSummary) -> Self {
         Self {
             dataset_id: StoredValue::new(dataset.dataset_id.clone()),
+            task: Task::parse(&dataset.task).unwrap_or(Task::Detect),
             images: ImagesState {
                 list: RwSignal::new(Vec::new()),
                 selected: RwSignal::new(None),
                 boxes: RwSignal::new(Vec::new()),
+                polygons: RwSignal::new(Vec::new()),
+                image_class: RwSignal::new(None),
                 cover_image_id: RwSignal::new(dataset.cover_image_id.clone()),
                 capturing: RwSignal::new(false),
             },
@@ -164,6 +204,9 @@ impl EditorState {
                 threshold: RwSignal::new(0.5),
                 suggestions: RwSignal::new(Vec::new()),
                 suggestion_names: RwSignal::new(Vec::new()),
+                suggestion_polygons: RwSignal::new(Vec::new()),
+                class_suggestion: RwSignal::new(None),
+                suggested_for: RwSignal::new(None),
                 busy: RwSignal::new(false),
                 sam_status: RwSignal::new(None),
                 model_status: RwSignal::new(None),

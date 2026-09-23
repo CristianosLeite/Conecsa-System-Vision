@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """gRPC server for the training-service (proto/training.proto, :50071).
 
 Thin servicer over the dataset/capture/SAM/training services; the api-gateway
@@ -31,10 +35,24 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import training_pb2 as pb  # noqa: E402
 import training_pb2_grpc as pb_grpc  # noqa: E402
+from conecsa_common.tasks import DEFAULT_TASK, FACE, is_task  # noqa: E402
 
-from .capture_service import corners_to_letterbox, letterbox_square  # noqa: E402
+from .capture_service import (  # noqa: E402
+    corners_to_letterbox,
+    letterbox_square,
+    points_to_letterbox,
+)
 from .dataset_import import image_dimensions_from_bytes  # noqa: E402
-from .dataset_service import Box, DatasetError, NamedBox  # noqa: E402
+from .dataset_service import (  # noqa: E402
+    FACE_EXPORT_REFUSED,
+    Box,
+    DatasetError,
+    LabelKindError,
+    NamedBox,
+    NamedPolygon,
+    Polygon,
+    points_to_pairs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,13 +103,17 @@ def _jpeg_dimensions(data: bytes):
 
 def _image_pb(entry) -> "pb.ImageInfo":
     """Convert a dataset image entry to an ``ImageInfo`` message."""
-    return pb.ImageInfo(
+    info = pb.ImageInfo(
         image_id=entry.image_id,
         created_at=float(entry.created_at),
         labeled=bool(entry.labeled),
         box_count=int(entry.box_count),
         replica=bool(getattr(entry, "replica", False)),
     )
+    image_class = getattr(entry, "image_class", None)
+    if image_class is not None:
+        info.image_class = int(image_class)
+    return info
 
 
 def _job_pb(job) -> "pb.TrainingJob":
@@ -126,6 +148,7 @@ def _meta_pb(meta: dict) -> "pb.DatasetMeta":
         image_count=int(meta["image_count"]),
         labeled_count=int(meta["labeled_count"]),
         class_count=int(meta["class_count"]),
+        task=str(meta.get("task") or "detect"),
     )
 
 
@@ -166,9 +189,14 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
         return pb.DatasetList(datasets=[_meta_pb(m) for m in self._registry.list()])
 
     def CreateDataset(self, request, context):
-        """RPC: create dataset."""
+        """RPC: create a dataset labeled for ``request.task`` (empty = detect)."""
+        task = request.task or DEFAULT_TASK
+        if not is_task(task):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"Unknown dataset task '{task}'")
+            return pb.DatasetMeta()
         try:
-            return _meta_pb(self._registry.create(request.name))
+            return _meta_pb(self._registry.create(request.name, task))
         except DatasetError as exc:
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             context.set_details(str(exc))
@@ -235,6 +263,12 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
             context.set_details("First upload message must carry the dataset meta")
             return pb.DatasetUploadResult()
         name = first.meta.name
+        # The device's task (from the gateway): the archive must be laid out
+        # for it and the new dataset records it.
+        task = first.meta.task or DEFAULT_TASK
+        if not is_task(task):
+            return pb.DatasetUploadResult(success=False,
+                                          message=f"Unknown dataset task '{task}'")
         budget = self._app.config.MAX_DATASET_UPLOAD_MB * 1024 * 1024
         zip_path = os.path.join(self._app.config.datasets_dir,
                                 f".upload-{os.urandom(8).hex()}.zip")
@@ -251,7 +285,7 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                             f"{self._app.config.MAX_DATASET_UPLOAD_MB} MB limit"
                         )
                     f.write(msg.chunk)
-            meta = self._registry.import_zip(name, zip_path)
+            meta = self._registry.import_zip(name, zip_path, task=task)
             return pb.DatasetUploadResult(success=True,
                                           message="Dataset imported",
                                           dataset=_meta_pb(meta))
@@ -265,12 +299,18 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                 os.remove(zip_path)
 
     def ExportDataset(self, request, context):
-        """RPC: export dataset."""
+        """RPC: export dataset (never a face dataset: FAILED_PRECONDITION)."""
         try:
             dataset = self._ds(request.dataset_id)
         except DatasetError as exc:
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(str(exc))
+            return
+        if dataset.task() == FACE:
+            # Enrollment photos are biometric data kept on the device; this
+            # is the hub's download and device-to-device transfer path.
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(FACE_EXPORT_REFUSED)
             return
         zip_path = os.path.join(self._app.config.datasets_dir,
                                 f".export-{os.urandom(8).hex()}.zip")
@@ -303,6 +343,11 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(str(exc))
             return
+        if dataset.task() == FACE:
+            # Enrollment photos are biometric data kept on the device.
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("Face datasets cannot take part in federated training")
+            return
         zip_path = os.path.join(self._app.config.datasets_dir,
                                 f".export-{os.urandom(8).hex()}.zip")
         try:
@@ -331,6 +376,16 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
             context.set_details("First upload message must carry the weights meta")
             return pb.WeightsUploadResult()
         name = first.meta.name
+        # The task the checkpoint was trained for ("" = unchecked); a job
+        # started from it refuses a dataset of another task.
+        task = first.meta.task
+        if task and not is_task(task):
+            return pb.WeightsUploadResult(success=False,
+                                          message=f"Unknown weights task '{task}'")
+        if task == FACE:
+            return pb.WeightsUploadResult(
+                success=False,
+                message="Face models have no training checkpoint to federate")
 
         def _chunks():
             """Chunks."""
@@ -340,7 +395,7 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                 yield msg.chunk
 
         try:
-            weights_id, size = self._app.weights_store.save_stream(_chunks())
+            weights_id, size = self._app.weights_store.save_stream(_chunks(), task=task)
             logger.info("Weights '%s' stashed as %s (%d bytes)",
                         name, weights_id, size)
             return pb.WeightsUploadResult(success=True, message="Weights stashed",
@@ -377,6 +432,16 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(str(exc))
             return pb.AverageResult()
+        # Checkpoints of different tasks cannot be averaged (different heads).
+        tasks = {t for t in (self._app.weights_store.task_of(i) for i in ids) if t}
+        if FACE in tasks:
+            return pb.AverageResult(
+                success=False, message="Face galleries cannot be averaged (federated)")
+        if len(tasks) > 1:
+            return pb.AverageResult(
+                success=False,
+                message=f"The checkpoints were trained for different tasks "
+                        f"({', '.join(sorted(tasks))})")
 
         out_path = os.path.join(self._app.config.weights_dir,
                                 f".avg-{os.urandom(8).hex()}.pt")
@@ -399,7 +464,8 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                     f"Averager exited with code {proc.returncode}"
                 logger.warning("Weights averaging failed: %s", message)
                 return pb.AverageResult(success=False, message=message)
-            weights_id = self._app.weights_store.stash_file(out_path)
+            weights_id = self._app.weights_store.stash_file(
+                out_path, task=next(iter(tasks), ""))
             logger.info("Averaged %d checkpoints into %s", len(ids), weights_id)
             return pb.AverageResult(success=True, message="Checkpoints averaged",
                                     weights_id=weights_id)
@@ -435,6 +501,7 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
             dataset_id=info["dataset_id"],
             name=info["name"],
             cover_image_id=info["cover_image_id"],
+            task=info.get("task") or DEFAULT_TASK,
         )
 
     def CaptureImage(self, request, context):
@@ -462,9 +529,10 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
         """RPC: add an externally captured, pre-labeled image to a dataset.
 
         The image is stored in the dataset's geometry: letterboxed to the
-        square (boxes remapped with ``corners_to_letterbox``) or, for a
-        native-resolution dataset, re-encoded as-is with the boxes converted
-        straight to center/size form.
+        square (boxes remapped with ``corners_to_letterbox``, polygon points
+        with ``points_to_letterbox``) or, for a native-resolution dataset,
+        re-encoded as-is with the boxes converted straight to center/size
+        form and the points kept.
         """
         try:
             dataset = self._ds(request.dataset_id)
@@ -478,6 +546,7 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                 context.set_details("Body is not a decodable image")
                 return pb.ImageInfo()
             src_h, src_w = img.shape[:2]
+            rings = [(p, points_to_pairs(p.points)) for p in request.polygons]
             if size > 0:
                 stored = letterbox_square(img, size)
                 boxes = [
@@ -486,23 +555,41 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                                                    src_w, src_h, size))
                     for b in request.boxes
                 ]
+                polygons = [
+                    NamedPolygon(p.class_name, points_to_letterbox(pairs, src_w, src_h, size),
+                                 p.instance)
+                    for p, pairs in rings
+                ]
             else:
                 stored = img
                 boxes = [
                     NamedBox(b.class_name, *_corners_to_native(b.x1, b.y1, b.x2, b.y2))
                     for b in request.boxes
                 ]
+                polygons = [
+                    NamedPolygon(p.class_name, [[_clamp01(x), _clamp01(y)] for x, y in pairs],
+                                 p.instance)
+                    for p, pairs in rings
+                ]
             ok, buf = cv2.imencode(".jpg", stored, [cv2.IMWRITE_JPEG_QUALITY, 90])
             if not ok:
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("Failed to encode the dataset image")
                 return pb.ImageInfo()
-            entry = dataset.add_labeled_image(buf.tobytes(), boxes)
+            # A classification pre-label is the image's class, by name.
+            entry = dataset.add_labeled_image(buf.tobytes(), boxes,
+                                              image_class=request.image_class or None,
+                                              polygons=polygons)
             self._app.event_service.publish(
                 "dataset_changed", keys=["dataset"],
                 data={"dataset_id": request.dataset_id, "image_id": entry.image_id},
             )
             return _image_pb(entry)
+        except LabelKindError as exc:
+            # Boxes on a classification/segmentation dataset.
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return pb.ImageInfo()
         except DatasetError as exc:
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             context.set_details(str(exc))
@@ -568,26 +655,39 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
     # ── labels ────────────────────────────────────────────────────────────────
 
     def GetLabels(self, request, context):
-        """RPC: get labels."""
+        """RPC: an image's labels (boxes, polygon rings, or a classification image's class)."""
         try:
-            boxes = self._ds(request.dataset_id).get_labels(request.image_id)
+            dataset = self._ds(request.dataset_id)
+            boxes = dataset.get_labels(request.image_id)
+            polygons = dataset.get_polygons(request.image_id)
+            image_class = dataset.get_image_class(request.image_id)
         except DatasetError as exc:
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(str(exc))
             return pb.Labels()
-        return pb.Labels(
+        labels = pb.Labels(
             image_id=request.image_id,
             dataset_id=request.dataset_id,
             boxes=[pb.Box(class_id=b.class_id, cx=b.cx, cy=b.cy, w=b.w, h=b.h)
                    for b in boxes],
+            polygons=[pb.Polygon(class_id=p.class_id, instance=p.instance,
+                                 points=[v for point in p.points for v in point])
+                      for p in polygons],
         )
+        if image_class is not None:
+            labels.image_class = image_class
+        return labels
 
     def SetLabels(self, request, context):
-        """RPC: set labels."""
+        """RPC: replace an image's labels (the dataset's task decides the kind)."""
         try:
             self._ds(request.dataset_id).set_labels(
                 request.image_id,
                 [Box(b.class_id, b.cx, b.cy, b.w, b.h) for b in request.boxes],
+                image_class=(request.image_class if request.HasField("image_class")
+                             else None),
+                polygons=[Polygon(p.class_id, points_to_pairs(p.points), p.instance)
+                          for p in request.polygons],
             )
             return pb.Result(success=True, message="Labels saved")
         except DatasetError as exc:
@@ -672,7 +772,13 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
             return pb.SamResult(success=False,
                                 message="Cannot segment while training is running")
         try:
-            image_path = self._ds(request.dataset_id)._image_path(request.image_id)
+            dataset = self._ds(request.dataset_id)
+            if dataset.task() == FACE:
+                # A face photo is labeled with a person, never with a mask.
+                return pb.SamResult(
+                    success=False,
+                    message="SAM3 labeling assistance does not apply to face datasets")
+            image_path = dataset._image_path(request.image_id)
             if not os.path.exists(image_path):
                 return pb.SamResult(success=False,
                                     message=f"Image '{request.image_id}' not found")
@@ -680,7 +786,7 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                 {"x": p.x, "y": p.y, "positive": p.positive}
                 for p in request.points
             ]
-            boxes, scores = self._app.sam_service.segment(
+            boxes, scores, polygons = self._app.sam_service.segment(
                 image_path, request.text_prompt, points,
                 threshold=request.threshold,
             )
@@ -689,6 +795,10 @@ class TrainingControlServicer(pb_grpc.TrainingControlServicer):
                 boxes=[pb.Box(cx=b["cx"], cy=b["cy"], w=b["w"], h=b["h"])
                        for b in boxes],
                 scores=[float(s) for s in scores],
+                # `instance` indexes boxes/scores (SamResult.polygons).
+                polygons=[pb.Polygon(instance=index,
+                                     points=[v for point in ring for v in point])
+                          for index, rings in enumerate(polygons) for ring in rings],
             )
         except Exception as exc:  # noqa: BLE001
             return pb.SamResult(success=False, message=str(exc))
@@ -772,8 +882,8 @@ def serve_grpc(application, listen_addr: Optional[str] = None) -> grpc.Server:
     )
     health_servicer = health.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
-    # grpcio used to return 0 on a bind failure and newer releases raise;
-    # either way the old daemon-thread start swallowed it.
+    # grpcio returns 0 on a bind failure in some releases and raises in
+    # others; both become one RuntimeError below.
     try:
         bound = server.add_insecure_port(addr)
     except RuntimeError as exc:

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Training job orchestration.
 
 One job at a time. The ultralytics run executes in a child process
@@ -16,6 +20,13 @@ uploading, stash the resulting last.pt back into the weights store
 A fine-tune starts from an existing device model instead (``base_model``, a
 model-list name whose weights sidecar is the last best.pt it was built from):
 the checkpoint is fetched through the gateway right before the split is built.
+
+A ``face`` dataset is not trained at all: the job packages its labeled photos
+as ``<model name>.faces`` (``DatasetService.build_face_package``) and uploads
+the package through the same model-upload route with ``task=face``; the
+inference-service builds the gallery as a conversion job, so the job ends with
+a ``conversion_job_id`` exactly like a YOLO run. There is no trainer
+subprocess, no base or federated weights and nothing stashed.
 """
 import json
 import logging
@@ -31,10 +42,16 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 import requests
+from conecsa_common.tasks import FACE
 
-from .config import Config
+from .config import Config, base_weights_for, img_size_for
 from .dataset_registry import DatasetRegistry
-from .dataset_service import DatasetError, DatasetService, validate_model_name
+from .dataset_service import (
+    FACE_PACKAGE_SUFFIX,
+    DatasetError,
+    DatasetService,
+    validate_model_name,
+)
 from .model_fetch import fetch_weights, list_models_with_weights, validate_model_ref
 from .train_overrides import OverrideError, parse_overrides
 
@@ -70,6 +87,9 @@ class TrainingJob:
     geometry: str = ""
     # Existing device model (model-list name) the run fine-tunes from, if any.
     base_model: str = ""
+    # The dataset's task: picks the base weights, the split layout and the
+    # input size, and is declared on the model upload.
+    task: str = ""
 
 
 class TrainingService:
@@ -117,7 +137,7 @@ class TrainingService:
               epochs: int = 0, batch: int = 0, patience: int = 0,
               initial_weights_id: str = "", federated: bool = False,
               base_model: str = "") -> TrainingJob:
-        """Start."""
+        """Start a job on ``dataset_id`` (a gallery build for a face dataset)."""
         if federated:
             # No model upload happens, so the name is only a display label.
             model_name = (model_name or "").strip() or "federated"
@@ -128,24 +148,47 @@ class TrainingService:
         patience = patience or self._config.DEFAULT_PATIENCE
         if epochs < 1 or epochs > 1000:
             raise DatasetError("Epochs must be between 1 and 1000")
-        # A malformed TRAIN_OVERRIDES must fail the RPC, not a job that has
-        # already frozen its dataset and released the inference runtime.
-        try:
-            parse_overrides(getattr(self._config, "TRAIN_OVERRIDES", ""))
-        except OverrideError as exc:
-            raise DatasetError(f"Invalid TRAIN_OVERRIDES: {exc}") from exc
         dataset = self._registry.get(dataset_id)
-
-        # Resolve the starting checkpoint up front so an unknown id fails the
-        # RPC instead of the job.
-        weights_path = self._config.BASE_WEIGHTS
+        task = dataset.task()
         base_model = (base_model or "").strip()
+        if task == FACE:
+            # A gallery build: no network is trained, so there are no weights
+            # to start from and nothing a federated round could average.
+            if federated:
+                raise DatasetError(
+                    "Face datasets cannot take part in federated training: a face "
+                    "gallery stays on its device")
+            if base_model:
+                raise DatasetError(
+                    "A face gallery is built from its photos; it cannot start from a "
+                    "base model")
+            if initial_weights_id:
+                raise DatasetError(
+                    "A face gallery is built from its photos; it takes no initial weights")
+            weights_path = ""
+            epochs = 0
+        else:
+            # A malformed TRAIN_OVERRIDES must fail the RPC, not a job that has
+            # already frozen its dataset and released the inference runtime.
+            try:
+                parse_overrides(getattr(self._config, "TRAIN_OVERRIDES", ""))
+            except OverrideError as exc:
+                raise DatasetError(f"Invalid TRAIN_OVERRIDES: {exc}") from exc
+            # Resolve the starting checkpoint up front so an unknown id fails the
+            # RPC instead of the job. It must have been trained for the dataset's
+            # task: YOLO(weights) infers the task from the checkpoint.
+            weights_path = base_weights_for(self._config, task)
         if base_model and initial_weights_id:
             raise DatasetError("base_model and initial_weights_id are mutually exclusive")
         if initial_weights_id:
             if self._weights is None:
                 raise DatasetError("Weights store is not available")
             weights_path = self._weights.path(initial_weights_id)
+            stored_task = self._weights.task_of(initial_weights_id)
+            if stored_task and stored_task != task:
+                raise DatasetError(
+                    f"The initial weights were trained for '{stored_task}'; this dataset "
+                    f"is labeled for '{task}'")
         if base_model:
             # Existence is checked here against the device model list; the
             # download itself happens in the job (it is the first thing _run
@@ -158,6 +201,10 @@ class TrainingService:
             if base_model not in available:
                 raise DatasetError(
                     f"Model '{base_model}' has no training checkpoint on the device")
+            if available[base_model] != task:
+                raise DatasetError(
+                    f"Model '{base_model}' is a '{available[base_model]}' model; this "
+                    f"dataset is labeled for '{task}'")
 
         with self._lock:
             if self._job.status not in ("idle", *_TERMINAL):
@@ -174,10 +221,12 @@ class TrainingService:
             job_id = str(uuid.uuid4())
             self._job = TrainingJob(
                 job_id=job_id, status="preparing", progress=2,
-                message="Preparing dataset split…",
+                message=("Packaging the enrollment photos…" if task == FACE
+                         else "Preparing dataset split…"),
                 model_name=model_name, total_epochs=epochs,
                 started_at=time.time(), dataset_id=dataset_id,
                 patience=patience, federated=federated, base_model=base_model,
+                task=task,
             )
             self._cancel_requested = False
             self._early_stop_requested = False
@@ -272,16 +321,23 @@ class TrainingService:
         dataset = self._job_dataset
         assert dataset is not None
         try:
+            if self.get_job().task == FACE:
+                self._run_face(job_id, dataset)
+                return
             if base_model:
                 # The device model's last best.pt, through the gateway (this
                 # service has no access to the inference-side model volume).
                 self._set(message=f"Fetching base weights from {base_model}…")
                 weights_path = fetch_weights(self._config.GATEWAY_ADDR, base_model,
                                              self._config.base_dir)
-            self._set(message="Slicing the dataset into training tiles…")
+            task = self.get_job().task or "detect"
+            # A classifier sees the whole frame: no tile crops.
+            classify = task == "classify"
+            self._set(message="Sorting the images into class folders…" if classify
+                      else "Slicing the dataset into training tiles…")
             split = dataset.build_split(
                 job_id,
-                tile=getattr(self._config, "TRAIN_TILE", "auto"),
+                tile=None if classify else getattr(self._config, "TRAIN_TILE", "auto"),
                 overlap=getattr(self._config, "TRAIN_TILE_OVERLAP", 0.2),
                 min_visible=getattr(self._config, "TRAIN_TILE_MIN_VISIBLE", 0.25),
             )
@@ -291,6 +347,7 @@ class TrainingService:
             cmd = build_trainer_argv(
                 self._config, split.yaml_path, weights_path,
                 epochs=epochs, patience=patience, batch=batch, job_id=job_id,
+                imgsz=img_size_for(self._config, task),
             )
 
             env = os.environ.copy()
@@ -340,7 +397,7 @@ class TrainingService:
                 # the result stays on-device instead of going through the
                 # model-upload/conversion route.
                 assert self._weights is not None
-                weights_id = self._weights.stash_file(last_path or best_path)
+                weights_id = self._weights.stash_file(last_path or best_path, task=task)
                 self._set(status="done", progress=100,
                           result_weights_id=weights_id,
                           message="Training complete; weights retained for aggregation")
@@ -369,6 +426,33 @@ class TrainingService:
             # trainer has exited — best.pt lives in runs/<job>/weights.
             shutil.rmtree(os.path.join(self._config.runs_dir, job_id, "dataset"),
                           ignore_errors=True)
+
+    def _run_face(self, job_id: str, dataset: DatasetService) -> None:
+        """Gallery build: package the labeled photos and upload the package.
+
+        No trainer runs. The ``.faces`` package goes through the model-upload
+        route with ``task=face``; the inference-service embeds the photos as a
+        conversion job and the job ends ``done`` with its
+        ``conversion_job_id``, the same handoff a trained model takes. The
+        local package is job scratch and is removed once uploaded (or on
+        failure). Failures and a cancel surface through ``_run``'s handler.
+        """
+        package = ""
+        try:
+            package, count = dataset.build_face_package(job_id, self.get_job().model_name)
+            self._set(progress=50, geometry="",
+                      message=f"Packaged {count} enrollment photos")
+            if self._cancel_requested:
+                self._set(status="canceled", message="Training canceled", progress=0)
+                return
+            conversion_job_id = self._upload_best(package, suffix=FACE_PACKAGE_SUFFIX)
+            self._set(status="done", progress=100,
+                      conversion_job_id=conversion_job_id,
+                      message="Photos uploaded; building the face gallery")
+            logger.info("Job %s done; face gallery job %s", job_id, conversion_job_id)
+        finally:
+            if package and os.path.exists(package):
+                os.remove(package)
 
     def _consume_stdout(self, proc: subprocess.Popen,
                         epochs: int) -> "tuple[Optional[str], Optional[str]]":
@@ -437,25 +521,35 @@ class TrainingService:
             if line:
                 logger.info("[trainer] %s", line)
 
-    def _upload_best(self, best_path: str) -> str:
-        """Upload best.pt as {model_name}.pt through the gateway.
+    def _upload_best(self, best_path: str, suffix: str = ".pt") -> str:
+        """Upload a job result as ``{model_name}{suffix}`` through the gateway.
 
         The gateway relays to ModelControl.UploadModel on the inference-service,
-        which saves it under /data/models and starts the pt→onnx→engine
-        conversion job (returned here so the frontend can track it). The
-        split's effective geometry rides along so the model's settings
-        sidecar records what it was trained on.
+        which saves it under /data/models and starts the conversion job
+        (returned here so the frontend can track it): pt→onnx→engine for
+        best.pt, where the split's effective geometry and the dataset's task
+        ride along, so the model's settings sidecar records what it was
+        trained on and the inference-service checks the task against the
+        exported graph. A face package (``suffix=".faces"``) declares only
+        ``task=face`` and starts the gallery build instead.
         """
         job = self.get_job()
-        self._set(status="uploading", progress=97,
-                  message="Uploading model for conversion…")
+        task = job.task or "detect"
+        if task == FACE:
+            message = "Uploading the photos for the face gallery build…"
+            data = {"task": task}
+        else:
+            message = "Uploading model for conversion…"
+            data = {"imgsz": str(img_size_for(self._config, task)),
+                    "train_geometry": job.geometry,
+                    "task": task}
+        self._set(status="uploading", progress=97, message=message)
         url = f"{self._config.GATEWAY_ADDR}/api/v1/model"
         with open(best_path, "rb") as f:
             resp = requests.post(
                 url,
-                files={"file": (f"{job.model_name}.pt", f)},
-                data={"imgsz": str(self._config.IMG_SIZE),
-                      "train_geometry": job.geometry},
+                files={"file": (f"{job.model_name}{suffix}", f)},
+                data=data,
                 timeout=120,
             )
         if resp.status_code not in (200, 202):
@@ -469,13 +563,16 @@ class TrainingService:
 
 
 def build_trainer_argv(config, data_yaml: str, weights_path: str, *,
-                       epochs: int, patience: int, batch: int, job_id: str) -> list:
+                       epochs: int, patience: int, batch: int, job_id: str,
+                       imgsz: Optional[int] = None) -> list:
     """Argument vector for the ``service._yolo_trainer`` subprocess.
 
-    Pure so tests can assert the contract without spawning anything. The
-    model input size comes from ``config.IMG_SIZE`` (``TRAIN_IMG_SIZE``) and
-    every allowlisted ``TRAIN_OVERRIDES`` pair is forwarded as its own
-    ``--override key=value`` (already validated in ``TrainingService.start``).
+    Pure so tests can assert the contract without spawning anything.
+    ``data_yaml`` is the split's data.yaml, or its root for a classifier. The
+    model input size is ``imgsz`` (the task's size, ``img_size_for``) or
+    ``config.IMG_SIZE`` (``TRAIN_IMG_SIZE``), and every allowlisted
+    ``TRAIN_OVERRIDES`` pair is forwarded as its own ``--override key=value``
+    (already validated in ``TrainingService.start``).
     """
     cmd = [
         sys.executable, "-m", "service._yolo_trainer",
@@ -484,7 +581,7 @@ def build_trainer_argv(config, data_yaml: str, weights_path: str, *,
         "--epochs", str(epochs),
         "--patience", str(patience),
         "--batch", str(batch),
-        "--imgsz", str(config.IMG_SIZE),
+        "--imgsz", str(imgsz or config.IMG_SIZE),
         "--workers", str(config.TRAIN_WORKERS),
         "--project", config.runs_dir,
         "--name", job_id,

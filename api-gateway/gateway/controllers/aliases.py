@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Simplified /api/* aliases used by the web frontend — thin wrappers around
 the canonical /api/v1/* handlers."""
 import json

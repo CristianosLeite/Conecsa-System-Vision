@@ -1,8 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Shared-memory channel for the GPIO trigger gate (inference-service side).
 
 Mirror of `os-base/agent/gpio_shm.py` — keep the layout in sync. The per-frame
-trigger gate reads this mmap'd file (shared with the `os` agent via a volume
+trigger gate reads this mmap'd file (shared with the `os-base` hardware agent via a volume
 mounted in both containers) instead of gRPC, so the inference loop adds no
 cross-container round-trip per frame. Output pins are driven over gRPC and never
 touch this channel — inference only reads the trigger level here.

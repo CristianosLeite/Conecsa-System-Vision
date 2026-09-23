@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Audit backlog endpoints — the hub's drain protocol for the device's trail.
 
 Both routes are hub-only: the trail names people, and on a device with no

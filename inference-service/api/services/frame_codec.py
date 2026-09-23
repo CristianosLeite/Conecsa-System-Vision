@@ -1,10 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Frame codec service - pure image operations for the video pipeline.
 
 Groups the JPEG decode/encode, reduced-scale decode, stereo combine and
-software RGB level correction that used to live on ``VideoService``. These are
+software RGB level correction. These are
 the CPU stages of the processing pipeline; they all release the GIL inside
-OpenCV, so they parallelise across cores when run on the pipeline's worker
+OpenCV, so they parallelize across cores when run on the pipeline's worker
 threads.
 
 (The name avoids ``ConversionService``, which already exists for *model*
@@ -15,10 +19,10 @@ import os
 from typing import Dict, Optional
 
 # noinspection PyPackageRequirements
-import cv2  # Package is included on os build.
+import cv2  # ships in conecsa-os-base:base
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import numpy as np  # ships in conecsa-os-base:base
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +102,7 @@ class FrameCodecService:
             self._stereo_offset_y = 0.0
         self._stereo_offset_y = min(max(self._stereo_offset_y, -0.5), 0.5)
 
-    # ------------------------------------------------------------------
-    # Codec helpers
-    # ------------------------------------------------------------------
+    # ── Codec helpers ──
 
     def decode_frame_scaled(self, jpg_bytes: bytes) -> Optional[np.ndarray]:
         """Decode JPEG bytes to BGR at the configured processing scale."""
@@ -155,9 +157,7 @@ class FrameCodecService:
         np.clip(out, 0, 255, out=out)
         return out.astype(np.uint8)
 
-    # ------------------------------------------------------------------
-    # Stereo configuration (delegated to from VideoService)
-    # ------------------------------------------------------------------
+    # ── Stereo configuration (delegated to from VideoService) ──
 
     def get_stereo_config(self) -> Dict:
         """Return the current stereo combine settings."""

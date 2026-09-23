@@ -1,9 +1,12 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! System metrics access (HTTP/JSON).
 
 use crate::api::wasm32::http::fetch_api;
 use crate::components::status_component::SystemMetrics;
 
-/// Get system metrics.
 pub async fn get_system_metrics() -> Result<SystemMetrics, String> {
     use leptos::logging;
 

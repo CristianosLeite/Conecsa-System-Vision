@@ -1,13 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Hub-driven clock correction.
 
-The Jetson has no RTC battery, so on a site with no internet (the image pins
-public NTP servers and deliberately ignores the DHCP NTP option) it can boot
-with a clock older than the hub CA's `not_before`. nginx then rejects the hub's
-client certificate as "not yet valid" and the device is offline for good — right
-after a pairing that appeared to succeed, because pairing runs on the TOFU
-channel where neither side validates anything.
-
-So the hub relays its own wall clock and this module applies it:
+The device can boot with a clock older than the hub CA's `not_before` (no RTC
+battery; see os-base/agent/time_agent.py), so the hub relays its own wall clock
+and this module applies it:
 
 * at pairing, inside ``/enroll/complete`` (the one moment a hub can reach a
   device whose clock is wrong), before the certificates are installed;
@@ -16,7 +15,7 @@ So the hub relays its own wall clock and this module applies it:
   so no other container on the compose network can move the clock.
 
 Setting the clock is a host operation: this module only decides *whether* to
-step and delegates to the privileged `os` agent over gRPC, the same way network
+step and delegates to the privileged `os-base` hardware agent over gRPC, the same way network
 and GPIO writes are delegated.
 """
 import enum
@@ -92,7 +91,7 @@ class StepOutcome(enum.Enum):
 
 
 # gRPC codes that mean "nobody is listening", as opposed to an answer we did not
-# like. A development host runs the gateway without the Jetson-only `os` agent
+# like. A development host runs the gateway without the `os-base` hardware agent
 # (docker-compose.dev.yml keeps `os-base` as a bare volume owner; scripts/dev.sh
 # never starts it), so this is a normal condition there.
 _UNREACHABLE_CODES = (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED)

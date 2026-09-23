@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Registry of working datasets under {DATA_DIR}/datasets/{dataset_id}/.
 
 Owns dataset lifecycle (create/rename/delete/import) and hands out the
@@ -52,7 +56,7 @@ class DatasetRegistry:
     # ── startup ───────────────────────────────────────────────────────────────
 
     def _migrate_legacy(self) -> None:
-        """Migrate legacy."""
+        """Move the pre-registry single-dataset directory into the registry as "Default"."""
         legacy = self._config.legacy_dataset_dir
         if not os.path.isdir(legacy):
             return
@@ -146,13 +150,17 @@ class DatasetRegistry:
         """The storage geometry every new dataset is created with."""
         return geometry_for(self._config.DATASET_IMG_SIZE)
 
-    def create(self, name: str) -> dict:
-        """Create an empty dataset in the configured storage geometry."""
+    def create(self, name: str, task: str = "detect") -> dict:
+        """Create an empty dataset in the configured storage geometry.
+
+        ``task`` (the device's application task, validated by the caller)
+        is fixed for the dataset's lifetime.
+        """
         name = validate_dataset_name(name)
         dataset_id = str(uuid.uuid4())
         root = self._dataset_root(dataset_id)
         ds = DatasetService(dataset_id, root, self._config)
-        ds.write_meta(name, geometry=self._geometry())
+        ds.write_meta(name, geometry=self._geometry(), task=task)
         with self._lock:
             self._datasets[dataset_id] = ds
         self._publish()
@@ -171,7 +179,7 @@ class DatasetRegistry:
         The frozen check, the claim, and delete()'s frozen check all run
         under the registry lock — one owner for the transition, so a delete
         can never interleave between a job validating a dataset and freezing
-        it (REFACTORING.md M4).
+        it.
         """
         self._check_id(dataset_id)
         with self._lock:
@@ -229,14 +237,15 @@ class DatasetRegistry:
                 f"Dataset removed, but some files could not be deleted: {exc}"
             ) from exc
 
-    def import_zip(self, name: str, zip_path: str) -> dict:
+    def import_zip(self, name: str, zip_path: str, task: str = "detect") -> dict:
         """Validate + normalize an uploaded YOLO-format ZIP into a new dataset.
 
         The dataset is staged next to its final location and only becomes
         visible (registered) after an atomic rename, so a failed import never
         leaves a half-imported dataset behind. Images are normalized into the
         configured storage geometry (``DATASET_IMG_SIZE``), which is recorded
-        in the new dataset's meta.json.
+        in the new dataset's meta.json with its ``task``; an archive labeled
+        for another task is refused by the importer.
         """
         name = validate_dataset_name(name)
         dataset_id = str(uuid.uuid4())
@@ -246,6 +255,7 @@ class DatasetRegistry:
                 zip_path, staging,
                 img_size=self._config.DATASET_IMG_SIZE,
                 max_total_mb=self._config.MAX_DATASET_UPLOAD_MB,
+                task=task,
             )
             root = self._dataset_root(dataset_id)
             os.rename(staging, root)
@@ -254,7 +264,7 @@ class DatasetRegistry:
             shutil.rmtree(staging, ignore_errors=True)
             raise
         ds = DatasetService(dataset_id, root, self._config)
-        ds.write_meta(name, created_at=time.time(), geometry=self._geometry())
+        ds.write_meta(name, created_at=time.time(), geometry=self._geometry(), task=task)
         with self._lock:
             self._datasets[dataset_id] = ds
         self._publish()

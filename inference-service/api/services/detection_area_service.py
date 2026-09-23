@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Detection area service.
 
@@ -74,9 +78,7 @@ class DetectionAreaService:
         self._pre_edit_snapshots: Dict[str, DetectionArea] = {}
         self._load()
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
+    # ── Persistence ──
 
     def switch_storage(self, storage_path: str) -> None:
         """Point the service at a different model's areas file and reload.
@@ -137,9 +139,7 @@ class DetectionAreaService:
         except Exception as exc:  # noqa: BLE001 - best-effort persist
             logger.error("Failed to persist detection areas: %s", exc)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ──
 
     def list(self) -> List[DetectionArea]:
         """Return a snapshot of the current areas (safe to iterate)."""
@@ -295,9 +295,7 @@ class DetectionAreaService:
             self._persist()
             return area
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # ── Internal helpers ──
 
     def _find(self, area_id: str) -> Optional[DetectionArea]:
         """Return the area with *area_id*, or ``None`` (caller holds the lock)."""

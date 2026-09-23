@@ -2,7 +2,9 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="utf-8" />
-    <title>Conecsa Object detection</title>
+    <!-- The hub loads this page with ?cap=; never send it on as a Referer. -->
+    <meta name="referrer" content="no-referrer" />
+    <title>Conecsa System Vision</title>
     <link data-trunk rel="css" href="styles.css" />
     <link data-trunk rel="copy-dir" href="public" />
     <link data-trunk rel="rust" data-target-name="conecsa_system_vision" data-wasm-opt="z" />

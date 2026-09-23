@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Verifier for the editor tokens the api-gateway mints (gateway/flow_token.py).
 //
 // Format: "v1.<base64url(JSON payload)>.<base64url(HMAC-SHA256 over the first

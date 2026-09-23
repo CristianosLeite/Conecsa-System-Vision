@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # ============================================================================
 # DEV system-vision image (x86_64).
 #
@@ -31,12 +35,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN rustup target add wasm32-unknown-unknown
 
-# Install trunk from the prebuilt release binary (same version as local dev).
-# Building it from source with `cargo install --locked` pins an old lightningcss
-# that newer rustc releases reject (E0659), and takes ~5 min on the Jetson.
-# trunk downloads the wasm-bindgen-cli matching Cargo.lock by itself.
-# The tarball is downloaded to a file and checked against the SHA256 pinned
-# per architecture (from the release's .sha256 assets) before it is extracted.
+# Prebuilt trunk, pinned as in Dockerfile.system-vision.
 ARG TRUNK_VERSION=0.21.14
 ARG TRUNK_SHA256_X86_64=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
 ARG TRUNK_SHA256_AARCH64=b1d8e60e454f7fc182d9a4d95d1506ffbae947d8ba90f8f6f02da93b60f980f9
@@ -53,16 +52,13 @@ RUN set -eu; arch="$(uname -m)"; \
     rm -f /tmp/trunk.tar.gz; \
     trunk --version
 
-# Copy workspace Cargo files
 COPY Cargo.toml Cargo.lock /app/
 
-# Copy system-vision crate (contains build.rs, src/, Cargo.toml, index.html)
 COPY system-vision/ ./system-vision/
 
 # Shared design system (Tailwind input) used by system-vision + hub-vision
 COPY styles/ ./styles/
 
-# Copy proto files for compilation
 COPY proto/ ./proto/
 
 # Shared translation catalogs (read by build.rs via ../i18n/system-vision)

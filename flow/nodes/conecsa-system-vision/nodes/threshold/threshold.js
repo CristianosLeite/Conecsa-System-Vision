@@ -1,6 +1,11 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
- * @file threshold node — sets the confidence or IoU/NMS threshold (0–1) via the
- *   api-gateway; syncs with the backend at startup and every 5s over SSE.
+ * @file threshold node — sets the confidence or overlay threshold (0–1) via the
+ *   api-gateway; reads the value at startup, follows the SSE event stream and
+ *   polls the status every 5 s as a fallback.
  * @param {object} RED Node-RED runtime, injected when the node type registers.
  */
 module.exports = function (RED) {
@@ -49,7 +54,7 @@ module.exports = function (RED) {
       });
     }
 
-    // Sync threshold value from backend when the flow starts and keep polling.
+    // Read the value when the flow starts; poll as a fallback to the SSE stream.
     readCurrentThresholdFromStatus();
     const pollInterval = setInterval(readCurrentThresholdFromStatus, 5000);
 

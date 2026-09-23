@@ -1,12 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Side-by-side stereo combine, shared by training-service and api-gateway.
 
-The USB stereo camera packs the two eyes left|right in one frame. The
-inference-service splits it in half and blends the eyes before detection
-(`FrameCodecService.combine_stereo`); this is a pure-function copy of that
-logic so dataset capture and the training preview see the exact same geometry
-the live detector does. The inference hot path keeps its own copy on purpose —
-this module must stay dependency-free (numpy/cv2 only) and changing it must
-never risk the detection pipeline.
+The USB stereo camera packs the two eyes left|right in one frame. This is a
+pure-function copy of the inference-service's blend
+(`FrameCodecService.combine_stereo`), so dataset capture and the training
+preview match the live detector. The inference hot path keeps its own copy so
+a change here never affects detection.
 """
 from typing import Optional, overload
 

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Role resolution and persistence (mirrors `locale.rs`), and the hub-proxy
 //! capability token.
 //!

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 syntax = "proto3";
 
 package training;
@@ -9,9 +13,9 @@ package training;
 // processes; this service is only control-plane.
 //
 // Dataset images are stored in the geometry the dataset was created with
-// (TRAIN_DATASET_IMG_SIZE: a letterboxed square, 640 by default, or 0 for the
-// camera frame at native resolution). Either way a JPEG stays well under the
-// gRPC message limit, so images travel as unary bytes instead of SHM/streaming.
+// (TRAIN_DATASET_IMG_SIZE: 0, the default, keeps the camera frame at native
+// resolution; a value > 0 letterboxes it to that square). Either way a JPEG
+// stays well under the gRPC message limit, so images travel as unary bytes.
 
 message Empty {}
 
@@ -26,7 +30,12 @@ message Result {
 // "active dataset" state.
 
 message DatasetId { string dataset_id = 1; }
-message DatasetName { string name = 1; }
+message DatasetName {
+  string name = 1;
+  // Task the new dataset is labeled for ("detect", "classify", "segment", "face"),
+  // fixed at creation from the device's application. Empty = "detect".
+  string task = 2;
+}
 message DatasetRename {
   string dataset_id = 1;
   string name = 2;
@@ -44,12 +53,23 @@ message DatasetMeta {
   uint32 image_count = 5;
   uint32 labeled_count = 6;
   uint32 class_count = 7;
+  // Task the dataset is labeled for; datasets created before application
+  // types existed report "detect".
+  string task = 8;
 }
 message DatasetList { repeated DatasetMeta datasets = 1; }
 
-// ZIP import of a pre-existing YOLO-format dataset (images/ + labels/ + data.yaml).
-// First message must be `meta`; the rest are 1MB `chunk`s of the ZIP file.
-message DatasetUploadMeta { string name = 1; }
+// A ZIP import: the first `DatasetUploadChunk` must be `meta`; the rest are 1MB
+// `chunk`s of the ZIP file. `task` is the device's application task: the
+// archive's layout must match it (YOLO `images/` + `labels/` with
+// `class cx cy w h` box rows for detect; the same layout with
+// `class x1 y1 … xn yn` polygon rows, normalized and at least 3 vertices, for
+// segment; one folder per class for classify), and the new dataset records
+// it. Empty means `detect`.
+message DatasetUploadMeta {
+  string name = 1;
+  string task = 2;
+}
 message DatasetUploadChunk {
   oneof payload {
     DatasetUploadMeta meta = 1;
@@ -62,26 +82,33 @@ message DatasetUploadResult {
   DatasetMeta dataset = 3;
 }
 
-// Download of a dataset as a YOLO-format ZIP (images/ + labels/ + data.yaml) —
-// the exact layout UploadDataset accepts, so exports round-trip.
+// Download of a dataset as a ZIP in the exact layout UploadDataset accepts, so
+// exports round-trip: YOLO `images/` + `labels/` + `data.yaml` for detect (box
+// rows) and segment (one `class x1 y1 … xn yn` polygon row per ring), and
+// `train/<class>/` image folders plus `classes.txt` for classify.
 message DatasetExportChunk { bytes chunk = 1; }
 
 message DatasetInfo {
   uint32 image_count = 1;
-  uint32 labeled_count = 2;         // images with at least one box
+  uint32 labeled_count = 2;         // images with at least one box, polygon
+                                    // ring, or an image class (classify)
   repeated string classes = 3;
   uint32 min_images = 4;            // training gate (20)
   string dataset_id = 5;
   string name = 6;
   string cover_image_id = 7;
+  string task = 8;                  // see DatasetMeta.task
 }
 
 message ImageInfo {
   string image_id = 1;
   double created_at = 2;            // UNIX timestamp
   bool labeled = 3;
-  uint32 box_count = 4;
-  bool replica = 5;                 // created via ReplicateImage (gallery hint only)
+  uint32 box_count = 4;             // boxes (detect) or polygon rings (segment)
+  bool replica = 5;                // created via ReplicateImage (gallery hint only)
+  // The image's class in a `classify` dataset (index into its classes);
+  // unset for an unlabeled image and in every other task.
+  optional uint32 image_class = 6;
 }
 
 // Duplicate one labeled image (image + its labels) `count` times to quickly
@@ -115,10 +142,33 @@ message Box {
   float w = 4;
   float h = 5;
 }
+// One exterior ring of a segmentation instance. `points` is the flat list
+// x1, y1, x2, y2, … of at least 3 vertices, normalized 0..1 on the stored
+// image, clockwise in image coordinates and implicitly closed. Rings are
+// normalized on the way in (rasterised and re-extracted): holes are dropped,
+// tiny components removed, at most 200 vertices per ring and 8 rings per
+// instance. `instance` groups the rings of one object; it is not kept in the
+// YOLO label file (one line per ring), so rings read back from a dataset get
+// one instance each.
+message Polygon {
+  uint32 class_id = 1;
+  uint32 instance = 2;
+  repeated float points = 3;
+}
+// An image's labels. Which kind a dataset accepts follows its task: `detect`
+// datasets carry `boxes` only, `segment` datasets `polygons` only, `classify`
+// datasets an `image_class` only; any other kind is refused with
+// INVALID_ARGUMENT. No label at all is always allowed (a background image for
+// detect and segment, excluded from a classify split).
 message Labels {
   string image_id = 1;
   repeated Box boxes = 2;
   string dataset_id = 3;
+  // The rings of a `segment` dataset.
+  repeated Polygon polygons = 4;
+  // The whole-image class of a `classify` dataset (index into its classes);
+  // unset when the image has no class.
+  optional uint32 image_class = 5;
 }
 
 // ── Pre-labeled image ingest (hub detection records → dataset) ───────────────
@@ -135,6 +185,16 @@ message NamedBox {
   float y2 = 5;
 }
 
+// A segmentation pre-label carried by class name: one exterior ring (flat
+// x1, y1, x2, y2, … normalized 0..1 on the uploaded image), mapped into the
+// dataset's stored geometry and class list like NamedBox; `instance` groups
+// the rings of one object.
+message NamedPolygon {
+  string class_name = 1;
+  uint32 instance = 2;
+  repeated float points = 3;
+}
+
 // One externally captured image (e.g. a hub detection record's clean frame)
 // plus its pre-labels. On ingest the JPEG is stored in the dataset's geometry
 // like a camera capture (letterboxed, or kept at its own resolution); a
@@ -145,6 +205,14 @@ message LabeledImageUpload {
   string dataset_id = 1;
   bytes jpeg = 2;                   // original JPEG, as captured
   repeated NamedBox boxes = 3;
+  // The rings of a `segment` dataset.
+  repeated NamedPolygon polygons = 4;
+  // The whole-image class of a `classify` dataset, by name: resolved against
+  // the dataset's classes and appended when missing, exactly like
+  // NamedBox.class_name. Empty means no class. Boxes, polygons and the image
+  // class are mutually exclusive (the dataset's task decides which kind is
+  // accepted).
+  string image_class = 5;
 }
 
 // ── Classes ───────────────────────────────────────────────────────────────────
@@ -188,6 +256,10 @@ message SamResult {
   string message = 2;
   repeated Box boxes = 3;           // class_id is unset — suggestions only
   repeated float scores = 4;        // parallel to boxes
+  // The object masks as normalized rings (class_id unset); `instance` is the
+  // index into boxes/scores, so a mask whose rings were all dropped simply has
+  // none here.
+  repeated Polygon polygons = 5;
 }
 
 // ── Training job (single job at a time) ──────────────────────────────────────
@@ -204,13 +276,11 @@ message TrainRequest {
                                     // instead of the baked-in base weights
   bool federated = 7;               // federated round: stash last.pt as
                                     // result_weights_id and skip the model upload
-  string base_model = 8;            // fine-tune from an existing device model: a
-                                    // ModelControl.ListModels name (e.g. "X.engine")
-                                    // with has_weights — its checkpoint sidecar (the
-                                    // last best.pt it was built from) is fetched
-                                    // through the gateway. Exclusive with
-                                    // initial_weights_id; empty → the baked-in base
-                                    // weights
+  // Fine-tune from an existing device model: a ModelControl.ListModels name
+  // (e.g. "X.engine") with has_weights, whose checkpoint sidecar (the last
+  // best.pt it was built from) is fetched through the gateway. Exclusive with
+  // initial_weights_id; empty → the baked-in base weights.
+  string base_model = 8;
 }
 
 message TrainingJob {
@@ -255,9 +325,15 @@ message ShardExportRequest {
   string seed = 4;                  // shared shuffle seed (same for all shards)
 }
 
-// Checkpoint upload into the weights stash. First message must be `meta`;
-// the rest are 1MB `chunk`s of the .pt file (UploadDataset pattern).
-message WeightsUploadMeta { string name = 1; }  // diagnostic label only
+// Checkpoint upload into the weights stash (initial weights for a federated
+// round). The first WeightsChunk must be `meta`; the rest are 1MB `chunk`s of
+// the .pt file. `name` is a diagnostic label only; `task` is the task the
+// checkpoint was trained for, checked against the dataset's task when the job
+// starts (empty means unchecked).
+message WeightsUploadMeta {
+  string name = 1;
+  string task = 2;
+}
 message WeightsChunk {
   oneof payload {
     WeightsUploadMeta meta = 1;
@@ -322,7 +398,9 @@ service TrainingControl {
   rpc GetClasses(DatasetId) returns (ClassList);
   rpc AddClass(ClassName) returns (ClassList);
   rpc RenameClass(ClassEdit) returns (ClassList);
-  rpc RemoveClass(ClassIndex) returns (ClassList);  // drops that class's boxes, reindexes the rest
+  // Drops that class's boxes or polygon rings (a classify image of that class
+  // becomes unlabeled) and reindexes the rest.
+  rpc RemoveClass(ClassIndex) returns (ClassList);
 
   // SAM-assisted labeling
   rpc GetSamStatus(Empty) returns (SamStatus);

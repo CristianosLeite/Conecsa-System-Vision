@@ -1,4 +1,8 @@
-"""Tests for whole-artifact model deletion (REFACTORING.md L3).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Tests for whole-artifact model deletion.
 
 Sidecars are found by basename, so a leftover .txt/.areas.json/.settings.json
 from a deleted model used to be silently inherited by the next model uploaded

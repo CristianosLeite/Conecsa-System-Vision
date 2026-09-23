@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Overlay renderer - Renders status overlays on video frames.
 """
@@ -5,8 +9,8 @@ Overlay renderer - Renders status overlays on video frames.
 from typing import Tuple
 
 # noinspection PyPackageRequirements
-import cv2  # Package is included on os build.
-import numpy as np  # Package is included on os build.
+import cv2  # ships in conecsa-os-base:base
+import numpy as np  # ships in conecsa-os-base:base
 
 
 class OverlayRenderer:
@@ -87,10 +91,8 @@ class OverlayRenderer:
             width, height, 150, 40, position
         )
 
-        # Gray background
         cv2.rectangle(image, (box_x1, box_y1), (box_x2, box_y2), (128, 128, 128), -1)
 
-        # White text
         cv2.putText(
             image,
             "Detection Off",

@@ -1,19 +1,25 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
 use crate::api::{training_image_url, TrainingImageInfo};
+use crate::class_color::class_display_name;
 use crate::i18n::*;
 
 use super::dataset_editor::{GalleryActions, ImagesState};
 
 /// Dataset thumbnail grid: select an image for labeling, delete captures,
-/// pick the dataset's cover image.
+/// pick the dataset's cover image. A classification image's badge names its
+/// class; a detection or segmentation image's counts its labels as boxes.
 #[component]
 pub(super) fn Gallery(
     dataset_id: String,
     images: ImagesState,
     actions: GalleryActions,
+    /// The dataset's classes (classification badges name the image's class).
+    classes: ReadSignal<Vec<String>>,
 ) -> impl IntoView {
     let i18n = use_i18n();
     let selected = images.selected;
@@ -40,15 +46,15 @@ pub(super) fn Gallery(
                 } else {
                     view! {
                         // No inner height cap/scroll: let the grid grow with
-                        // the dataset and let the column (max-h-full
-                        // overflow-y-auto) own the scrolling, so thumbnails are
-                        // never clipped.
-                        <div class="grid grid-cols-2 gap-2 pr-1">
+                        // the dataset and let the column (`.ui-training-gallery`)
+                        // own the scrolling, so thumbnails are never clipped.
+                        <div class="ui-training-thumbs">
                             <For
                                 each=move || images.get()
                                 key=|img| img.image_id.clone()
                                 children=move |img: TrainingImageInfo| {
                                     let box_count = img.box_count;
+                                    let image_class = img.image_class;
                                     let id = img.image_id.clone();
                                     let id_select = id.clone();
                                     let id_delete = id.clone();
@@ -82,10 +88,16 @@ pub(super) fn Gallery(
                                             {if img.labeled {
                                                 view! {
                                                     <span class="ui-badge ui-badge-success absolute bottom-1 left-1 px-1.5 py-0.5 text-[10px]">
-                                                        {move || if box_count == 1 {
-                                                            t_string!(i18n, training::boxes_badge_one).to_string()
-                                                        } else {
-                                                            t_string!(i18n, training::boxes_badge, count = box_count)
+                                                        {move || match image_class {
+                                                            Some(c) => classes.with(|list| {
+                                                                list.get(c as usize)
+                                                                    .map(|n| class_display_name(n))
+                                                                    .unwrap_or_else(|| t_string!(i18n, training::class_fallback, id = c))
+                                                            }),
+                                                            None if box_count == 1 => {
+                                                                t_string!(i18n, training::boxes_badge_one).to_string()
+                                                            }
+                                                            None => t_string!(i18n, training::boxes_badge, count = box_count),
                                                         }}
                                                     </span>
                                                 }.into_any()

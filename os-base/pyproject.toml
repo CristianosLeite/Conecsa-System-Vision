@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Project metadata for the `os` base image + privileged hardware agent.
 #
 # `requirements-common.txt` defines the shared CUDA/ML stack baked into
@@ -6,6 +10,7 @@
 # (IDEs, mkdocstrings/griffe, linters) resolve the `agent` and `shm` packages.
 [project]
 name = "conecsa-os"
-version = "2026.5-LTS"
+version = "2026.6-LTS"
 description = "Base CUDA/ML image and privileged hardware gRPC agent (network/Wi-Fi/GPIO/metrics) + shared-memory ring helpers."
 requires-python = ">=3.10"
+license = "AGPL-3.0-only"

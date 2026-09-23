@@ -1,16 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Conversion service - Manages async model conversion jobs.
 
 Supports:
-  .pt  → .onnx   (via subprocess → api.runtime_management._pt_onnx_converter)
+  .pt  → .onnx   (via subprocess → api._pt_onnx_converter)
   .onnx → .engine (via TensorRT worker IPC → _trt_engine_builder.build_engine)
 
-The .pt -> .onnx step runs in a short-lived subprocess (NOT in this waitress
-process) so that PyTorch caching allocator and ultralytics global state are
-fully reclaimed by the OS when the converter exits. This remains important on
-the Yocto host: zram/compressed swap may be configured, but fragmentation and
-allocator state are still best handled by subprocess isolation and process exit.
+The .pt -> .onnx step runs in a short-lived subprocess, not in the long-lived
+service process, so the PyTorch caching allocator and ultralytics global state
+are fully reclaimed by the OS when the converter exits.
 """
+import contextlib
 import json
 import logging
 import os
@@ -21,9 +24,21 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
+
+# Timeout for the ONNX graph inspection subprocess (reads the output shapes).
+_ONNX_INSPECT_TIMEOUT_SEC = 120
+
+
+class ConverterOutput(NamedTuple):
+    """What the .pt → .onnx converter subprocess reports on its last stdout line."""
+
+    class_names: List[str]
+    task: Optional[str] = None                       # ultralytics ``model.task``
+    output_shapes: Optional[List[List[int]]] = None  # the exported graph's outputs
+    imgsz: Optional[int] = None                      # the size the export used
 
 
 def _output_stem(original_filename: str) -> str:
@@ -70,15 +85,25 @@ class ConversionJob:
     # is baked into the ONNX graph. Informational: lets the gateway/UI/logs tell
     # a 640 build from a 1280 build.
     imgsz: Optional[int] = None
+    # True when the upload named no size: the export uses the checkpoint's own
+    # training size and ``imgsz`` (the task's default) only when it records
+    # none; ``imgsz`` then becomes the size the export used.
+    imgsz_from_checkpoint: bool = False
     # Geometry the weights were trained on, as declared by the uploader
     # ("frames", "tiles:auto", "tiles:<px>"; see ModelUploadMeta). Recorded in
     # the settings sidecar next to imgsz so activation can warn when it
     # disagrees with TILING_MODE. None = unknown (browser / federated uploads).
     train_geometry: Optional[str] = None
+    # Task the model was uploaded as (resolved against the device's
+    # application). The job fails when the converter discovers another task;
+    # the result is recorded in the settings sidecar. None = unrecorded.
+    task: Optional[str] = None
+    # The enrollment package of a face gallery build (``.faces``); "" for
+    # model conversions.
+    faces_path: str = ""
     started_at: float = field(default_factory=time.time)  # UNIX timestamp (seconds)
     # Age is reported from the monotonic clock, never from ``started_at``: the
-    # device has no RTC battery, so the hub steps CLOCK_REALTIME whenever it
-    # notices drift (api-gateway/gateway/clock.py) — mid-conversion included.
+    # hub steps CLOCK_REALTIME on drift (see os-base/agent/time_agent.py).
     started_monotonic: float = field(default_factory=time.monotonic)
 
     @property
@@ -87,15 +112,18 @@ class ConversionJob:
         return max(0.0, time.monotonic() - self.started_monotonic)
 
 
-def _convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640) -> List[str]:
+def _convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640,
+                        from_checkpoint: bool = False) -> ConverterOutput:
     """
-    Spawn api.runtime_management._pt_onnx_converter as a short-lived subprocess.
+    Spawn api._pt_onnx_converter as a short-lived subprocess.
     PyTorch / ultralytics are imported only in that child, so their footprint
     (caching allocator, global state) dies with the child instead of pinning
-    memory in the waitress parent process forever.
+    memory in the long-lived service process forever.
 
     Returns:
-        List of class name strings extracted from model.names (empty list on fallback).
+        The class names from model.names (empty on the torch fallback), the
+        model's task and the exported graph's output shapes (``None`` when
+        the child could not tell).
     """
     logger.info(f"Spawning _pt_onnx_converter subprocess: {pt_path} → {onnx_path} (imgsz={imgsz})")
 
@@ -104,10 +132,11 @@ def _convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640) -> List[
             [
                 sys.executable,
                 "-m",
-                "api.runtime_management._pt_onnx_converter",
+                "api._pt_onnx_converter",
                 "--pt", pt_path,
                 "--onnx", onnx_path,
                 "--imgsz", str(imgsz),
+                *(["--imgsz-from-checkpoint"] if from_checkpoint else []),
             ],
             capture_output=True,
             text=True,
@@ -138,26 +167,78 @@ def _convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640) -> List[
         raise RuntimeError(f".pt -> .onnx conversion failed: {err_msg}")
 
     # Parse the last stdout line (machine-readable JSON contract).
-    class_names: List[str] = []
-    stdout_stripped = result.stdout.strip()
-    if stdout_stripped:
-        try:
-            last = stdout_stripped.splitlines()[-1]
-            parsed = json.loads(last)
-            if isinstance(parsed, dict):
-                cn = parsed.get("class_names")
-                if isinstance(cn, list):
-                    class_names = [str(n) for n in cn]
-        except (ValueError, IndexError):
-            logger.warning("_pt_onnx_converter stdout did not end with a JSON line")
+    parsed = _last_json_line(result.stdout) or {}
+    cn = parsed.get("class_names")
+    class_names = [str(n) for n in cn] if isinstance(cn, list) else []
+    task = parsed.get("task") if isinstance(parsed.get("task"), str) else None
+    size = parsed.get("imgsz")
+    exported_imgsz = size if type(size) is int and size > 0 else None
 
     if not os.path.exists(onnx_path):
         raise RuntimeError(
             f"_pt_onnx_converter reported success but {onnx_path} not found"
         )
 
-    logger.info(f"ONNX conversion complete: {onnx_path} ({len(class_names)} class names)")
-    return class_names
+    logger.info(f"ONNX conversion complete: {onnx_path} ({len(class_names)} class names, "
+                f"task {task or 'unknown'}, imgsz {exported_imgsz or imgsz})")
+    return ConverterOutput(class_names, task, _shapes(parsed.get("output_shapes")),
+                           exported_imgsz)
+
+
+def _last_json_line(stdout: str) -> Optional[dict]:
+    """The JSON object on the last stdout line of a converter child, if any."""
+    stripped = stdout.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped.splitlines()[-1])
+    except ValueError:
+        logger.warning("_pt_onnx_converter stdout did not end with a JSON line")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _shapes(value) -> Optional[List[List[int]]]:
+    """Validate an ``output_shapes`` payload: a list of int lists, else ``None``."""
+    if not isinstance(value, list):
+        return None
+    try:
+        return [[int(d) for d in shape] for shape in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _inspect_onnx(onnx_path: str) -> Optional[List[List[int]]]:
+    """Output shapes of an uploaded ONNX graph, read in a short-lived child.
+
+    ``None`` when the graph cannot be read (the ``onnx`` package missing, a
+    malformed file): the engine is then verified at activation only.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "api._pt_onnx_converter",
+             "--inspect-onnx", onnx_path],
+            capture_output=True, text=True, timeout=_ONNX_INSPECT_TIMEOUT_SEC, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(f"Could not inspect {onnx_path}: {exc}")
+        return None
+    if result.returncode != 0:
+        logger.warning(f"Could not inspect {onnx_path}: {result.stderr.strip()[-500:]}")
+        return None
+    return _shapes((_last_json_line(result.stdout) or {}).get("output_shapes"))
+
+
+def _discovered_task(task: Optional[str], shapes: Optional[List[List[int]]]) -> Optional[str]:
+    """The task a converted model really is: ultralytics' word, else the graph's shape."""
+    from conecsa_common.tasks import is_task
+
+    if is_task(task):
+        return task
+    if shapes:
+        from api.postprocess.contract import infer_task
+        return infer_task(shapes)
+    return None
 
 
 def _build_engine_from_onnx(onnx_path: str, engine_path: str) -> None:
@@ -219,10 +300,15 @@ class ConversionService:
         self._jobs: Dict[str, ConversionJob] = {}
         self._lock = threading.Lock()
         self._event_service = event_service
+        self._publication_guard = lambda _engine_filename: contextlib.nullcontext()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ──
+
+    def attach_publication_guard(self, guard) -> None:
+        """Inject ``ModelService.publication``: a face gallery is published
+        inside it, so a rebuild of the active model is reloaded before the job
+        reports done."""
+        self._publication_guard = guard
 
     @staticmethod
     def to_dict(job: ConversionJob) -> dict:
@@ -237,6 +323,7 @@ class ConversionService:
             "engine_filename": job.engine_filename,
             "imgsz": job.imgsz,
             "train_geometry": job.train_geometry,
+            "task": job.task,
             "started_at": job.started_at,
             "elapsed_secs": job.elapsed_secs,
         }
@@ -246,6 +333,7 @@ class ConversionService:
         onnx_path: str,
         original_filename: str,
         model_directory: str,
+        task: Optional[str] = None,
     ) -> ConversionJob:
         """
         Enqueue an async .onnx → .engine conversion (skips the .pt → .onnx step).
@@ -262,6 +350,7 @@ class ConversionService:
             pt_path="",          # not applicable
             onnx_path=onnx_path,
             engine_path=engine_path,
+            task=task,
         )
 
         with self._lock:
@@ -288,6 +377,8 @@ class ConversionService:
         model_directory: str,
         imgsz: int = 640,
         train_geometry: Optional[str] = None,
+        task: Optional[str] = None,
+        imgsz_from_checkpoint: bool = False,
     ) -> ConversionJob:
         """
         Enqueue an async .pt → .onnx → .engine conversion.
@@ -306,7 +397,9 @@ class ConversionService:
             onnx_path=onnx_path,
             engine_path=engine_path,
             imgsz=imgsz,
+            imgsz_from_checkpoint=imgsz_from_checkpoint,
             train_geometry=train_geometry,
+            task=task,
         )
 
         with self._lock:
@@ -324,8 +417,61 @@ class ConversionService:
         )
         thread.start()
         logger.info(f"Conversion job {job_id} started for {original_filename} "
-                    f"(imgsz={imgsz}, train_geometry={train_geometry})")
+                    f"(imgsz={imgsz}, from_checkpoint={imgsz_from_checkpoint}, "
+                    f"train_geometry={train_geometry})")
         return job
+
+    def start_face_gallery(
+        self,
+        faces_path: str,
+        original_filename: str,
+        model_directory: str,
+    ) -> ConversionJob:
+        """
+        Enqueue an async face gallery build from a ``.faces`` enrollment package.
+
+        Reported through the same job states and events as a conversion (the
+        engine step is the gallery build). Returns the job immediately.
+        """
+        job_id = str(uuid.uuid4())
+        base = _output_stem(original_filename)
+        job = ConversionJob(
+            job_id=job_id,
+            original_filename=original_filename,
+            pt_path="",          # not applicable
+            onnx_path="",        # not applicable
+            engine_path=os.path.join(model_directory, f"{base}.engine"),
+            task="face",
+            faces_path=faces_path,
+        )
+
+        with self._lock:
+            self._jobs[job_id] = job
+            pending = self.to_dict(job)
+        self._publish_event("conversion_changed", ["conversion"], data=pending)
+
+        thread = threading.Thread(
+            target=self._run_face_job,
+            args=(job_id,),
+            daemon=True,
+            name=f"face-gallery-{job_id[:8]}",
+        )
+        thread.start()
+        logger.info(f"Face gallery job {job_id} started for {original_filename}")
+        return job
+
+    @staticmethod
+    def _check_declared_task(job: ConversionJob, discovered: Optional[str]) -> None:
+        """Fail the job before the engine build when the model is another task.
+
+        The converter's discovery wins over the upload's declaration:
+        building an engine the device would then refuse to run only wastes
+        minutes of GPU time.
+        """
+        if job.task and discovered and discovered != job.task:
+            raise RuntimeError(
+                f"'{job.original_filename}' is a '{discovered}' model, but it was "
+                f"uploaded as a '{job.task}' model")
 
     def get_job(self, job_id: str) -> Optional[ConversionJob]:
         """Return a job by id, or ``None`` if unknown."""
@@ -338,13 +484,9 @@ class ConversionService:
         with self._lock:
             return [j for j in self._jobs.values() if j.status not in terminal]
 
-    # ------------------------------------------------------------------
-    # Internal – conversion steps
-    # ------------------------------------------------------------------
+    # ── Internal – conversion steps ──
 
-    # ------------------------------------------------------------------
-    # Internal – job status helper
-    # ------------------------------------------------------------------
+    # ── Internal – job status helper ──
 
     def _set_status(
         self,
@@ -383,9 +525,7 @@ class ConversionService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not publish conversion event '%s': %s", event_type, exc)
 
-    # ------------------------------------------------------------------
-    # Internal – worker thread
-    # ------------------------------------------------------------------
+    # ── Internal – worker thread ──
 
     def _run_job(self, job_id: str) -> None:
         """
@@ -405,7 +545,18 @@ class ConversionService:
             if imgsz is not None:
                 self._set_status(job_id, ConversionStatus.CONVERTING_TO_ONNX,
                                  progress=5, message="Converting .pt to ONNX…")
-                class_names = _convert_pt_to_onnx(job.pt_path, job.onnx_path, imgsz)
+                exported = _convert_pt_to_onnx(job.pt_path, job.onnx_path, imgsz,
+                                               from_checkpoint=job.imgsz_from_checkpoint)
+                if exported.imgsz is not None:
+                    # The size the export really used (the checkpoint's own
+                    # when the upload named none) is what the job and the
+                    # settings sidecar report.
+                    imgsz = exported.imgsz
+                    with self._lock:
+                        job.imgsz = imgsz
+                discovered = _discovered_task(exported.task, exported.output_shapes)
+                self._check_declared_task(job, discovered)
+                class_names = exported.class_names
                 if class_names:
                     from api.repositories.class_labels_repository import ClassLabelsRepository
                     from api.services.model_service import ModelService
@@ -427,6 +578,8 @@ class ConversionService:
                 tmp_files = [job.onnx_path]
                 engine_progress = 45
             else:
+                discovered = _discovered_task(None, _inspect_onnx(job.onnx_path))
+                self._check_declared_task(job, discovered)
                 tmp_files = [job.onnx_path]
                 engine_progress = 10
 
@@ -436,15 +589,16 @@ class ConversionService:
                              message="Building TensorRT .engine (this may take several minutes)…")
             _build_engine_from_onnx(job.onnx_path, job.engine_path)
 
-            # Record the export size and the training geometry next to the
-            # engine (the settings file is otherwise created on first
-            # activation, which is also where the geometry is checked).
-            if imgsz is not None:
+            # Record the export size, the training geometry and the task next
+            # to the engine (the settings file is otherwise created on first
+            # activation, which is also where geometry and task are checked).
+            task = job.task or discovered
+            if imgsz is not None or task:
                 from api.services.model_service import ModelService
                 from api.services.model_settings_service import ModelSettingsService
                 ModelSettingsService.record_training(
                     ModelService.settings_file_for_model(job.engine_path), imgsz,
-                    job.train_geometry)
+                    job.train_geometry, task=task)
 
             # ── Keep the checkpoint, drop the intermediates ────────────
             # The .pt becomes the model's weights sidecar (fine-tune base /
@@ -475,3 +629,46 @@ class ConversionService:
             for path in (job.pt_path, job.onnx_path):
                 if path:
                     _remove_file_safe(path)
+
+    def _run_face_job(self, job_id: str) -> None:
+        """Worker thread of a face gallery build (see ``face_gallery_builder``)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return
+
+        def progress(percent: int, message: str) -> None:
+            self._set_status(job_id, ConversionStatus.CONVERTING_TO_ENGINE,
+                             progress=percent, message=message)
+
+        try:
+            from api.config import Config
+            from api.services.face_gallery_builder import FaceGalleryBuilder
+
+            progress(2, "Reading the enrollment photos…")
+            builder = FaceGalleryBuilder(Config(), os.path.dirname(job.engine_path),
+                                         _build_engine_from_onnx, progress,
+                                         publish_guard=self._publication_guard)
+            # The builder publishes the engine, the gallery, the names and the
+            # settings sidecar (task "face") as one set; when that model is the
+            # active one the guard reloads it, so "done" below means live.
+            summary = builder.build(job.faces_path, job.engine_path)
+            _remove_file_safe(job.faces_path)
+
+            engine_filename = os.path.basename(job.engine_path)
+            self._set_status(job_id, ConversionStatus.DONE, progress=100,
+                             message=summary.message(), engine_filename=engine_filename)
+            self._publish_event("classes_changed", ["classes"],
+                                data={"model": engine_filename, "count": summary.people})
+            self._publish_event("models_changed", ["models"], data={"model": engine_filename})
+            logger.info(f"Face gallery job {job_id} completed → {engine_filename} "
+                        f"({summary.message()})")
+        except Exception as exc:
+            logger.exception(f"Face gallery job {job_id} failed: {exc}")
+            self._set_status(job_id, ConversionStatus.FAILED, progress=0,
+                             message="Face gallery build failed.", error=str(exc))
+            _remove_file_safe(job.faces_path)
+            # Only what this job staged: a model of the same name that was
+            # already published keeps every one of its files.
+            from api.services.face_gallery_builder import discard_staging
+            discard_staging(job.engine_path)

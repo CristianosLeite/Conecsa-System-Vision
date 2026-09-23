@@ -5,11 +5,10 @@ machine: jetson-orin-nano-devkit-nvme
 distro: conecsa
 target: conecsa-image
 
-# DISTRO=conecsa is provided by meta-conecsa/conf/distro/conecsa.conf —
-# it replicates the essential tegrademo defines WITHOUT the INHERIT of
-# tegra-support-sanity (which rewrote bblayers.conf in a way incompatible
-# with the kas multi-repo layout). For that reason the tegra-demo-distro
-# repo was removed — it is no longer needed.
+# DISTRO=conecsa is provided by meta-conecsa/conf/distro/conecsa.conf. It
+# carries the essential tegrademo defines without INHERIT tegra-support-sanity
+# (that class rewrites bblayers.conf in a way incompatible with the kas
+# multi-repo layout), so tegra-demo-distro is not a layer here.
 repos:
   poky:
     url: https://git.yoctoproject.org/git/poky
@@ -45,11 +44,11 @@ repos:
 
 local_conf_header:
   conecsa: |
-    # Force tegraflash so the build produces artifacts ready for l4t_initrd_flash.
+    # Force tegraflash so the build produces the initrd-flash tarball.
     IMAGE_FSTYPES = "tegraflash"
 
-    # Removed legacy stack — mirrors what the SSH inventory found to be
-    # superfluous on the stock JetPack 6.2.2.
+    # Daemons and desktop stacks the device does not need. avahi-daemon is
+    # taken back out of this list by meta-conecsa/conf/distro/include/conecsa.inc.
     PACKAGE_EXCLUDE += "bluez5 modemmanager packagekit snap snapd avahi-daemon \
                         cups kerneloops jtop xorg-kiosk"
 
@@ -76,16 +75,16 @@ local_conf_header:
     # BB_NUMBER_THREADS = "8"
     # PARALLEL_MAKE = "-j 8"
 
-    # Accept the NVIDIA EULAs — required by most meta-tegra recipes.
-    ACCEPT_FSL_EULA = "1"
+    # Accept the commercial license flag several meta-tegra recipes carry.
     LICENSE_FLAGS_ACCEPTED += "commercial"
 
-    # Hostname mirrors the current JetPack one (checked via SSH on the Jetson).
+    # Image default hostname; conecsa-set-hostname replaces it with a
+    # per-board name on first boot.
     hostname:pn-base-files = "conecsa-system-vision"
 
     # Memory: force THP=madvise at boot (Yocto default = always, JetPack = madvise).
-    # With THP=always, glibc malloc under many threads (inference-service has
-    # 19 in waitress + 8 in the TRT worker) fragments 2 MB pages that the
+    # With THP=always, glibc malloc under many threads (the inference-service
+    # pipeline and TensorRT worker, training runs) fragments 2 MB pages that the
     # kernel cannot return piecewise, inflating RSS without bound. Paired
     # with zram-swap (vm.swappiness=100) and jemalloc via LD_PRELOAD in
     # docker-compose.yml.

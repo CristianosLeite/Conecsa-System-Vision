@@ -1,10 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # ============================================================================
 # Base image for the Conecsa stack on NVIDIA Jetson ARM64 (JetPack 6 / CUDA 12.6).
 #
 # Serves two roles:
 #
 # 1. Base image — ships the heavy ML environment shared by `inference-service`
-#    (and the future `training-service`):
+#    and `training-service`:
 #      - CUDA 12.6 devel toolchain (needed by pycuda)
 #      - Python 3.10 + pip (the Jetson index https://pypi.jetson-ai-lab.io/jp6/cu126
 #        is passed explicitly to the installs that need it — no global config)
@@ -16,9 +20,9 @@
 #
 # 2. Hardware-management agent — when launched by docker-compose (which overrides
 #    the CMD with `python3 -m agent` and runs the container privileged), the same
-#    image is the host hardware agent: it serves the gRPC HardwareService and
+#    image is the `os-base` hardware agent: it serves the gRPC HardwareService and
 #    owns network/Wi-Fi (systemd-networkd + wpa_supplicant) and GPIO (trigger
-#    input + count output). `inference-service` is a client. The agent layer
+#    input + count output). `api-gateway` is its gRPC client. The agent layer
 #    (wpa_supplicant control, jeepney D-Bus, Jetson.GPIO, compiled proto stubs)
 #    is added at the bottom of this file.
 # ============================================================================
@@ -152,21 +156,26 @@ RUN mkdir -p /data/models /data/runs
 
 # Shared SHM ring helpers — one implementation of the camera + processed-frame
 # ring layouts, importable as `conecsa_shm` by every FROM-base service
-# (inference-service, api-gateway). Installed on the default import path.
+# (inference-service, api-gateway, training-service). Installed on the default
+# import path.
 COPY os-base/conecsa_shm/ /usr/local/lib/python3.10/dist-packages/conecsa_shm/
 
 # Shared dependency-free helpers (atomic persistence, bounded SQLite queue),
 # importable as `conecsa_common` by every FROM-base service.
 COPY os-base/conecsa_common/ /usr/local/lib/python3.10/dist-packages/conecsa_common/
 
+# Third-party notices of the pip packages installed here; every FROM-base image
+# (inference-service, training-service, api-gateway) inherits the file.
+COPY os-base/THIRD-PARTY-NOTICES.md /usr/share/doc/conecsa/THIRD-PARTY-NOTICES-os-base.md
+
 # ── Hardware-management agent ────────────────────────────────────────────────
-# This container doubles as the privileged hardware agent for network/Wi-Fi and
+# This container doubles as the privileged `os-base` hardware agent for network/Wi-Fi and
 # GPIO. The agent speaks the wpa_supplicant control protocol directly over the
 # bind-mounted socket (binding its reply socket inside the shared
 # /run/wpa_supplicant so the host daemon can reach it across mount namespaces —
 # wpa_cli's /tmp reply socket cannot), drives systemd-networkd via jeepney
 # (pure-python D-Bus), and owns the Jetson GPIO (trigger input + count output),
-# exposing the per-frame trigger/count to inference-service over shared memory.
+# exposing the per-frame trigger/count to inference-service over the SHM channel.
 # The agent is launched via `command:` in docker-compose (the base CMD below
 # stays so the image is still usable as inference-service's base without side
 # effects). `wpasupplicant` is installed only to provide `wpa_cli` for manual
@@ -188,7 +197,6 @@ RUN mkdir -p /app/agent/proto && python3 -m grpc_tools.protoc \
         --grpc_python_out=/app/agent/proto \
         /app/proto/hardware.proto
 
-# Upgrade system packages
 RUN apt-get update && apt-get upgrade -y --no-install-recommends \
     && apt-get autoremove --purge -y \
     && apt-get clean \

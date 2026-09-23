@@ -1,5 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Shared response, content-negotiation, event and gRPC-error helpers for the
-gateway controllers (mirror api_server.py)."""
+gateway controllers."""
 import json
 import logging
 import os
@@ -104,7 +108,15 @@ def _accepts_protobuf() -> bool:
 
 
 def _protobuf(message, status=200) -> Response:
-    """Serialize a protobuf *message* into an ``application/x-protobuf`` Response."""
+    """Serialize a protobuf *message* into an ``application/x-protobuf`` Response.
+
+    For an error status the message's ``message`` text is kept on ``flask.g``,
+    so the app's refusal log can name the reason of a binary body too.
+    """
+    if status >= 400:
+        from flask import g, has_request_context
+        if has_request_context():
+            g.refusal_reason = str(getattr(message, "message", "") or "")
     return Response(message.SerializeToString(), status=status,
                     mimetype="application/x-protobuf")
 
@@ -175,7 +187,6 @@ def _grpc_error(exc: grpc.RpcError, service: str = "inference") -> Response:
 def _status_from_message(message: str, default: int = 500) -> int:
     """HTTP status for a service Result whose only signal is its message text.
 
-    Case-insensitive on purpose: two call sites used to disagree on casing,
-    so "Model Not Found" mapped to 404 on one route and 500 on another.
+    Case-insensitive, so "Model Not Found" and "model not found" map alike.
     """
     return 404 if "not found" in (message or "").lower() else default

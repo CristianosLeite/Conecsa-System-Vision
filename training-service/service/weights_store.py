@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Stash of opaque .pt checkpoints under {DATA_DIR}/weights/{weights_id}.pt.
 
 Backs the federated-training RPCs: the hub uploads round weights here
@@ -5,6 +9,11 @@ Backs the federated-training RPCs: the hub uploads round weights here
 reads/writes checkpoints, and DownloadWeights streams them back out. Blobs
 are round-scoped and disposable — the hub deletes them best-effort and
 `prune()` drops anything older than WEIGHTS_TTL_SEC as the backstop.
+
+A blob may carry the task it was trained for in a ``{weights_id}.task``
+sidecar (``WeightsUploadMeta.task``, or the job's dataset task for a stashed
+result): a job refuses weights of another task, and the averager refuses to
+mix tasks.
 """
 import logging
 import os
@@ -13,6 +22,7 @@ import time
 import uuid
 from typing import Iterable, Tuple
 
+from conecsa_common import atomic_write_bytes
 from conecsa_common.atomic import fsync_dir
 
 from .config import Config
@@ -40,15 +50,19 @@ class WeightsStore:
         The trainer chdirs next to its --weights file so ultralytics' AMP
         check resolves the base model offline (see _yolo_trainer). Jobs
         started from a stashed checkpoint chdir *here*, so the base weights
-        must be reachable in this directory too.
+        must be reachable in this directory too (the classification base
+        weights as well, for classification rounds).
         """
-        base = self._config.BASE_WEIGHTS
-        link = os.path.join(self._config.weights_dir, os.path.basename(base))
-        if os.path.isfile(base) and not os.path.exists(link):
-            try:
-                os.symlink(base, link)
-            except OSError as exc:
-                logger.warning("Could not link base weights into store: %s", exc)
+        for base in (self._config.BASE_WEIGHTS,
+                     getattr(self._config, "BASE_WEIGHTS_CLS", "")):
+            if not base:
+                continue
+            link = os.path.join(self._config.weights_dir, os.path.basename(base))
+            if os.path.isfile(base) and not os.path.exists(link):
+                try:
+                    os.symlink(base, link)
+                except OSError as exc:
+                    logger.warning("Could not link base weights into store: %s", exc)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -63,10 +77,33 @@ class WeightsStore:
         self._check_id(weights_id)
         return os.path.join(self._config.weights_dir, f"{weights_id}.pt")
 
+    def _task_path(self, weights_id: str) -> str:
+        """Path of the blob's task sidecar."""
+        self._check_id(weights_id)
+        return os.path.join(self._config.weights_dir, f"{weights_id}.task")
+
+    def _record_task(self, weights_id: str, task: str) -> None:
+        """Write the blob's task sidecar (nothing for an unknown task)."""
+        task = (task or "").strip()
+        if task:
+            atomic_write_bytes(self._task_path(weights_id), task.encode("utf-8"), mode=0o644)
+
     # ── public API ────────────────────────────────────────────────────────────
 
-    def save_stream(self, chunks: Iterable[bytes]) -> Tuple[str, int]:
-        """Spool an uploaded checkpoint into the store; return (id, size)."""
+    def task_of(self, weights_id: str) -> str:
+        """The task a stashed checkpoint was trained for, ``""`` when unknown."""
+        try:
+            with open(self._task_path(weights_id), "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return ""
+
+    def save_stream(self, chunks: Iterable[bytes], task: str = "") -> Tuple[str, int]:
+        """Spool an uploaded checkpoint into the store; return (id, size).
+
+        ``task`` (``WeightsUploadMeta.task``; empty = unknown) is recorded
+        beside the blob.
+        """
         self.prune()
         weights_id = uuid.uuid4().hex
         budget = self._config.MAX_WEIGHTS_UPLOAD_MB * 1024 * 1024
@@ -84,30 +121,43 @@ class WeightsStore:
                     f.write(chunk)
             if size == 0:
                 raise DatasetError("Weights upload is empty")
+            # The sidecar first: a blob is never visible without its task.
+            self._record_task(weights_id, task)
             os.rename(tmp, self._blob_path(weights_id))
             fsync_dir(self._config.weights_dir)
         except Exception:
             if os.path.exists(tmp):
                 os.remove(tmp)
+            self._forget_task(weights_id)
             raise
         logger.info("Stashed weights %s (%d bytes)", weights_id, size)
         return weights_id, size
 
-    def stash_file(self, src_path: str) -> str:
-        """Copy an existing checkpoint (e.g. a finished last.pt) into the store."""
+    def stash_file(self, src_path: str, task: str = "") -> str:
+        """Copy an existing checkpoint (e.g. a finished last.pt) into the store,
+        recording the ``task`` it was trained for."""
         if not os.path.isfile(src_path):
             raise DatasetError(f"Checkpoint not found: {src_path}")
         weights_id = uuid.uuid4().hex
         tmp = os.path.join(self._config.weights_dir, f".stash-{weights_id}")
         try:
             shutil.copyfile(src_path, tmp)
+            self._record_task(weights_id, task)
             os.rename(tmp, self._blob_path(weights_id))
             fsync_dir(self._config.weights_dir)
         except Exception:
             if os.path.exists(tmp):
                 os.remove(tmp)
+            self._forget_task(weights_id)
             raise
         return weights_id
+
+    def _forget_task(self, weights_id: str) -> None:
+        """Remove the blob's task sidecar (missing is fine)."""
+        try:
+            os.remove(self._task_path(weights_id))
+        except FileNotFoundError:
+            pass
 
     def path(self, weights_id: str) -> str:
         """Resolve an id to its file path; raises when unknown."""
@@ -124,14 +174,15 @@ class WeightsStore:
         except FileNotFoundError:
             # Intentionally ignore: delete is defined as a no-op for missing ids.
             logger.debug("Weights file already absent for id %s", weights_id)
+        self._forget_task(weights_id)
 
     @staticmethod
     def _is_store_entry(entry: str) -> bool:
-        """Only the store's own files are prunable (never the base-weights link)."""
+        """Only the store's own files are prunable (never the base-weights links)."""
         if entry.startswith((".upload-", ".stash-")):
             return True
         stem, ext = os.path.splitext(entry)
-        return ext == ".pt" and len(stem) == 32 and \
+        return ext in (".pt", ".task") and len(stem) == 32 and \
             all(c in "0123456789abcdef" for c in stem)
 
     def prune(self) -> None:

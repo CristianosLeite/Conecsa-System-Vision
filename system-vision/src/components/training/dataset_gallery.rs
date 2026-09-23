@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -217,9 +219,9 @@ pub(super) fn DatasetGallery(
 
     view! {
         <div class="ui-card ui-card-pad flex flex-col gap-4">
-            <div class="flex items-center justify-between">
+            <div class="ui-training-panel-header">
                 <h2 class="ui-card-title">{t!(i18n, training::datasets_title)}</h2>
-                <div class="flex items-center gap-2">
+                <div class="ui-training-actions">
                     <button
                         class="ui-button ui-button-neutral ui-button-md"
                         on:click=move |_| {

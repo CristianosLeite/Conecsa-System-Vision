@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tile crops for the training split (``service.tile_split``)."""
 import os
 
@@ -117,3 +121,39 @@ class TestMaterializeTiles:
         total = TileSplitStats(tiles=1, whole=1)
         total.add(TileSplitStats(tiles=2, boxes=3, skipped=1))
         assert total == TileSplitStats(tiles=3, boxes=3, skipped=1, whole=1)
+
+
+class TestPolygonTiles:
+    """Segmentation rings through the same crops.
+
+    1280×720 with the auto tile: tiles x 0..720 and 560..1280.
+    """
+
+    # A "C" opening to the right: its bar (x 400..440) lies outside the right tile.
+    C_SHAPE = ((400, 100), (900, 100), (900, 150), (440, 150), (440, 400), (900, 400),
+               (900, 450), (400, 450))
+
+    @staticmethod
+    def _ring(*points, width=1280, height=720):
+        return [[x / width, y / height] for x, y in points]
+
+    def test_a_concave_outline_cut_by_the_tile_edge_is_one_ring_per_piece(self, tmp_path):
+        image = _image(tmp_path, "c")
+        written, stats = _run(tmp_path, image, [], polygons=[(2, self._ring(*self.C_SHAPE))])
+        assert len(written) == 2 and stats.tiles == 2
+        left, right = (_read(label) for _, label in written)
+        assert (len(left), len(right)) == (1, 2)
+        for row in left + right:
+            assert row[0] == 2 and len(row) >= 7 and len(row) % 2 == 1
+            assert all(0.0 <= v <= 1.0 for v in row[1:])
+        assert stats.boxes == 3 and stats.fragments == 0
+
+    def test_a_sliver_is_a_fragment_and_its_tile_is_skipped(self, tmp_path):
+        square = self._ring((100, 100), (580, 100), (580, 400), (100, 400))
+        written, stats = _run(tmp_path, _image(tmp_path, "s"), [], polygons=[(0, square)])
+        assert len(written) == 1
+        assert (stats.skipped, stats.fragments) == (1, 1)
+
+    def test_an_image_without_rings_writes_background_tiles(self, tmp_path):
+        written, stats = _run(tmp_path, _image(tmp_path, "b"), [], polygons=[])
+        assert len(written) == 2 and stats.background == 2

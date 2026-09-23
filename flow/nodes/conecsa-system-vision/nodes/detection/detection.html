@@ -85,10 +85,15 @@
 
 <script type="text/html" data-help-name="conecsa-detection">
   <p>
-    Returns the list of detections from the latest processed frame, each
-    tagged with the saved detection area its center falls in (or null).
+    Returns the results of the latest processed frame: on an object-detection
+    device, the list of detections, each tagged with the saved detection area
+    its center falls in (or null); on a classification device, the frame's
+    class above the confidence threshold and the top candidate classes; on a
+    face recognition device, one item per face, whose <code>class_name</code>
+    is the recognized person's name (or <code>unknown</code>).
     Uses user-assigned class names. Optionally includes the processed frame
-    as base64 JPEG.
+    as base64 JPEG. Emits only while there is at least one result
+    (<code>total</code> above 0).
   </p>
   <h3>Connection</h3>
   <p>
@@ -121,16 +126,55 @@
   </dl>
   <h3>Output</h3>
   <dl class="message-properties">
+    <dt>payload.task <span class="property-type">string|null</span></dt>
+    <dd>
+      The device's application: <code>detect</code>, <code>classify</code>,
+      <code>segment</code> or <code>face</code>; <code>null</code> while none
+      is chosen. Absent on devices that predate application types (object
+      detection).
+    </dd>
     <dt>payload.detections <span class="property-type">array</span></dt>
     <dd>
       One object per detection. Each has <code>class_name</code>,
-      <code>confidence</code>, and <code>area</code> — the saved area
-      containing the detection's center
-      (<code>{ "id", "label", "shape" }</code>) or <code>null</code>. E.g.
-      <code>[{ "class_name": "person", "confidence": 0.91, "area": { "id": "..", "label": "#1", "shape": "rectangle" } }]</code>.
+      <code>confidence</code>, <code>color</code>, <code>area</code> — the
+      saved area containing the detection's center
+      (<code>{ "id", "label", "shape" }</code>) or <code>null</code> — and
+      <code>bbox</code>, the normalized corners <code>[x1, y1, x2, y2]</code>.
+      E.g.
+      <code>[{ "class_name": "person", "confidence": 0.91, "area": { "id": "..", "label": "#1", "shape": "rectangle" }, "bbox": [0.1, 0.2, 0.3, 0.4] }]</code>.
+      On a classification device it holds at most one item — the frame's
+      class above the confidence threshold — with no <code>bbox</code> and
+      <code>area: null</code>, e.g.
+      <code>[{ "class_name": "cat", "confidence": 0.91, "area": null }]</code>.
+      On a segmentation device each item also has <code>polygons</code>: its
+      outline as rings of normalized <code>[x, y]</code> vertices, e.g.
+      <code>"polygons": [[[0.1, 0.2], [0.3, 0.2], [0.3, 0.4]]]</code>.
+      On a face recognition device each item is one face, in the same shape as
+      a detection: <code>class_name</code> is the recognized person's name or
+      <code>unknown</code>, and <code>confidence</code> is the similarity to
+      that person (not a detection score), e.g.
+      <code>[{ "class_name": "Ana Duarte", "confidence": 0.62, "area": null, "bbox": [0.4, 0.2, 0.55, 0.5] }]</code>.
+      There is no liveness check, so a printed photo can be recognized as the
+      person: gate anything physical on more than a name.
+    </dd>
+    <dt>payload.candidates <span class="property-type">array</span></dt>
+    <dd>
+      Classification only: the top classes of the frame, highest first, each
+      <code>{ "class_id", "class_name", "confidence" }</code>. Absent on other
+      devices.
+    </dd>
+    <dt>payload.polygons_truncated <span class="property-type">boolean</span></dt>
+    <dd>
+      Segmentation only: present and <code>true</code> when the device left the
+      smallest outlines out to keep the result small.
     </dd>
     <dt>payload.total <span class="property-type">number</span></dt>
-    <dd>Total number of detections.</dd>
+    <dd>
+      Total number of results: the detections, the faces in the frame on a
+      face recognition device (known and unknown), or on a classification
+      device 1 when the frame has a class above the threshold (0 otherwise,
+      and the node does not emit).
+    </dd>
     <dt>payload.model <span class="property-type">string</span></dt>
     <dd>Model filename used for the detection.</dd>
     <dt>payload.acceleration_type <span class="property-type">string</span></dt>

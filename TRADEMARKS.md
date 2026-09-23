@@ -1,8 +1,8 @@
 # Trademarks
 
-"Conecsa", the Conecsa logo, the product name "Conecsa Object Detection",
-and the "system-vision" branding assets are trademarks of Conecsa. They are included in
-this repository so that the software builds and runs as shipped.
+"Conecsa", "System Vision", the product name "Conecsa System Vision" and the
+Conecsa logo are trademarks of Conecsa. They are included in this repository so
+that the software builds and runs as shipped.
 
 The open-source license that covers the source code in this repository does
 **not** grant any right to use these trademarks. In particular:
@@ -15,7 +15,7 @@ The open-source license that covers the source code in this repository does
   - `flow/conecsa_white_logo.png`
   - `system-vision/public/conecsa_white_logo.png`
   - any other file carrying the Conecsa name or logo.
-- Nominative fair use ("works with Conecsa Object Detection", "forked from
+- Nominative fair use ("works with Conecsa System Vision", "forked from
   ...") is fine.
 
 Questions about trademark use: contact Conecsa.

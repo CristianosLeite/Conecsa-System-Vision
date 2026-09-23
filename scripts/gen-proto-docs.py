@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate a Markdown reference for the Protocol Buffers under ``proto/``.
 
 Stdlib-only, intentionally lightweight: it does not depend on ``protoc`` or any

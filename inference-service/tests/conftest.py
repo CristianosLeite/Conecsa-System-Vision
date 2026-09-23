@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Shared pytest import setup for the inference-service suite.
 
 Two things make the service importable on a plain host (no container, no
@@ -20,6 +24,8 @@ import os
 import sys
 import types
 
+import pytest
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, os.pardir, os.pardir))
 _PROTO_DIR = os.path.join(_REPO_ROOT, "api-gateway", "gateway", "proto")
@@ -36,3 +42,16 @@ if os.path.isdir(_PROTO_DIR) and "api.proto" not in sys.modules:
     _proto_pkg = types.ModuleType("api.proto")
     _proto_pkg.__path__ = [_PROTO_DIR]
     sys.modules["api.proto"] = _proto_pkg
+
+
+@pytest.fixture(autouse=True)
+def face_models_absent(monkeypatch):
+    """Point ``FACE_MODELS_DIR`` at nothing unless a test provides the models.
+
+    The face strategy is registered only when the bundled YuNet/SFace graphs
+    are present (``postprocess._face_assets``), and a developer who ran
+    ``scripts/fetch-face-models.sh`` has them in the working tree. Without this
+    the registry — and therefore ``supported_tasks`` — would differ between
+    that machine and CI. Face tests set the variable themselves.
+    """
+    monkeypatch.setenv("FACE_MODELS_DIR", os.path.join(os.sep, "nonexistent", "face-models"))

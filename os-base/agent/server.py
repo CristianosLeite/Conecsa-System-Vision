@@ -1,8 +1,13 @@
-"""
-gRPC server for the hardware-management agent.
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
 
-Serves HardwareService (proto/hardware.proto). Network/Wi-Fi RPCs are backed by
-NetworkAgent; GPIO RPCs are placeholders until a later migration.
+"""
+gRPC server for the `os-base` hardware agent.
+
+Serves HardwareService (proto/hardware.proto): network/Wi-Fi RPCs are backed by
+NetworkAgent, GPIO RPCs by GpioAgent, system metrics by SystemAgent and clock
+steps by the time agent.
 """
 import logging
 import os
@@ -20,15 +25,29 @@ if _PROTO_DIR not in sys.path:
 import hardware_pb2 as pb  # noqa: E402
 import hardware_pb2_grpc as pb_grpc  # noqa: E402
 
+from .ap_agent import ApAgent  # noqa: E402
 from .clocks_agent import pin_performance_clocks  # noqa: E402
 from .gpio_agent import GpioAgent  # noqa: E402
-from .network_agent import NetworkAgent  # noqa: E402
+from .network_agent import AccessPointActive, NetworkAgent  # noqa: E402
 from .system_agent import SystemAgent  # noqa: E402
 from .time_agent import TimeAgent  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 LISTEN_ADDR = os.environ.get("HARDWARE_AGENT_LISTEN", "0.0.0.0:50051")
+
+
+def _refuse(context, exc: AccessPointActive, reply):
+    """Fail the current RPC with FAILED_PRECONDITION and return *reply* empty.
+
+    ``set_code``/``set_details`` rather than ``abort``, like the other
+    services: the client still raises ``RpcError`` with this code, which the
+    gateway maps to a 409 carrying the message.
+    """
+    logger.info("refused: %s", exc)
+    context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+    context.set_details(str(exc))
+    return reply
 
 
 def _iface_config_pb(cfg: dict) -> pb.InterfaceConfig:
@@ -54,8 +73,12 @@ class HardwareServicer(pb_grpc.HardwareServiceServicer):
     """
 
     def __init__(self, gpio: GpioAgent):
-        self.network = NetworkAgent()
+        self.ap = ApAgent(NetworkAgent._discover)
+        self.network = NetworkAgent(ap=self.ap)
         self.gpio = gpio
+        # Whatever the radio was doing before this process started, it is a
+        # station now: the access point is never meant to outlive its agent.
+        self.ap.reconcile()
 
     # ── Network / IP ────────────────────────────────────────────────────────────
 
@@ -76,14 +99,17 @@ class HardwareServicer(pb_grpc.HardwareServiceServicer):
     def SetIpConfig(self, request, context):
         """RPC: apply an IPv4 config (auto/static) to the wired or Wi-Fi link."""
         interface = "wifi" if request.interface == pb.WIFI else "wired"
-        res = self.network.set_ip_config(
-            interface=interface,
-            method=request.method,
-            address=request.address,
-            prefix=request.prefix,
-            gateway=request.gateway,
-            dns=list(request.dns),
-        )
+        try:
+            res = self.network.set_ip_config(
+                interface=interface,
+                method=request.method,
+                address=request.address,
+                prefix=request.prefix,
+                gateway=request.gateway,
+                dns=list(request.dns),
+            )
+        except AccessPointActive as exc:
+            return _refuse(context, exc, pb.Result())
         return pb.Result(success=res["success"], message=res["message"])
 
     # ── Wi-Fi ─────────────────────────────────────────────────────────────────────
@@ -100,14 +126,45 @@ class HardwareServicer(pb_grpc.HardwareServiceServicer):
 
     def ConnectWifi(self, request, context):
         """RPC: connect to a Wi-Fi network by ``{ssid, password}``."""
-        res = self.network.connect_wifi(request.ssid, request.password)
+        try:
+            res = self.network.connect_wifi(request.ssid, request.password)
+        except AccessPointActive as exc:
+            return _refuse(context, exc, pb.WifiConnectResult())
         return pb.WifiConnectResult(
             success=res["success"], state=res["state"], message=res["message"],
         )
 
     def ForgetWifi(self, request, context):
         """RPC: remove a saved Wi-Fi network by ``{ssid}``."""
-        res = self.network.forget_wifi(request.ssid)
+        try:
+            res = self.network.forget_wifi(request.ssid)
+        except AccessPointActive as exc:
+            return _refuse(context, exc, pb.Result())
+        return pb.Result(success=res["success"], message=res["message"])
+
+    # ── Wi-Fi access point ──────────────────────────────────────────────────
+
+    def GetApStatus(self, request, context):
+        """RPC: the access point's state; never the passphrase."""
+        st = self.ap.status()
+        return pb.ApStatus(
+            active=st["active"], ssid=st["ssid"], frequency_mhz=int(st["frequency_mhz"]),
+            address=st["address"], prefix=int(st["prefix"]),
+            stations=[pb.ApStation(address=s["address"], hostname=s["hostname"], signal=int(s["signal"]))
+                      for s in st["stations"]],
+            join_deadline_remaining_secs=int(st["join_deadline_remaining_secs"]),
+            wired_ready=st["wired_ready"], message=st["message"],
+            channels=[int(c) for c in st.get("channels", [])],
+        )
+
+    def StartAp(self, request, context):
+        """RPC: start the access point (rollback-safe)."""
+        res = self.ap.start(request.ssid, request.passphrase, int(request.channel))
+        return pb.Result(success=res["success"], message=res["message"])
+
+    def StopAp(self, request, context):
+        """RPC: return the radio to station mode."""
+        res = self.ap.stop()
         return pb.Result(success=res["success"], message=res["message"])
 
     # ── GPIO (config/output ops; per-frame trigger gate uses shared memory) ──────
@@ -187,7 +244,7 @@ def serve() -> None:
     # Pin the Jetson to performance clocks first — the dynamic governors leave the
     # GPU at its minimum for the bursty inference workload, ~2x-ing latency.
     pin_performance_clocks()
-    # GpioAgent initialises the GPIO hardware and starts the shared-memory poll
+    # GpioAgent initializes the GPIO hardware and starts the shared-memory poll
     # loop before the server accepts calls.
     gpio = GpioAgent()
     from grpc_health.v1 import health, health_pb2, health_pb2_grpc

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """training-service — on-device YOLO26 dataset building + training.
 
 Control plane only: capture/labels/classes CRUD and job orchestration live

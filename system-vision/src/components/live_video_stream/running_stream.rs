@@ -1,12 +1,16 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::app::get_api_base_url;
 use crate::components::add_area_button::AddAreaButton;
+use crate::components::application_select::use_application;
 use crate::components::area_chips::{AreaChips, AreaView};
 use crate::components::editing_toolbar::EditingToolbar;
 use crate::components::image_adjust_overlay::ImageAdjustOverlay;
 use crate::components::stereo_overlay::StereoOverlay;
 use crate::i18n::*;
+use crate::models::Task;
 use leptos::prelude::*;
 
 #[component]
@@ -28,6 +32,11 @@ pub(super) fn RunningStream(
     on_cancel: Callback<()>,
 ) -> impl IntoView {
     let i18n = use_i18n();
+    // Detection areas gate located results (detection, segmentation, face
+    // recognition): a classifier judges the whole frame, so their chips and
+    // toolbar are left out.
+    let application = use_application();
+    let areas_apply = move || application.task() != Some(Task::Classify);
     let base_url = get_api_base_url();
     let video_url = move || {
         // <img> cannot set headers, so the hub-proxy capability (when present)
@@ -53,8 +62,10 @@ pub(super) fn RunningStream(
                 }
             />
 
-            <AreaChips areas=areas on_edit=on_edit_chip on_delete=on_delete_chip />
-            <AddAreaButton on_add=on_add />
+            <Show when=areas_apply>
+                <AreaChips areas=areas on_edit=on_edit_chip on_delete=on_delete_chip />
+                <AddAreaButton on_add=on_add />
+            </Show>
 
             <ImageAdjustOverlay
                 model_refresh=model_refresh
@@ -68,7 +79,7 @@ pub(super) fn RunningStream(
             />
 
             {move || {
-                if editing_id.get().is_some() {
+                if areas_apply() && editing_id.get().is_some() {
                     view! {
                         <EditingToolbar
                             editing_shape=editing_shape

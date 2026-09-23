@@ -1,8 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tests for the streamed model upload (inference_grpc.UploadModel).
 
 The chunks must go straight to a staged file on disk with a running byte cap
-(never accumulated in memory) and the final name must appear atomically —
-REFACTORING.md H7.
+(never accumulated in memory) and the final name must appear atomically.
 """
 import os
 from types import SimpleNamespace
@@ -32,10 +35,11 @@ class StubConversionService:
         self.pt_calls = []
 
     def start_pt_conversion(self, pt_path, original_filename, model_directory, imgsz=640,
-                            train_geometry=None):
+                            train_geometry=None, task=None, imgsz_from_checkpoint=False):
         self.pt_calls.append({"pt_path": pt_path, "original_filename": original_filename,
                               "model_directory": model_directory, "imgsz": imgsz,
-                              "train_geometry": train_geometry})
+                              "train_geometry": train_geometry, "task": task,
+                              "imgsz_from_checkpoint": imgsz_from_checkpoint})
         return SimpleNamespace(job_id="job-1")
 
 
@@ -110,6 +114,7 @@ class TestUploadModel:
         result = control.UploadModel(_stream("m.pt", [b"weights"], imgsz=imgsz), None)
         assert result.http_status == 202, result.json
         assert [c["imgsz"] for c in conversion.pt_calls] == [imgsz]
+        assert conversion.pt_calls[0]["imgsz_from_checkpoint"] is False, "a named size wins"
         assert conversion.pt_calls[0]["pt_path"] == os.path.join(model_dir, "m.pt")
 
     def test_train_geometry_reaches_the_pt_conversion(self, servicer):
@@ -126,12 +131,13 @@ class TestUploadModel:
         control.UploadModel(_stream("m.pt", [b"weights"]), None)
         assert conversion.pt_calls[0]["train_geometry"] is None
 
-    def test_zero_imgsz_means_the_640_default(self, servicer):
+    def test_zero_imgsz_means_the_checkpoint_size_then_640(self, servicer):
         control, _ = servicer
         conversion = control._app.model_service._conversion_service
         result = control.UploadModel(_stream("m.pt", [b"weights"], imgsz=0), None)
         assert result.http_status == 202, result.json
-        assert conversion.pt_calls[0]["imgsz"] == 640
+        assert conversion.pt_calls[0]["imgsz_from_checkpoint"] is True
+        assert conversion.pt_calls[0]["imgsz"] == 640, "the fallback"
 
     def test_the_active_model_cannot_be_overwritten(self, servicer):
         control, model_dir = servicer

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Camera controller: the two MJPEG feeds (SHM fan-out) and camera device
 listing/configuration."""
 import json

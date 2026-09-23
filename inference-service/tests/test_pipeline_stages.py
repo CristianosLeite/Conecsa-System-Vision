@@ -1,4 +1,8 @@
-"""Every pipeline stage survives a per-item failure (review M6).
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Every pipeline stage survives a per-item failure.
 
 The stage threads are started once and never restarted, so an unguarded
 exception in the infer hand-off, the finish bookkeeping or the encode stage
@@ -141,3 +145,56 @@ class TestHealth:
         monkeypatch.setattr(time, "monotonic", lambda: calls.append(1) or 100.0)
         rig.pipeline._tick_fps()
         assert calls, "wall-clock time.time() would be stepped by the hub"
+
+
+class RecordingStats(FakeStats):
+    def __init__(self):
+        self.updates = []
+
+    def update(self, **kwargs):
+        self.updates.append(kwargs)
+
+
+class ScriptedDetection(FakeDetection):
+    """``finish`` returns the next scripted ``(count, count_increment)`` result;
+    a ``None`` increment leaves the attribute out, like a detection result."""
+
+    def __init__(self, script):
+        super().__init__()
+        self.release.set()
+        self.script = list(script)
+        self.increments = []
+
+    def finish(self, outputs, frame, metas, inference_time=0.0, generation=None):
+        count, increment = self.script.pop(0)
+        result = SimpleNamespace(processed_image=frame, num_detections=count)
+        if increment is not None:
+            result.count_increment = increment
+        return result
+
+    def increment_detection_count(self, n):
+        self.increments.append(n)
+
+
+def _run_frames(rig, count):
+    for seq in range(1, count + 1):
+        rig.consumer.push(seq)
+        assert _wait_until(lambda n=seq: len(rig.ring.published) == n)
+
+
+class TestCounter:
+    def test_classification_counts_transitions_not_frames(self, build):
+        # none→A (+1), A→A (+0), A→none (+0), none→A (+1).
+        stats = RecordingStats()
+        detection = ScriptedDetection([(1, 1), (1, 0), (0, 0), (1, 1)])
+        rig = build(detection=detection, stats=stats)
+        _run_frames(rig, 4)
+        assert detection.increments == [1, 1]
+        assert [u["increment_frames_with_detections"] for u in stats.updates] == [
+            True, True, False, True]
+
+    def test_detection_counts_every_object(self, build):
+        detection = ScriptedDetection([(2, None), (0, None), (3, None)])
+        rig = build(detection=detection)
+        _run_frames(rig, 3)
+        assert detection.increments == [2, 3]

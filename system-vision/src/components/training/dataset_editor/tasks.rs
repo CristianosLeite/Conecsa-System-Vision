@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Work spawned when the editor mounts: the initial loads, the SAM warm-up,
 //! the active-class clamp and the training-job poll.
 //!
@@ -16,6 +20,7 @@ use crate::api;
 use crate::components::configuration::model_conversion::PendingConversion;
 use crate::components::control_panel::ViewMode;
 use crate::i18n::*;
+use crate::models::Task;
 
 use super::actions;
 use super::logic::{self, JobTransition};
@@ -47,8 +52,16 @@ pub(super) fn spawn_initial_loads(st: EditorState, i18n: I18n, alive: Arc<Atomic
         }
     });
 
+    // Face recognition has no labeling assistant and no fine-tune base: the
+    // photos are labeled by name and the device builds a gallery from them.
+    if st.task == Task::Face {
+        return;
+    }
+
     spawn_local(async move {
-        if let Ok(lists) = api::list_training_models().await {
+        // Only engines of the dataset's task can suggest its labels or serve
+        // as its fine-tune base (the backend refuses the others).
+        if let Ok(lists) = api::list_training_models_for(st.task.id()).await {
             if !alive.load(Ordering::Relaxed) {
                 return;
             }
@@ -73,10 +86,14 @@ pub(super) fn spawn_initial_loads(st: EditorState, i18n: I18n, alive: Arc<Atomic
 /// Predictive SAM warm-up: start the cold load (~1min on the Orin) as soon
 /// as the dataset is opened so it overlaps the user's first capture and
 /// labeling actions instead of blocking the first SAM toggle. Silent — the
-/// user has not asked for SAM yet, so a failure only degrades to the old
-/// lazy-load-on-toggle path. Duplicate-safe: SamService.load() is
+/// user has not asked for SAM yet, so on failure SAM loads when it is
+/// toggled. Duplicate-safe: SamService.load() is
 /// idempotent under its lock, so a toggle mid-warm-up simply joins it.
 pub(super) fn spawn_sam_warmup(st: EditorState, alive: Arc<AtomicBool>) {
+    // A face dataset never uses SAM; loading it would take the GPU for nothing.
+    if st.task == Task::Face {
+        return;
+    }
     spawn_local(async move {
         let Ok(s) = api::get_sam_status().await else {
             return;
@@ -162,7 +179,7 @@ pub(super) fn spawn_job_poll(
             }
             let prev = st.training.job.try_get_untracked().flatten();
             let prev_status = prev.as_ref().map(|w| w.status.clone()).unwrap_or_default();
-            match logic::job_transition(&prev_status, &j, prev.is_some()) {
+            match logic::job_transition(&prev_status, &j, prev.is_some(), st.task) {
                 JobTransition::Finished { pending } => {
                     let _ = st.training.job.try_set(Some(j));
                     // Claim the exit BEFORE the request, and never release

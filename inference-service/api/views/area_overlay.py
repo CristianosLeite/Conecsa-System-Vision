@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Detection-area editing overlay.
 
@@ -8,8 +12,8 @@ they only affect inference, not the rendered stream.
 """
 # noinspection PyPackageRequirements
 # noinspection PyPackageRequirements
-import cv2  # Package is included on os build.
-import numpy as np  # Package is included on os build.
+import cv2  # ships in conecsa-os-base:base
+import numpy as np  # ships in conecsa-os-base:base
 
 
 def draw_areas(img, areas):

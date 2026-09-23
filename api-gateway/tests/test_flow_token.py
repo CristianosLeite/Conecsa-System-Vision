@@ -1,4 +1,8 @@
-"""Node-RED editor tokens (review L2): minting, verification and the route."""
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Node-RED editor tokens: minting, verification and the route."""
 import pytest
 from flask import Flask
 from gateway import flow_token

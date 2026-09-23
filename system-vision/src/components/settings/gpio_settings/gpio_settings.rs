@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api;
 use crate::i18n::*;
@@ -10,7 +12,6 @@ use super::pin_map::PinMap;
 use super::trigger_pin_row::TriggerPinRow;
 use super::trigger_toggle_row::TriggerToggleRow;
 
-/// The `GpioSettings` view component.
 #[component]
 pub fn GpioSettings(
     refresh_gpio: ReadSignal<u32>,

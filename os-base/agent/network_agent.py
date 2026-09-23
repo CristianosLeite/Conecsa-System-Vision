@@ -1,20 +1,26 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
-NetworkAgent — host network/Wi-Fi management for the `os` hardware agent.
+NetworkAgent — host network/Wi-Fi management for the `os-base` hardware agent.
 
 IP configuration is done through systemd-networkd (via D-Bus + .network files);
-Wi-Fi association is done through wpa_supplicant (via wpa_cli on the control
-socket). Replaces the old nmcli/nsenter approach, which does not work on the
-Yocto target (no NetworkManager/nmcli; nsenter into the host mount ns fails).
+Wi-Fi association is done through wpa_supplicant, speaking its control
+protocol directly on the control socket (see wpa.py). The Yocto host has no
+NetworkManager/nmcli.
 """
 import ipaddress
 import logging
 import os
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from conecsa_common.atomic import atomic_write_bytes
 
 from . import networkd
-from .wpa import CTRL_DIR, WpaCli, WpaError, encode_psk, encode_ssid
+from .wpa import CTRL_DIR, WpaCtrl, WpaError, encode_psk, encode_ssid
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +31,49 @@ _CONNECT_TIMEOUT_S = 15.0
 _POLL_INTERVAL_S = 0.5
 
 
+class AccessPointActive(RuntimeError):
+    """A Wi-Fi change was asked for while the radio is (or is becoming) an
+    access point: the caller must stop the access point first. The servicer
+    turns it into FAILED_PRECONDITION, the gateway into a 409.
+    """
+
+    def __init__(self):
+        super().__init__("The access point is active; stop it before changing Wi-Fi")
+
+
 class NetworkAgent:
-    """Host network/Wi-Fi control surface backing the `os` agent's gRPC RPCs.
+    """Host network/Wi-Fi control surface backing the `os-base` hardware agent's gRPC RPCs.
 
     Wraps systemd-networkd (IPv4 config) and wpa_supplicant (Wi-Fi association)
     so the api-gateway never touches host networking directly. Stateless: each
     call rediscovers the wired/wireless interfaces.
     """
+
+    def __init__(self, ap=None):
+        # The access-point agent, when there is one: Wi-Fi changes are refused
+        # while the radio is an access point (or on its way to becoming one)
+        # and hold its ``radio`` lock meanwhile, so a start cannot slip in
+        # between the check and the change.
+        self._ap = ap
+
+    def _refuse_while_ap(self) -> None:
+        if self._ap is not None and self._ap.active:
+            raise AccessPointActive()
+
+    @contextmanager
+    def _hold_radio(self, needed: bool = True) -> Iterator[None]:
+        """Keep the access point off the radio for the length of a Wi-Fi change.
+
+        The first check answers at once while a start or stop is running; the
+        second, under the lock, catches one that claimed the radio meanwhile.
+        """
+        if not needed or self._ap is None:
+            yield
+            return
+        self._refuse_while_ap()
+        with self._ap.radio:
+            self._refuse_while_ap()
+            yield
 
     # ── interface discovery ────────────────────────────────────────────────────
 
@@ -106,7 +148,7 @@ class NetworkAgent:
             return {"ssid": "", "state": "INACTIVE", "signal": 0}
         _ifindex, name = link
         try:
-            st = WpaCli(name).status()
+            st = WpaCtrl(name).status()
         except WpaError as exc:
             logger.error("wpa status failed: %s", exc)
             return {"ssid": "", "state": "DISCONNECTED", "signal": 0}
@@ -135,6 +177,11 @@ class NetworkAgent:
         if method not in ("auto", "static"):
             return {"success": False, "message": f"Invalid method: {method}"}
         kind = "wifi" if str(interface).lower() in ("wifi", "1") else "wired"
+        with self._hold_radio(kind == "wifi"):
+            return self._set_ip_config(kind, method, address, prefix, gateway, dns)
+
+    def _set_ip_config(self, kind: str, method: str, address: str, prefix: int,
+                       gateway: str, dns: list[str] | None) -> dict:
         link = self._discover().get(kind)
         if not link:
             return {"success": False, "message": f"No {kind} interface found"}
@@ -268,7 +315,7 @@ class NetworkAgent:
         iface = self._wifi_iface()
         if not iface:
             return []
-        wpa = WpaCli(iface)
+        wpa = WpaCtrl(iface)
         try:
             current_ssid = wpa.status().get("ssid", "")
             saved = {n["ssid"] for n in wpa.list_networks()}
@@ -302,6 +349,10 @@ class NetworkAgent:
         RECONFIGURE and **nothing is persisted**, so a wrong password can never
         strand the device. Returns ``{success, state, message}``.
         """
+        with self._hold_radio():
+            return self._connect_wifi(ssid, password)
+
+    def _connect_wifi(self, ssid: str, password: str) -> dict:
         iface = self._wifi_iface()
         if not iface:
             return {"success": False, "state": "INACTIVE", "message": "No wireless interface"}
@@ -314,7 +365,7 @@ class NetworkAgent:
         except WpaError as exc:
             return {"success": False, "state": "INACTIVE", "message": str(exc)}
 
-        wpa = WpaCli(iface)
+        wpa = WpaCtrl(iface)
         added = False
         try:
             # LIST_NETWORKS prints the SSID as text, so a printable SSID set in
@@ -361,7 +412,7 @@ class NetworkAgent:
                 "message": "Wrong password or could not connect"}
 
     @staticmethod
-    def _prefer_network(wpa: WpaCli, net_id: str) -> None:
+    def _prefer_network(wpa: WpaCtrl, net_id: str) -> None:
         """Give `net_id` the highest priority among all saved networks so
         wpa_supplicant stays on it (and does not switch on the next scan when
         several networks are saved). Lower-priority networks remain as fallback
@@ -375,14 +426,14 @@ class NetworkAgent:
             logger.warning("could not set priority on network %s: %s", net_id, exc)
 
     @staticmethod
-    def _restore(wpa: WpaCli) -> None:
+    def _restore(wpa: WpaCtrl) -> None:
         """Roll back live supplicant state to the (unsaved) on-disk config."""
         try:
             wpa.reconfigure()
         except WpaError as exc:
             logger.error("wpa RECONFIGURE during rollback failed: %s", exc)
 
-    def _await_connection(self, wpa: WpaCli, ssid: str) -> str:
+    def _await_connection(self, wpa: WpaCtrl, ssid: str) -> str:
         """Poll wpa_supplicant until *ssid* reaches COMPLETED or the timeout.
 
         Returns the last observed ``wpa_state``.
@@ -403,10 +454,14 @@ class NetworkAgent:
 
     def forget_wifi(self, ssid: str) -> dict:
         """Remove a saved Wi-Fi network and persist the change."""
+        with self._hold_radio():
+            return self._forget_wifi(ssid)
+
+    def _forget_wifi(self, ssid: str) -> dict:
         iface = self._wifi_iface()
         if not iface:
             return {"success": False, "message": "No wireless interface"}
-        wpa = WpaCli(iface)
+        wpa = WpaCtrl(iface)
         try:
             net_id = wpa.find_network_id(ssid)
             if net_id is None:

@@ -1,8 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
-GpioAgent — owns the Jetson GPIO hardware in the privileged `os` container.
+GpioAgent — owns the Jetson GPIO hardware in the privileged `os-base` container.
 
 Responsibilities:
-  - initialise the GPIO backend (trigger input + output pins);
+  - initialize the GPIO backend (trigger input + output pins);
   - run a small poll loop that publishes the trigger level via the shared-memory
     channel (gpio_shm) — this is the per-frame hot path, kept off gRPC;
   - expose enable/status + per-pin output control for the gRPC HardwareService.

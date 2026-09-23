@@ -1,4 +1,6 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::i18n::*;
 use leptos::prelude::*;
@@ -36,6 +38,15 @@ pub(super) fn NetworkSettingsTabs(
                 on:click=move |_| set_active_tab.set("wifi".to_string())
             >
                 "Wi-Fi"
+            </button>
+            <button
+                type="button"
+                role="tab"
+                aria-selected=move || active_tab.get() == "ap"
+                class=move || tab_class("ap")
+                on:click=move |_| set_active_tab.set("ap".to_string())
+            >
+                {t!(i18n, settings::ap_tab)}
             </button>
         </div>
     }

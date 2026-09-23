@@ -1,9 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """gRPC channels + stubs the gateway talks to.
 
-Two peers:
+Three peers:
   - inference-service (proto/inference.proto): DetectionControl, ModelControl,
     ManagementControl — the control/telemetry surface for the headless pipeline.
-  - os hardware agent (proto/hardware.proto): network / Wi-Fi / GPIO.
+  - `os-base` hardware agent (proto/hardware.proto): network / Wi-Fi / GPIO /
+    system metrics / clock.
+  - training-service (proto/training.proto): TrainingControl.
 
 The generated ``*_pb2_grpc`` modules do flat ``import inference_pb2`` /
 ``import hardware_pb2``, so the compiled-proto directory must be importable. The

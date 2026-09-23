@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A labeled range slider used by the stereo overlay alignment panel.
 
 use leptos::prelude::*;

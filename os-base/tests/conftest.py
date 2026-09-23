@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Shared pytest import setup for the os-base (hardware agent) suite.
 
 The suite runs from inside ``os-base``, so the ``agent`` package is already

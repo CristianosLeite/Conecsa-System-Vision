@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the GPU-busy gate in POST /api/v1/start.
 
 The single Jetson GPU belongs to a training job or a TensorRT engine build
@@ -25,13 +29,18 @@ def app():
 
 
 def _wire(monkeypatch, job_status="idle", conversions=(), training_raises=False,
-          conversions_raise=False):
-    """Stub every gRPC surface start_detection touches; returns the call log."""
+          conversions_raise=False, task=None):
+    """Stub every gRPC surface start_detection touches; returns the call log.
+
+    ``task=None`` leaves StatusResponse.task absent (a producer that predates
+    application types); a string sets it, ``""`` meaning none chosen.
+    """
     calls = []
 
     def get_status(_):
         calls.append("get_status")
-        return inf_pb.StatusResponse(is_running=False, camera_connected=True)
+        extra = {} if task is None else {"task": task}
+        return inf_pb.StatusResponse(is_running=False, camera_connected=True, **extra)
 
     def get_training(_):
         calls.append("get_training")
@@ -66,6 +75,14 @@ def _wire(monkeypatch, job_status="idle", conversions=(), training_raises=False,
 def _post_start(app, headers=None):
     with app.test_request_context("/api/v1/start", method="POST", headers=headers):
         return detection.start_detection()
+
+
+def test_no_application_type_refuses_start_before_the_gpu_probes(app, monkeypatch):
+    calls = _wire(monkeypatch, task="")
+    resp = _post_start(app)
+    assert resp.status_code == 409
+    assert "No application type" in resp.get_json()["error"]
+    assert calls == ["get_status"]
 
 
 @pytest.mark.parametrize("job_status", training_helpers.ACTIVE_JOB_STATUSES)

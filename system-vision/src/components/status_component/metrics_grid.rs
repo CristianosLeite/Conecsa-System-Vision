@@ -1,11 +1,12 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use super::metric_card::MetricCard;
 use super::SystemMetrics;
 use crate::i18n::*;
 use leptos::prelude::*;
 
-/// Bytes to gb.
 fn bytes_to_gb(value: u64) -> f64 {
     value as f64 / 1024.0 / 1024.0 / 1024.0
 }

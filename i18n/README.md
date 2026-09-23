@@ -5,7 +5,7 @@ Shared i18n catalogs for the two Leptos frontends, consumed at compile time by
 
 - `system-vision/` — namespaced catalogs (`<locale>/<namespace>.json`), one JSON
   per feature area: `common`, `main`, `control_panel`, `stream`, `models`,
-  `camera`, `settings`, `training`, `statistics`, `flow`. Access in code:
+  `camera`, `settings`, `training`, `statistics`, `flow`, `application`. Access in code:
   `t!(i18n, <namespace>::<key>)`.
 - `hub-vision/` — one file per locale (`<locale>.json`) with nested sections:
   `common`, `sidebar`, `auth`, `devices`, `records`, `datasets`, `recipes`,
@@ -48,6 +48,10 @@ Keep these terms identical across both apps:
 | Network | Rede | Red |
 | Audit | Auditoria | Auditoría |
 | Event | Evento | Evento |
+| Application type | Tipo de aplicação | Tipo de aplicación |
+| Object detection | Detecção de objetos | Detección de objetos |
+| Classification | Classificação | Clasificación |
+| Segmentation | Segmentação | Segmentación |
 
 Never translated: brand/product names (CONECSA, Hub Vision, Node-RED,
 PostgreSQL, TensorRT, YOLO, SAM), technical tokens (GPU, CPU, RAM, FPS, ms,

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 TensorRT runtime implementation using native Python API.
 """
@@ -23,7 +27,7 @@ class TensorRTRuntime(BaseRuntime):
         try:
             ensure_cudla_compat()
 
-            # The following packages are included on os build.
+            # These packages ship in conecsa-os-base:base.
 
             # noinspection PyPackageRequirements
             # noinspection PyPackageRequirements

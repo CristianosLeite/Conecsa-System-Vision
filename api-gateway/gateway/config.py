@@ -1,7 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Gateway configuration — all knobs come from the environment.
 
 The gateway holds no business config; it only needs to know where its peers are
-(inference gRPC, os hardware agent) and which SHM segments carry the frames.
+(inference gRPC, `os-base` hardware agent) and which SHM segments carry the frames.
 """
 import os
 
@@ -19,7 +23,7 @@ class Settings:
 
     # gRPC peers (docker-compose service names + <SVC>_ADDR convention).
     INFERENCE_GRPC_ADDR = os.environ.get("INFERENCE_GRPC_ADDR", "inference-service:50061")
-    HARDWARE_AGENT_ADDR = os.environ.get("HARDWARE_AGENT_ADDR", "os:50051")
+    HARDWARE_AGENT_ADDR = os.environ.get("HARDWARE_AGENT_ADDR", "os-base:50051")
     TRAINING_GRPC_ADDR = os.environ.get("TRAINING_GRPC_ADDR", "training-service:50071")
 
     # Stereo combine parameters for the training preview (same defaults as the
@@ -31,7 +35,7 @@ class Settings:
 
     # POSIX SHM rings (shared via the `ipc:` namespace with webcam-server +
     # inference-service). Camera ring is produced by the Rust webcam-server;
-    # the processed ring is produced by inference-service's pipeline (Stage D).
+    # the processed ring is produced by inference-service's encode stage.
     CAMERA_SHM_NAME = os.environ.get("SHM_NAME", "conecsa_frame_shm")
     PROCESSED_SHM_NAME = os.environ.get("PROCESSED_SHM_NAME", "conecsa_processed_shm")
 
@@ -84,12 +88,12 @@ class Settings:
     TRAINING_ORPHAN_TIMEOUT_SEC = float(
         os.environ.get("TRAINING_ORPHAN_TIMEOUT_SEC", "120"))
 
-    # Hub-driven clock correction (gateway/clock.py). The host has no RTC
-    # battery, so the hub's wall clock is the only time source on an isolated
-    # LAN. Only step when the drift is worth a syscall, and — since the hub
-    # polls every 2s — never attempt more often than the interval below (which
-    # bounds the retries when the `os` agent is down, not the healthy path,
-    # where a corrected clock stops matching the threshold).
+    # Hub-driven clock correction (gateway/clock.py; no RTC battery, see
+    # os-base/agent/time_agent.py). Only step when the drift is worth a syscall,
+    # and — since the hub polls every 2s — never attempt more often than the
+    # interval below (which bounds the retries when the `os-base` hardware agent
+    # is down, not the healthy path, where a corrected clock stops matching the
+    # threshold).
     CLOCK_SYNC_THRESHOLD_SEC = _env_float("CLOCK_SYNC_THRESHOLD_SEC", 30.0)
     CLOCK_SYNC_MIN_INTERVAL_SEC = _env_float("CLOCK_SYNC_MIN_INTERVAL_SEC", 60.0)
 

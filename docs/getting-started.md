@@ -44,12 +44,10 @@ pip install -r requirements-dev.txt
 
 `requirements-dev.txt` pulls in each service's own requirements file with `-r`,
 so the pins live in one place: the shared ML/runtime stack, the api-gateway web
-stack, **the hardware agent's deps** (`jeepney`, `Jetson.GPIO` — pure-python, and
-`Jetson.GPIO` raising at import off-device is exactly what makes
-`create_gpio_backend()` return a `NullGpioBackend`), the docs toolchain, pytest
-and pyright. That is deliberately a superset of what the tests need: the type
-checker resolves against these packages, and a missing one would quietly degrade
-its symbols to `Unknown` rather than fail.
+stack, the hardware agent's pure-Python deps (`jeepney`, `Jetson.GPIO`, which
+falls back to a no-op GPIO backend off-device), the docs toolchain, pytest and
+pyright. That is deliberately a superset of what the tests need, for the type
+checker (see [Type checking](#type-checking-pyright)).
 
 Three things stay out of the venv because they only exist on the device:
 
@@ -65,8 +63,9 @@ Three things stay out of the venv because they only exist on the device:
     NVIDIA only publishes TensorRT/PyCUDA wheels for CPython **3.8–3.12** — there
     are no binding wheels for 3.13/3.14. If your system `python3` is newer,
     `pip install tensorrt` falls through to a source build that fails with
-    `No matching distribution found for tensorrt_cu12_bindings`. Create the venv
-    with a 3.10 interpreter (matches the Jetson). If you don't have one,
+    `No matching distribution found for tensorrt_cu12_bindings`. Python 3.10
+    matches the Jetson and is what `./scripts/init.sh` provisions through `uv`.
+    If you don't have a supported interpreter,
     [`uv`](https://docs.astral.sh/uv/) can provision it without touching the
     system Python:
 
@@ -116,9 +115,9 @@ CUDA driver/toolkit (steps 1–2) still has to be installed system-wide first.
     ```
 
 !!! note "CUDA version parity"
-    Plain `tensorrt` resolves to the latest build (currently TensorRT 11 /
-    **cu13**), which needs a matching CUDA 13 runtime locally. The Jetson runs
-    TensorRT 10.3 / **CUDA 12.6**. This mismatch is harmless for local dev —
+    Plain `tensorrt` resolves to the latest build, which may target a newer
+    CUDA major than the Jetson's TensorRT 10.3 / **CUDA 12.6**. The mismatch is
+    harmless for local dev —
     engines are not portable across TensorRT versions and are rebuilt locally
     from ONNX — but to mirror the device, install the cu12 build instead
     (`pip install tensorrt-cu12`) and make sure your local CUDA toolkit is 12.x.
@@ -136,8 +135,8 @@ pip install --force-reinstall numpy==1.26.4
 
 
 !!! note
-    Python 3.10 is required for compatibility with the NVIDIA wheels
-    (TensorRT). The `pypi.jetson-ai-lab.io/jp6/cu126` index ships precompiled
+    The device wheels are built for Python 3.10 (`cp310`), so the venv on the
+    Jetson must use 3.10. The `pypi.jetson-ai-lab.io/jp6/cu126` index ships precompiled
     `torch`, `torchvision` and `onnxruntime-gpu` for aarch64+CUDA 12.6. `numpy`
     is left unpinned for dev (opencv needs 2.x) and pinned back to 1.26.4 only
     when the GPU stack is added (pycuda/tensorrt ABI).
@@ -184,8 +183,10 @@ are exposed by the **dev stack** (`docker-compose.dev.yml`) for local work:
 
 !!! warning "`docker-compose.yml` targets the Jetson"
     The root `docker-compose.yml` and its `Dockerfile.*` are **device-specific**
-    (aarch64 JetPack wheels, Tegra host-library bind-mounts, GPIO/privileged,
-    host network). They do **not** build or run on an x86_64 workstation — use
+    (aarch64 JetPack wheels, Tegra host-library bind-mounts, GPIO devices and the
+    privileged hardware agent with the host's Wi-Fi/networkd bind-mounts; the
+    services themselves share the `conecsa-network` bridge, not the host
+    network). They do **not** build or run on an x86_64 workstation — use
     the dev stack below for local development off-device.
 
 ## Local development with Docker (dev stack)
@@ -256,9 +257,14 @@ Services after startup:
       the aarch64 one.
 
     The compose file also drops the Jetson-only bits from `inference`/`training`
-    (the Tegra host-library bind-mounts, aarch64 `LD_LIBRARY_PATH`/jemalloc, GPIO
-    shm, `privileged`/`pid: host`); the GPU is provided by the NVIDIA container
-    toolkit via `deploy.resources`.
+    (`runtime: nvidia`, the Tegra host-library bind-mounts, aarch64
+    `LD_LIBRARY_PATH`/jemalloc `LD_PRELOAD`, the GPIO shm volume); the GPU is
+    provided by the NVIDIA container toolkit via `deploy.resources`. Neither file
+    runs those services `privileged` or with `pid: host` — only `os-base` (in
+    production) and `webcam-server` are privileged. Finally, the dev stack
+    publishes host ports for local access (api-gateway `:5000`, system-vision
+    `:80` alongside `:443`, and the Flow editor on `:1880` with editor tokens off
+    via `FLOW_ADMIN_AUTH=0`), whereas production publishes only `:443`.
 
 The bare-metal scripts below (`init.sh` / `dev.sh`) remain as a non-container
 alternative.
@@ -276,7 +282,8 @@ Three scripts cover the whole local workflow:
 ./scripts/init.sh                 # or: ./scripts/init.sh --gpu
 
 # 2. Start the full stack (webcam-server, inference, training, api-gateway,
-#    frontend) with interleaved logs. Ctrl+C stops everything.
+#    frontend, plus Node-RED and the :443 mTLS nginx terminator in Docker)
+#    with interleaved logs. Ctrl+C stops everything.
 source .venv/bin/activate
 ./scripts/dev.sh
 
@@ -289,21 +296,27 @@ skip the GPU-heavy services and run just the gateway + frontend:
 
 ```bash
 ./scripts/dev.sh --no-inference --no-training
-# or, gateway + frontend only (no webcam either):
+# or, gateway + frontend only (no webcam, GPU services or Node-RED):
 ./scripts/dev.sh --gateway-only
 ```
 
+`--no-flow` and `--no-tls` skip the two Docker containers (without the `:443`
+terminator the hub cannot discover or pair the machine); both are skipped
+automatically when Docker is unavailable.
+
 Once up: api-gateway on `http://localhost:5000`, web frontend on
 `http://localhost:18080` (its `/api` is proxied to the gateway), inference gRPC
-on `:50061`, training gRPC on `:50071`.
+on `:50061`, training gRPC on `:50071`, the mTLS gate on `https://localhost:443`
+and Node-RED on `http://localhost:1880/flow`.
 
 The rest of this section documents the same steps run individually, which is
 useful when iterating on a single service.
 
 ### Compile Protocol Buffers
 
-`./scripts/init.sh` already runs this for you; run it directly when you only
-need to regenerate the stubs:
+`./scripts/init.sh` runs this for you, and `./scripts/test.sh` generates the
+stubs if they are missing; run it directly when you only need to regenerate
+them:
 
 ```bash
 # Compiles every .proto for Python and Rust
@@ -313,12 +326,11 @@ need to regenerate the stubs:
 The Python stubs (`*_pb2.py` / `.pyi` / `*_pb2_grpc.py`) are written to
 `api-gateway/gateway/proto/` — the api-gateway imports every proto and is the
 service you run off-device, so it is the canonical local-dev output. They are
-gitignored and regenerated here / inside each service's Dockerfile at build.
-Run this once so the editor and type-checker can resolve the proto modules
-(see [Type checking](#type-checking-pyright)). `./scripts/init.sh` already does
-it for you, and `./scripts/test.sh` generates them if they are missing. At runtime each headless
-service falls back to this directory when its own co-located `proto/` (created
-only inside the image) is absent.
+gitignored and regenerated here or inside each service's Dockerfile at build;
+the editor and type checker need them to resolve the proto modules (see
+[Type checking](#type-checking-pyright)). At runtime each headless service
+falls back to this directory when its own co-located `proto/` (created only
+inside the image) is absent.
 
 ### Webcam Server (Rust)
 
@@ -389,18 +401,21 @@ warms it up — the pip package downloads its own Node runtime on first run.
 
 Everything it needs is in `pyrightconfig.json`:
 
-- **`extraPaths`** — `api-gateway/gateway/proto` plus the three service roots, so
-  the proto modules and each service's top-level package (`api`, `service`,
-  `gateway`) resolve with **real types**, not `Any`. This mirrors what the
+- **`extraPaths`** — `api-gateway/gateway/proto`, `os-base` (for the
+  `conecsa_shm`, `conecsa_common` and `agent` packages) and the three service
+  roots, so the proto modules, the shared os-base packages and each service's
+  top-level package (`api`, `service`, `gateway`) resolve with **real types**,
+  not `Any`. This mirrors what the
   runtime does via each pyproject's pytest `pythonpath`.
 - **`venvPath`/`venv`** — points at the root `.venv`, which is what lets
-  `grpc`/`cv2`/`torch`/… resolve from the installed packages. Note this **wins
-  over a `--pythonpath` passed on the command line**.
+  `grpc`/`cv2`/`torch`/… resolve from the installed packages. This setting
+  **wins over `$PYTHON`, an activated virtualenv and `--pythonpath`**.
 - **`exclude`** — `yocto/` above all: walking the vendored Poky tree exhausts
   Node's heap and kills the run.
-- **`ignore`** — `api-gateway/gateway/proto`. It is `protoc` output (regenerated
-  by `scripts/compile-proto.sh`), and its `grpc.experimental` block is not
-  declared by the grpcio stubs. Still analyzed, so importers keep real types; we
+- **`ignore`** — the generated proto directories (`api-gateway/gateway/proto`,
+  `inference-service/api/proto`, `training-service/service/proto`). They are
+  `protoc` output (regenerated by `scripts/compile-proto.sh`), and their
+  `grpc.experimental` blocks are not declared by the grpcio stubs. Still analyzed, so importers keep real types; we
   just don't lint generated code.
 
 Two prerequisites, both handled by `./scripts/init.sh`:
@@ -439,9 +454,12 @@ every suite:
 ./scripts/test.sh
 ```
 
-It runs pytest for the three Python services, **pyright** across all of them,
-`cargo test` for `webcam-server` and `hub-vision`, the wasm suite for
-`system-vision`, and jest for the Flow nodes — generating the Python proto stubs
+It runs pytest for the four Python suites (`inference-service`,
+`training-service`, `api-gateway`, `os-base`), **pyright** across all of them,
+`cargo test` for `webcam-server` and `hub-vision` (plus a check of the hub
+builder workspace layout), wasm32 clippy and host unit tests for the manual
+shell and simulators, the wasm suite for `system-vision`, and jest for the Flow
+nodes — generating the Python proto stubs
 first if they are missing. These are the same suites CI runs on a pull request,
 so a green `test.sh` is a green PR.
 
@@ -450,13 +468,10 @@ the interpreter **pytest** runs under. Missing optional tools (`pyright`,
 `wasm-pack`, `npm`) are warned about and skipped rather than failing the run.
 
 !!! warning "`PYTHON` does not apply to pyright"
-    Pyright resolves imports against the interpreter in `pyrightconfig.json`
-    (`venvPath`/`venv` → `./.venv`), and that **wins over `$PYTHON`, over an
-    activated virtualenv, and over `--pythonpath`**. So the type suite always
-    describes `./.venv`, whatever environment you run the tests under — pointing it
-    somewhere else means editing the config. If `./.venv` is missing, `test.sh`
-    skips the type suite rather than let pyright fall back to another interpreter
-    and report the whole dependency tree as unresolved.
+    Pyright always resolves imports against `./.venv` (see
+    [Type checking](#type-checking-pyright)), whatever environment you run the
+    tests under. If `./.venv` is missing, `test.sh` skips the type suite rather
+    than let pyright report the whole dependency tree as unresolved.
 
 ```bash
 PYTHON=/usr/bin/python3 ./scripts/test.sh      # override the interpreter
@@ -505,13 +520,9 @@ wasm-pack test --headless --firefox system-vision
 
     The pytest job installs a focused test-dependency set — the GPU stack is never
     imported by the host tests, so it stays fast without the device wheels. The
-    pyright job deliberately installs a **superset** of it: an uninstalled package
-    turns every symbol from it into `Unknown` and weakens the check in silence
-    instead of failing, so the type job needs the *imports* of every analyzed file.
-    It pulls `torch` from the CPU-only index (the default PyPI wheel drags in a
-    ~2.5GB CUDA runtime a type check has no use for) and installs into `.venv` at
-    the repo root, because `pyrightconfig.json` points `venvPath`/`venv` there and
-    that setting wins over a `--pythonpath` on the command line.
+    pyright job installs a **superset** of it into `.venv` at the repo root (see
+    [Type checking](#type-checking-pyright) for why), pulling `torch` from the
+    CPU-only index to skip the CUDA runtime a type check has no use for.
 
 ## Fleet hub (`hub-vision`, optional)
 
@@ -531,9 +542,7 @@ HUB_FEATURES=mssql bash scripts/build-hub.sh     # also include SQL Server
 cd hub-vision && cargo tauri dev
 ```
 
-The hub discovers devices over mDNS and **pulls** their detections and their
-audit trails over mutual TLS — there is no inbound ingestion port. See
-[Fleet hub](services/hub-vision.md) for authentication, pairing, discovery,
+See [Fleet hub](services/hub-vision.md) for authentication, pairing, discovery,
 storage and the [audit trail](services/hub-vision.md#audit-trail).
 
 ## Building the documentation

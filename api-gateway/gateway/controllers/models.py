@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Model controller: listing, upload (with conversion tracking), selection,
 deletion and download."""
 import json
@@ -24,18 +28,29 @@ from . import api_bp
 logger = logging.getLogger(__name__)
 
 
+def _model_dict(m) -> dict:
+    """Serialize a ModelInfo message (a producer without tasks means ``detect``)."""
+    return {"name": m.name, "size": m.size, "modified": m.modified, "is_active": m.is_active,
+            "has_weights": m.has_weights, "task": m.task or "detect"}
+
+
 @api_bp.route('/api/v1/models', methods=['GET'])
 def list_models():
-    """GET /api/v1/models — gateway relay."""
+    """GET /api/v1/models — gateway relay.
+
+    ``?task=<task>`` keeps only the models of that task (the device UI lists
+    only the models its application can run); without it every model is
+    listed, as the hub, recipes and the training-service expect.
+    """
     try:
         ml = clients.model.ListModels(inf.Empty())
     except grpc.RpcError as exc:
         return _grpc_error(exc)
-    return _json({"models": [
-        {"name": m.name, "size": m.size, "modified": m.modified, "is_active": m.is_active,
-         "has_weights": m.has_weights}
-        for m in ml.models
-    ]})
+    models = [_model_dict(m) for m in ml.models]
+    task = (request.args.get("task") or "").strip()
+    if task:
+        models = [m for m in models if m["task"] == task]
+    return _json({"models": models})
 
 
 # Training geometry a client may declare on upload (see ModelUploadMeta in
@@ -49,10 +64,18 @@ def _train_geometry_from_form(value) -> str:
     return text if _TRAIN_GEOMETRY_RE.match(text) else ""
 
 
-def _upload_stream(filename, imgsz, file_stream, train_geometry=""):
+def _task_from_form(value) -> str:
+    """The task declared for an upload, normalized; ``""`` = the device's task.
+
+    Validation is the inference-service's (it knows the supported tasks).
+    """
+    return (value or "").strip().lower()[:32]
+
+
+def _upload_stream(filename, imgsz, file_stream, train_geometry="", task=""):
     """Yield ModelChunk messages (metadata first, then file chunks) for the upload RPC."""
     yield inf.ModelChunk(meta=inf.ModelUploadMeta(filename=filename, imgsz=imgsz,
-                                                  train_geometry=train_geometry))
+                                                  train_geometry=train_geometry, task=task))
     while True:
         chunk = file_stream.read(1 << 20)
         if not chunk:
@@ -67,13 +90,17 @@ def upload_model():
         return _json_error("No file provided")
     file = request.files["file"]
     try:
-        imgsz = int(request.form.get("imgsz", 640))
+        # 0 = no size: the inference-service exports a .pt at the size it was
+        # trained at, else at the task's default once it has resolved the
+        # upload's task (224 for classification, 640 otherwise).
+        imgsz = max(0, int(request.form.get("imgsz") or 0))
     except (TypeError, ValueError):
-        imgsz = 640
+        imgsz = 0
     train_geometry = _train_geometry_from_form(request.form.get("train_geometry"))
+    task = _task_from_form(request.form.get("task"))
     try:
         result = clients.model.UploadModel(
-            _upload_stream(file.filename, imgsz, file.stream, train_geometry))
+            _upload_stream(file.filename, imgsz, file.stream, train_geometry, task))
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     try:

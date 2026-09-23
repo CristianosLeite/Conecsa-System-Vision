@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Device enrollment: the conecsa-hub-vision hub is the certificate authority,
 and this endpoint lets a fresh device obtain a hub-signed server certificate
 without its private key ever leaving the device.
@@ -215,9 +219,8 @@ def _install_certs(device_cert: str, ca_cert: str) -> None:
     """Persist the hub-signed server cert and the hub CA (near-atomic pair).
 
     Both files are staged under unique, exclusively-created temp names
-    (the same technique as ``_load_or_create_key``: a fixed ``.tmp`` name let
-    two concurrent completions truncate and rename each other's files),
-    written and fsynced before either rename, so the window where nginx could
+    (as in ``_load_or_create_key``, so concurrent completions cannot clobber
+    each other's files), written and fsynced before either rename, so the window where nginx could
     observe a new leaf with the old CA shrinks to the two back-to-back renames
     (microseconds; nginx only re-reads on its entrypoint-triggered reload).
     Accepted residual — a full versioned-dir switch is not worth the moving
@@ -357,20 +360,12 @@ def _complete_locked():
         if spki(cert.public_key()) != spki(key.public_key()):
             return jsonify({"error": "device certificate does not match device key"}), 400
 
-        # Adopt the hub's clock BEFORE the certificates land: installing them
-        # flips nginx into mTLS-enforcing mode, and from that moment the device
-        # validates the hub's client certificate. With a dead RTC and no NTP the
-        # local clock can predate the CA's not_before, which would reject every
-        # hub call as "certificate is not yet valid" — pairing would appear to
-        # succeed and the device would go offline for good. This is also the
-        # only channel that works while the clock is wrong (no validation here).
-        # A refused step is fatal for the same reason: enrolling with a wrong
-        # clock strands the device, so install nothing and let the hub retry.
-        # Two cases are let through with a warning instead, because retrying
-        # cannot fix them: a hub too old to send hub_time at all, and a host
-        # with no hardware agent to set the clock (the dev stack runs the
-        # gateway without the Jetson-only `os` agent; on a device the agent is
-        # always up, and the persisted clock floor covers a flashed unit).
+        # Adopt the hub's clock before the certificates land: installing them
+        # turns on mTLS, which rejects the hub while the clock predates the CA
+        # (no RTC battery; see os-base/agent/time_agent.py). A refused step
+        # aborts pairing so the hub can retry. Two cases only warn, since a
+        # retry cannot fix them: a hub that sends no hub_time, and a
+        # development host with no `os-base` hardware agent.
         hub_time = body.get("hub_time")
         if hub_time is None:
             logger.warning("pairing without hub_time (old hub?); "

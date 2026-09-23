@@ -1,0 +1,6 @@
+GET /stream.mjpeg HTTP/1.1
+Host: 192.0.2.1:8080
+Authorization: Bearer TESTT0KEN123
+Accept: multipart/x-mixed-replace
+Connection: close
+

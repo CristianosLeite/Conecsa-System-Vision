@@ -1,10 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Training-service REST surface (/api/v1/training/*).
 
 Thin Flask blueprint relaying to the training-service's TrainingControl gRPC
 (:50071), plus the GPU-handover calls to the inference-service
 (ManagementControl.ReleaseRuntime/ResumeRuntime) and the CPU-only combined
-camera preview. Registered by app.py; kept as a sibling package (hardware.py
-precedent) so app.py stays a flat route list.
+camera preview. Registered by app.py.
 
 Routes are split per resource: `session` (GPU handover + preview), `datasets`
 (registry + classes), `images` (capture + labels), `sam`, `label_model`
@@ -17,7 +20,7 @@ from flask import Blueprint
 
 training_bp = Blueprint("training", __name__)
 
-# Re-exported for the unit tests (historic `gateway.training` import surface).
+# Re-exported for the unit tests (the `gateway.training` import surface).
 # Importing the submodules registers their routes on `training_bp`.
 from . import datasets, images, jobs, label_model, sam, session, weights  # noqa: E402,F401
 from .helpers import _job_dict, _meta_dict, _parse_named_boxes  # noqa: E402,F401

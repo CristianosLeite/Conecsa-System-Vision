@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Pure geometry + interaction primitives shared by the label-editor pieces.
 //!
 //! No Leptos/DOM state here beyond reading a `MouseEvent` — just the math for
@@ -192,6 +196,290 @@ pub(super) fn apply_drag(d: &BoxDrag, mx: f32, my: f32) -> (f32, f32, f32, f32) 
             from_edges(nl, nt, nr, nb)
         }
     }
+}
+
+// ── polygons (segmentation) ──────────────────────────────────────────────────
+//
+// Vertices are stored normalized (0..1 of the stored image) like boxes, but
+// every hit test and sampling distance is measured in rendered pixels, so a
+// handle is as easy to grab on a phone as on a wide monitor and on a 16:9
+// image as on a square one.
+
+/// A normalized polygon vertex `[x, y]` (0..1 of the stored image).
+pub(super) type Pt = [f32; 2];
+
+/// Vertex hit radius, in rendered px.
+pub(super) const VERTEX_HIT_PX: f32 = 8.0;
+/// Vertex handle radius as drawn, in rendered px.
+pub(super) const VERTEX_R: f32 = 4.0;
+/// Edge hit distance, in rendered px: a click this close inserts a vertex.
+pub(super) const EDGE_HIT_PX: f32 = 6.0;
+/// A click this close (rendered px) to the first vertex closes a click-placed ring.
+pub(super) const CLOSE_HIT_PX: f32 = 10.0;
+/// Freehand tracing samples a vertex whenever the pointer moved this far (rendered px).
+pub(super) const FREEHAND_STEP_PX: f32 = 4.0;
+/// Ramer–Douglas–Peucker tolerance applied to a finished freehand trace (rendered px).
+pub(super) const RDP_EPS_PX: f32 = 1.5;
+/// Vertices closer than this (rendered px) are merged when a ring closes: the
+/// two presses of a double-click, or a trace ending where it started.
+pub(super) const MIN_VERTEX_GAP_PX: f32 = 2.0;
+
+/// Route the rest of a pointer gesture to the enclosing `<svg>`, so a drag or
+/// trace that leaves the canvas keeps reporting there until it is released.
+pub(super) fn capture_pointer(ev: &leptos::ev::PointerEvent) {
+    let svg = ev
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+        .and_then(|el| el.closest("svg").ok().flatten());
+    if let Some(svg) = svg {
+        let _ = svg.set_pointer_capture(ev.pointer_id());
+    }
+}
+
+/// The ring with consecutive vertices closer than `min_px` merged, the
+/// closing pair (last back to first) included.
+pub(super) fn dedupe_ring(points: &[Pt], canvas: (f32, f32), min_px: f32) -> Vec<Pt> {
+    let mut out: Vec<Pt> = Vec::with_capacity(points.len());
+    for p in points {
+        if out.last().is_none_or(|q| distance_px(*q, *p, canvas) >= min_px) {
+            out.push(*p);
+        }
+    }
+    while out.len() > 1 && distance_px(out[0], out[out.len() - 1], canvas) < min_px {
+        out.pop();
+    }
+    out
+}
+
+fn to_px(p: Pt, canvas: (f32, f32)) -> (f32, f32) {
+    (p[0] * canvas.0, p[1] * canvas.1)
+}
+
+/// Distance between two vertices, in rendered px.
+pub(super) fn distance_px(a: Pt, b: Pt, canvas: (f32, f32)) -> f32 {
+    let ((ax, ay), (bx, by)) = (to_px(a, canvas), to_px(b, canvas));
+    ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt()
+}
+
+/// Distance (rendered px) from `p` to the segment `a`–`b`, and where along the
+/// segment (0..1) the closest point lies.
+pub(super) fn segment_distance_px(p: Pt, a: Pt, b: Pt, canvas: (f32, f32)) -> (f32, f32) {
+    let ((px, py), (ax, ay), (bx, by)) = (to_px(p, canvas), to_px(a, canvas), to_px(b, canvas));
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    (((px - cx).powi(2) + (py - cy).powi(2)).sqrt(), t)
+}
+
+/// The vertex closest to `p` within [`VERTEX_HIT_PX`].
+pub(super) fn hit_vertex(ring: &[Pt], p: Pt, canvas: (f32, f32)) -> Option<usize> {
+    ring.iter()
+        .enumerate()
+        .map(|(i, v)| (i, distance_px(*v, p, canvas)))
+        .filter(|(_, d)| *d <= VERTEX_HIT_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// The edge closest to `p` within [`EDGE_HIT_PX`]: the index of its first
+/// vertex and the point on the edge under the pointer.
+pub(super) fn hit_edge(ring: &[Pt], p: Pt, canvas: (f32, f32)) -> Option<(usize, Pt)> {
+    let n = ring.len();
+    if n < 2 {
+        return None;
+    }
+    (0..n)
+        .map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            let (d, t) = segment_distance_px(p, a, b, canvas);
+            (i, d, [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])])
+        })
+        .filter(|(_, d, _)| *d <= EDGE_HIT_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _, q)| (i, q))
+}
+
+/// Whether a click at `p` closes a click-placed draft: it has at least three
+/// vertices and the click lands on the first one.
+pub(super) fn closes_ring(draft: &[Pt], p: Pt, canvas: (f32, f32)) -> bool {
+    draft.len() >= 3 && distance_px(draft[0], p, canvas) <= CLOSE_HIT_PX
+}
+
+/// Insert `p` on the edge that starts at vertex `edge`.
+pub(super) fn insert_vertex(ring: &mut Vec<Pt>, edge: usize, p: Pt) {
+    let at = (edge + 1).min(ring.len());
+    ring.insert(at, p);
+}
+
+/// Whether a freehand trace has moved far enough from its last sample to add one.
+pub(super) fn far_enough(last: Pt, p: Pt, canvas: (f32, f32)) -> bool {
+    distance_px(last, p, canvas) >= FREEHAND_STEP_PX
+}
+
+/// Ramer–Douglas–Peucker simplification with a tolerance in rendered px.
+pub(super) fn simplify_rdp(points: &[Pt], canvas: (f32, f32), eps_px: f32) -> Vec<Pt> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let last = points.len() - 1;
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[last] = true;
+    let mut stack = vec![(0usize, last)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        let (mut index, mut max) = (start, 0.0f32);
+        for (i, p) in points.iter().enumerate().take(end).skip(start + 1) {
+            let (d, _) = segment_distance_px(*p, points[start], points[end], canvas);
+            if d > max {
+                (index, max) = (i, d);
+            }
+        }
+        if max > eps_px {
+            keep[index] = true;
+            stack.push((start, index));
+            stack.push((index, end));
+        }
+    }
+    points.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
+}
+
+fn orient(a: Pt, b: Pt, c: Pt) -> f32 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// Whether the segments `a`–`b` and `c`–`d` properly cross (touching ends do not).
+pub(super) fn segments_cross(a: Pt, b: Pt, c: Pt, d: Pt) -> bool {
+    orient(a, b, c) * orient(a, b, d) < 0.0 && orient(c, d, a) * orient(c, d, b) < 0.0
+}
+
+/// Whether two non-adjacent edges of the (implicitly closed) ring cross.
+pub(super) fn self_intersects(ring: &[Pt]) -> bool {
+    let n = ring.len();
+    if n < 4 {
+        return false;
+    }
+    (0..n).any(|i| {
+        (i + 2..n).any(|j| {
+            // Edges i and j share a vertex when adjacent (including last-first).
+            j - i != n - 1 && segments_cross(ring[i], ring[(i + 1) % n], ring[j], ring[(j + 1) % n])
+        })
+    })
+}
+
+/// Shoelace area; positive for a clockwise ring in image coordinates (y down).
+pub(super) fn signed_area(ring: &[Pt]) -> f32 {
+    let n = ring.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum::<f32>()
+        / 2.0
+}
+
+/// The ring oriented clockwise in image coordinates, the service's convention.
+pub(super) fn clockwise(mut ring: Vec<Pt>) -> Vec<Pt> {
+    if signed_area(&ring) < 0.0 {
+        ring.reverse();
+    }
+    ring
+}
+
+/// Whether a ring can be saved: at least 3 vertices, some area, no crossing edges
+/// (the service would silently re-extract a self-intersecting ring).
+pub(super) fn valid_ring(ring: &[Pt]) -> bool {
+    ring.len() >= 3 && signed_area(ring).abs() > 1e-7 && !self_intersects(ring)
+}
+
+/// (left, top, right, bottom) of a ring; zeros for an empty one.
+pub(super) fn ring_bbox(ring: &[Pt]) -> (f32, f32, f32, f32) {
+    if ring.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    ring.iter().fold((1.0f32, 1.0f32, 0.0f32, 0.0f32), |(l, t, r, b), p| {
+        (l.min(p[0]), t.min(p[1]), r.max(p[0]), b.max(p[1]))
+    })
+}
+
+/// Every vertex moved by `(dx, dy)`, clamped so the whole ring stays in the image.
+pub(super) fn translate_ring(ring: &[Pt], dx: f32, dy: f32) -> Vec<Pt> {
+    let (l, t, r, b) = ring_bbox(ring);
+    let dx = dx.max(-l).min(1.0 - r);
+    let dy = dy.max(-t).min(1.0 - b);
+    ring.iter().map(|p| [p[0] + dx, p[1] + dy]).collect()
+}
+
+/// Where a press on a committed polygon landed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum PolyPress {
+    /// Inside the ring: select it, then drag moves it.
+    Body,
+    /// On the edge starting at this vertex: insert a vertex there.
+    Edge(usize),
+    /// On this vertex: select it, then drag moves it.
+    Vertex(usize),
+}
+
+/// A polygon being drawn: the vertices placed (or sampled) so far.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PolyDraft {
+    pub(super) points: Vec<Pt>,
+    /// Sampled from a pointer trace, which closes on release, rather than
+    /// placed by clicks.
+    pub(super) freehand: bool,
+    /// The pointer, for the rubber band from the last placed vertex.
+    pub(super) hover: Option<Pt>,
+}
+
+/// What a drag on a committed polygon changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum PolyDragKind {
+    /// One vertex follows the pointer.
+    Vertex(usize),
+    /// The whole ring moves.
+    Move,
+}
+
+/// An in-progress edit of a committed polygon.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PolyDrag {
+    pub(super) idx: usize,
+    pub(super) kind: PolyDragKind,
+    pub(super) origin: Pt,
+    /// The ring at pointer-down: a cancelled or self-crossing edit restores it.
+    pub(super) start: Vec<Pt>,
+    /// Crossed [`DRAG_EPS`]: a real edit, saved on release.
+    pub(super) moved: bool,
+}
+
+/// The ring a polygon drag produces with the pointer at `p`: the dragged vertex
+/// clamped into the image, or the whole ring translated (kept inside).
+pub(super) fn apply_poly_drag(d: &PolyDrag, p: Pt) -> Vec<Pt> {
+    match d.kind {
+        PolyDragKind::Vertex(i) => {
+            let mut ring = d.start.clone();
+            if let Some(v) = ring.get_mut(i) {
+                *v = [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0)];
+            }
+            ring
+        }
+        PolyDragKind::Move => translate_ring(&d.start, p[0] - d.origin[0], p[1] - d.origin[1]),
+    }
+}
+
+/// A YOLO box as a clockwise 4-vertex ring: the promotion of a box to a polygon.
+pub(super) fn box_ring(cx: f32, cy: f32, w: f32, h: f32) -> Vec<Pt> {
+    let (l, t, r, b) = edges(cx, cy, w, h);
+    vec![[l, t], [r, t], [r, b], [l, b]]
 }
 
 #[cfg(test)]

@@ -1,29 +1,42 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
-use crate::api::{training_image_url, LabelBox};
+use crate::api::{training_image_url, LabelBox, LabelPolygon};
 use crate::i18n::*;
 
-use super::dataset_editor::{AiState, ClassesState, ImagesState};
+use super::dataset_editor::{next_instance, AiState, ClassesState, DrawMode, ImagesState};
+use super::label_editor::PolygonTool;
 use super::label_geometry::{
-    apply_drag, is_background, norm_coords, BoxDrag, Corner, DragKind, DRAG_EPS, MIN_DRAW_PX,
-    MIN_SIZE, VIEW,
+    apply_drag, apply_poly_drag, box_ring, capture_pointer, clockwise, closes_ring, dedupe_ring,
+    far_enough, hit_edge, hit_vertex, insert_vertex, is_background, norm_coords, simplify_rdp,
+    valid_ring, BoxDrag, Corner, DragKind, PolyDraft, PolyDrag, PolyDragKind, PolyPress, Pt,
+    DRAG_EPS, MIN_DRAW_PX, MIN_SIZE, MIN_VERTEX_GAP_PX, RDP_EPS_PX, VIEW,
 };
 use super::label_shapes::{
-    committed_boxes_layer, draft_layer, points_layer, status_bar, suggestions_layer,
+    committed_boxes_layer, committed_polygons_layer, draft_layer, points_layer,
+    polygon_draft_layer, polygon_status_bar, polygon_suggestions_layer, status_bar,
+    suggestions_layer,
 };
 
-/// The drawing surface: the dataset image with an SVG overlay for the boxes,
-/// resize handles, AI suggestions, SAM points and the in-progress draft rectangle.
+/// The drawing surface: the dataset image with an SVG overlay for the boxes
+/// or polygons, their handles, AI suggestions, SAM points and the shape being
+/// drawn.
 ///
-/// Owns the `draft` rectangle and all pointer handling; the rendering of each
-/// overlay layer lives in `label_shapes`. Selection (`selected_box`) and the
-/// active move/resize (`drag`) are owned by the parent so the toolbar and the
-/// global Delete/pointerup listeners can share them. Uses Pointer Events so
-/// mouse, touch and pen all draw.
+/// Owns the box `draft` rectangle and all pointer handling; the rendering of
+/// each overlay layer lives in `label_shapes`. Selection and the active edit
+/// (`selected_box`/`drag`, or the polygon tool's signals) are owned by the
+/// parent so the toolbar and the global keyboard listener can share them.
+/// Uses Pointer Events so mouse, touch and pen all draw.
+///
+/// A segmentation dataset (`poly.enabled`) draws polygon rings (click, freehand
+/// or rectangle) and edits them by vertex, edge or whole-ring drags; vertices
+/// are stored normalized, hit tests run in rendered pixels, and each completed
+/// gesture is one save. A ring whose edges cross is refused.
 #[component]
 pub(super) fn LabelCanvas(
     dataset_id: String,
@@ -32,26 +45,33 @@ pub(super) fn LabelCanvas(
     ai: AiState,
     selected_box: RwSignal<Option<usize>>,
     drag: RwSignal<Option<BoxDrag>>,
+    /// The polygon tool of a segmentation dataset (disabled for detection).
+    poly: PolygonTool,
     /// SAM prompt mode: background clicks become point prompts.
     sam_mode: Signal<bool>,
     /// Any assistant panel open above the canvas (it eats vertical room).
     panel_open: Signal<bool>,
-    /// Persist the current boxes (true = show a toast).
+    /// Persist the current labels (true = show a toast).
     on_save: Callback<bool>,
-    /// Fired when the user tries to draw a box with no class selected.
+    /// Fired when the user tries to draw with no class selected.
     on_need_class: Callback<()>,
+    /// Fired when a drawn or edited ring crosses itself (nothing is saved).
+    on_refused: Callback<()>,
 ) -> impl IntoView {
     let i18n = use_i18n();
     let selected = images.selected.read_only();
     let boxes = images.boxes;
+    let polygons = images.polygons;
     let active_class = classes.active.read_only();
     let classes = classes.list.read_only();
     let sam_points = ai.sam_points;
     let suggestions = ai.suggestions.read_only();
     let suggestion_names = ai.suggestion_names.read_only();
+    let suggestion_polygons = ai.suggestion_polygons.read_only();
     // Copy-able handle so the canvas closure can build per-image URLs.
     let dataset_id = StoredValue::new(dataset_id);
-    // Draft rectangle while drawing a new box, normalized (x0, y0, x1, y1).
+    // Draft rectangle while drawing a new box (or a rectangle ring),
+    // normalized (x0, y0, x1, y1).
     let draft = RwSignal::new(None::<(f32, f32, f32, f32)>);
     // Rendered canvas size in CSS px — the overlay's coordinate space, so
     // strokes, handles and text keep a fixed on-screen size whatever the
@@ -80,7 +100,9 @@ pub(super) fn LabelCanvas(
         }
     };
 
-    // ── interaction ─────────────────────────────────────────────────────────
+    let has_class = move || active_class.get_untracked() < classes.get_untracked().len();
+
+    // ── boxes ───────────────────────────────────────────────────────────────
 
     let arm_drag = move |idx: usize, kind: DragKind, origin: (f32, f32)| {
         if let Some(bx) = boxes.get_untracked().get(idx) {
@@ -106,9 +128,215 @@ pub(super) fn LabelCanvas(
         }
     });
 
+    // ── polygons ────────────────────────────────────────────────────────────
+
+    // A new object: one ring of the active class, selected, saved.
+    let add_ring = move |ring: Vec<Pt>| {
+        if !has_class() {
+            on_need_class.run(());
+            return;
+        }
+        let class_id = active_class.get_untracked() as u32;
+        let mut index = 0;
+        polygons.update(|ps| {
+            let instance = next_instance(ps);
+            ps.push(LabelPolygon {
+                class_id,
+                instance,
+                points: ring,
+            });
+            index = ps.len() - 1;
+        });
+        poly.selected.set(Some(index));
+        poly.vertex.set(None);
+        on_save.run(false);
+    };
+
+    // Close a drawn ring: a freehand trace is simplified first; near-duplicate
+    // vertices merge; fewer than three is an accidental click, a crossing ring
+    // is refused.
+    let finish_ring = move |points: Vec<Pt>, freehand: bool| {
+        poly.draft.set(None);
+        let px = canvas.get_untracked();
+        let points = if freehand {
+            simplify_rdp(&points, px, RDP_EPS_PX)
+        } else {
+            points
+        };
+        let points = dedupe_ring(&points, px, MIN_VERTEX_GAP_PX);
+        if points.len() < 3 {
+            return;
+        }
+        if !valid_ring(&points) {
+            on_refused.run(());
+            return;
+        }
+        add_ring(clockwise(points));
+    };
+
+    // Click mode: the first press starts a ring, a press on its first vertex
+    // (from the third vertex on) closes it, any other press adds a vertex.
+    let place_point = move |p: Pt| match poly.draft.get_untracked() {
+        None => {
+            if !has_class() {
+                on_need_class.run(());
+                return;
+            }
+            poly.selected.set(None);
+            poly.vertex.set(None);
+            poly.draft.set(Some(PolyDraft {
+                points: vec![p],
+                freehand: false,
+                hover: Some(p),
+            }));
+        }
+        Some(d) if closes_ring(&d.points, p, canvas.get_untracked()) => finish_ring(d.points, false),
+        Some(_) => poly.draft.update(|slot| {
+            if let Some(d) = slot.as_mut() {
+                d.points.push(p);
+            }
+        }),
+    };
+
+    // Pointer moves of a polygon drag, and the click-mode rubber band, are
+    // coalesced to one update per animation frame: only the latest position
+    // is applied.
+    let pending = StoredValue::new(None::<Pt>);
+    let frame_queued = StoredValue::new(false);
+    let flush = move || {
+        let Some(Some(p)) = pending.try_update_value(|slot| slot.take()) else {
+            return;
+        };
+        if let Some(Some(d)) = poly.drag.try_get_untracked() {
+            let ring = apply_poly_drag(&d, p);
+            let idx = d.idx;
+            let _ = polygons.try_update(|ps| {
+                if let Some(pg) = ps.get_mut(idx) {
+                    pg.points = ring;
+                }
+            });
+            let past_eps =
+                (p[0] - d.origin[0]).abs() > DRAG_EPS || (p[1] - d.origin[1]).abs() > DRAG_EPS;
+            if !d.moved && past_eps {
+                let _ = poly.drag.try_update(|slot| {
+                    if let Some(slot) = slot.as_mut() {
+                        slot.moved = true;
+                    }
+                });
+            }
+        } else {
+            let _ = poly.draft.try_update(|slot| {
+                if let Some(d) = slot.as_mut().filter(|d| !d.freehand) {
+                    d.hover = Some(p);
+                }
+            });
+        }
+    };
+    let schedule = move |p: Pt| {
+        pending.set_value(Some(p));
+        if frame_queued.get_value() {
+            return;
+        }
+        let Some(window) = web_sys::window() else {
+            flush();
+            return;
+        };
+        frame_queued.set_value(true);
+        let tick = Closure::once_into_js(move || {
+            let _ = frame_queued.try_update_value(|queued| *queued = false);
+            flush();
+        });
+        if window.request_animation_frame(tick.unchecked_ref()).is_err() {
+            frame_queued.set_value(false);
+            flush();
+        }
+    };
+
+    // Reported by a committed ring (body, edge or vertex) with the normalized
+    // click. A press while placing points places one there instead.
+    let on_poly_press = Callback::new(move |(idx, what, p): (usize, PolyPress, Pt)| {
+        if poly.draft.get_untracked().is_some_and(|d| !d.freehand) {
+            place_point(p);
+            return;
+        }
+        let Some(ring) = polygons.with_untracked(|ps| ps.get(idx).map(|pg| pg.points.clone()))
+        else {
+            return;
+        };
+        let px = canvas.get_untracked();
+        let was_selected = poly.selected.get_untracked() == Some(idx);
+        poly.selected.set(Some(idx));
+        let vertex = match what {
+            PolyPress::Vertex(v) => Some(v),
+            PolyPress::Body if was_selected => hit_vertex(&ring, p, px),
+            _ => None,
+        };
+        if let Some(v) = vertex {
+            poly.vertex.set(Some(v));
+            poly.drag.set(Some(PolyDrag {
+                idx,
+                kind: PolyDragKind::Vertex(v),
+                origin: p,
+                start: ring,
+                moved: false,
+            }));
+            return;
+        }
+        if let (PolyPress::Edge(_), Some((edge, q))) = (what, hit_edge(&ring, p, px)) {
+            // Insert a vertex under the pointer and keep dragging it; the
+            // insertion alone is an edit, so the release saves.
+            let mut ring = ring;
+            insert_vertex(&mut ring, edge, q);
+            let inserted = ring.clone();
+            polygons.update(|ps| {
+                if let Some(pg) = ps.get_mut(idx) {
+                    pg.points = inserted;
+                }
+            });
+            poly.vertex.set(Some(edge + 1));
+            poly.drag.set(Some(PolyDrag {
+                idx,
+                kind: PolyDragKind::Vertex(edge + 1),
+                origin: q,
+                start: ring,
+                moved: true,
+            }));
+            return;
+        }
+        poly.vertex.set(None);
+        poly.drag.set(Some(PolyDrag {
+            idx,
+            kind: PolyDragKind::Move,
+            origin: p,
+            start: ring,
+            moved: false,
+        }));
+    });
+
+    // Finish an edit of a committed ring: a valid one is saved, one that now
+    // crosses itself is put back as it was and refused.
+    let commit_poly_edit = move |d: PolyDrag| {
+        let Some(ring) = polygons.with_untracked(|ps| ps.get(d.idx).map(|pg| pg.points.clone()))
+        else {
+            return;
+        };
+        if valid_ring(&ring) {
+            on_save.run(false);
+        } else {
+            polygons.update(|ps| {
+                if let Some(pg) = ps.get_mut(d.idx) {
+                    pg.points = d.start.clone();
+                }
+            });
+            on_refused.run(());
+        }
+    };
+
+    // ── pointer handlers ────────────────────────────────────────────────────
+
     // SVG-level handler: only true background presses (on the svg itself).
-    // Presses on a box/handle are handled by that element's own on:pointerdown.
-    // In SAM mode the box rects are pointer-transparent, so every press reaches
+    // Presses on a shape are handled by that element's own on:pointerdown.
+    // In SAM mode the shapes are pointer-transparent, so every press reaches
     // here and becomes a point prompt. Pointer (not mouse) events so touch and
     // pen work too — `PointerEvent` derefs to `MouseEvent`, so the geometry
     // helpers and shift/ctrl modifiers are unchanged.
@@ -123,16 +351,44 @@ pub(super) fn LabelCanvas(
         if sam_mode.get_untracked() {
             let positive = !(ev.shift_key() || ev.ctrl_key());
             sam_points.update(|p| p.push((x, y, positive)));
-        } else {
+            return;
+        }
+        if !poly.enabled {
             // Background: clear selection and start drawing a new box.
             selected_box.set(None);
             draft.set(Some((x, y, x, y)));
+            return;
+        }
+        match poly.mode.get_untracked() {
+            DrawMode::Click => place_point([x, y]),
+            DrawMode::Freehand => {
+                if !has_class() {
+                    on_need_class.run(());
+                    return;
+                }
+                poly.selected.set(None);
+                poly.vertex.set(None);
+                poly.draft.set(Some(PolyDraft {
+                    points: vec![[x, y]],
+                    freehand: true,
+                    hover: None,
+                }));
+                capture_pointer(&ev);
+            }
+            DrawMode::Rect => {
+                poly.selected.set(None);
+                poly.vertex.set(None);
+                draft.set(Some((x, y, x, y)));
+                capture_pointer(&ev);
+            }
         }
     };
 
     let on_pointer_move = move |ev: leptos::ev::PointerEvent| {
         let active_drag = drag.get_untracked();
-        if active_drag.is_none() && draft.get_untracked().is_none() {
+        let poly_active = poly.drag.with_untracked(Option::is_some)
+            || poly.draft.with_untracked(Option::is_some);
+        if active_drag.is_none() && draft.get_untracked().is_none() && !poly_active {
             return;
         }
         let Some((x, y)) = norm_coords(&ev) else {
@@ -157,6 +413,26 @@ pub(super) fn LabelCanvas(
             }
             return;
         }
+        if poly.drag.with_untracked(Option::is_some) {
+            schedule([x, y]);
+            return;
+        }
+        if let Some(d) = poly.draft.get_untracked() {
+            if !d.freehand {
+                schedule([x, y]);
+            } else if d
+                .points
+                .last()
+                .is_none_or(|last| far_enough(*last, [x, y], canvas.get_untracked()))
+            {
+                poly.draft.update(|slot| {
+                    if let Some(d) = slot.as_mut() {
+                        d.points.push([x, y]);
+                    }
+                });
+            }
+            return;
+        }
         draft.update(|d| {
             if let Some(d) = d.as_mut() {
                 d.2 = x;
@@ -165,13 +441,31 @@ pub(super) fn LabelCanvas(
         });
     };
 
-    let commit_draft = move |_: leptos::ev::PointerEvent| {
+    let on_pointer_up = move |_: leptos::ev::PointerEvent| {
         // Finishing a move/resize: persist only if the box actually changed
         // (a plain click on a box just selects it).
         if let Some(d) = drag.get_untracked() {
             drag.set(None);
             if d.moved {
                 on_save.run(false);
+            }
+            return;
+        }
+        if poly.drag.with_untracked(Option::is_some) {
+            // Apply the last coalesced position before judging the edit.
+            flush();
+            if let Some(d) = poly.drag.get_untracked() {
+                poly.drag.set(None);
+                if d.moved {
+                    commit_poly_edit(d);
+                }
+            }
+            return;
+        }
+        if let Some(d) = poly.draft.get_untracked() {
+            // A trace closes on release; a click-placed ring waits for its close.
+            if d.freehand {
+                finish_ring(d.points, true);
             }
             return;
         }
@@ -182,27 +476,82 @@ pub(super) fn LabelCanvas(
         let (w, h) = ((x1 - x0).abs(), (y1 - y0).abs());
         // Ignore accidental clicks: the guard is a few *screen* pixels, not a
         // share of the image, so tiny objects on a native-resolution frame
-        // can still be boxed.
+        // can still be labeled.
         let (cw, ch) = canvas.get_untracked();
         if w * cw < MIN_DRAW_PX || h * ch < MIN_DRAW_PX || w < MIN_SIZE || h < MIN_SIZE {
             return;
         }
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        if poly.enabled {
+            // Rectangle mode: a box promoted to a four-vertex ring.
+            add_ring(box_ring(cx, cy, w, h));
+            return;
+        }
         // A box needs a real class id, or set_labels rejects the save with
         // "Unknown class id". Block drawing until a class exists.
-        if active_class.get_untracked() >= classes.get_untracked().len() {
+        if !has_class() {
             on_need_class.run(());
             return;
         }
         boxes.update(|bs| {
             bs.push(LabelBox {
                 class_id: active_class.get_untracked() as u32,
-                cx: (x0 + x1) / 2.0,
-                cy: (y0 + y1) / 2.0,
+                cx,
+                cy,
                 w,
                 h,
             });
         });
         on_save.run(false);
+    };
+
+    // The browser took the pointer (a system gesture, a palm): the gesture is
+    // abandoned — drafts dropped, an edit put back as it was.
+    let on_pointer_cancel = move |_: leptos::ev::PointerEvent| {
+        draft.set(None);
+        poly.draft.set(None);
+        pending.set_value(None);
+        if let Some(d) = poly.drag.get_untracked() {
+            poly.drag.set(None);
+            polygons.update(|ps| {
+                if let Some(pg) = ps.get_mut(d.idx) {
+                    pg.points = d.start;
+                }
+            });
+        }
+        if let Some(d) = drag.get_untracked() {
+            drag.set(None);
+            boxes.update(|bs| {
+                if let Some(b) = bs.get_mut(d.idx) {
+                    (b.cx, b.cy, b.w, b.h) = d.start;
+                }
+            });
+        }
+    };
+
+    // Leaving the canvas: an uncaptured box draft is dropped (captured
+    // gestures never leave), and the rubber band hides.
+    let on_pointer_leave = move |_: leptos::ev::PointerEvent| {
+        if !poly.enabled {
+            draft.set(None);
+        }
+        if poly.draft.with_untracked(|d| d.as_ref().is_some_and(|d| d.hover.is_some())) {
+            poly.draft.update(|slot| {
+                if let Some(d) = slot.as_mut() {
+                    d.hover = None;
+                }
+            });
+        }
+    };
+
+    // A double-click closes a click-placed ring of three or more vertices.
+    let on_double_click = move |_: leptos::ev::MouseEvent| {
+        if let Some(d) = poly.draft.get_untracked()
+            && !d.freehand
+            && d.points.len() >= 3
+        {
+            finish_ring(d.points, false);
+        }
     };
 
     // ── view ────────────────────────────────────────────────────────────────
@@ -292,6 +641,22 @@ pub(super) fn LabelCanvas(
                     observer.set_value(Some((obs, measure)));
                 });
                 on_cleanup(disconnect);
+                let shapes = if poly.enabled {
+                    view! {
+                        {committed_polygons_layer(i18n, canvas, polygons, poly.selected, poly.vertex, sam_mode, classes, on_poly_press)}
+                        {polygon_suggestions_layer(canvas, suggestions, suggestion_polygons, suggestion_names)}
+                    }.into_any()
+                } else {
+                    view! {
+                        {committed_boxes_layer(i18n, canvas, boxes, selected_box, sam_mode, classes, on_press)}
+                        {suggestions_layer(canvas, suggestions, suggestion_names)}
+                    }.into_any()
+                };
+                let status = if poly.enabled {
+                    polygon_status_bar(i18n, polygons, classes, active_class).into_any()
+                } else {
+                    status_bar(i18n, boxes, classes, active_class).into_any()
+                };
                 view! {
                     <div
                         node_ref=container
@@ -306,14 +671,14 @@ pub(super) fn LabelCanvas(
                             draggable="false"
                             on:load=on_img_load
                         />
-                        // touch-none: claim the gesture so a finger-drag draws a box
+                        // touch-none: claim the gesture so a finger-drag draws
                         // instead of scrolling/zooming the page (browsers cancel
                         // pointermove mid-pan otherwise).
                         //
                         // The viewBox is the measured canvas size in CSS px, so one
                         // overlay unit is one screen pixel (fixed-size handles,
                         // strokes and text, undistorted glyphs on a 16:9 image) and
-                        // normalized cx/cy/w/h map onto the picture by multiplying
+                        // normalized coordinates map onto the picture by multiplying
                         // with that size. preserveAspectRatio="none" keeps the
                         // overlay stretched over the whole image in the frame between
                         // a resize and the next measurement; the pointer math
@@ -327,16 +692,18 @@ pub(super) fn LabelCanvas(
                             preserveAspectRatio="none"
                             on:pointerdown=on_pointer_down
                             on:pointermove=on_pointer_move
-                            on:pointerup=commit_draft
-                            on:pointerleave=move |_| draft.set(None)
+                            on:pointerup=on_pointer_up
+                            on:pointercancel=on_pointer_cancel
+                            on:pointerleave=on_pointer_leave
+                            on:dblclick=on_double_click
                         >
-                            {committed_boxes_layer(i18n, canvas, boxes, selected_box, sam_mode, classes, on_press)}
-                            {suggestions_layer(canvas, suggestions, suggestion_names)}
+                            {shapes}
                             {points_layer(canvas, sam_points)}
                             {draft_layer(canvas, draft, classes, active_class)}
+                            {polygon_draft_layer(canvas, poly.draft, classes, active_class)}
                         </svg>
                     </div>
-                    {status_bar(i18n, boxes, classes, active_class)}
+                    {status}
                 }.into_any()
             }
         }}

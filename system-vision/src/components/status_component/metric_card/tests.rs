@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit tests for the usage-bar color thresholds and style clamping.
 use super::*;
 use wasm_bindgen_test::*;

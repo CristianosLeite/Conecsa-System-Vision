@@ -1,5 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """The pipeline quiesces before a runtime swap and rejects frames prepared for
-an older runtime (review H1).
+an older runtime.
 
 Runs the real ``ProcessingPipelineService`` threads against fakes: a consumer
 that hands out scripted frames, a detection service whose ``infer`` blocks
@@ -102,8 +106,18 @@ class FakeRing:
 
 
 class FakeStats:
+    def __init__(self):
+        self.resets = 0
+        self.updates = 0
+
     def update(self, **kwargs):
+        self.updates += 1
+
+    def record_timings(self, **kwargs):
         pass
+
+    def reset(self):
+        self.resets += 1
 
 
 class FakeGpio:
@@ -179,6 +193,31 @@ class TestDrain:
         rig.consumer.push(2)
         assert rig.detection.infer_started.wait(3.0)
 
+    def test_drain_zeroes_the_stopped_run_stats(self, rig):
+        # Regression: /stats kept the previous run's counters after a stop.
+        rig.pipeline._frame_times.extend([1.0, 2.0])
+        rig.detection.release.set()
+        assert rig.pipeline.drain(1.0)
+        assert rig.pipeline._stats.resets == 1
+        assert rig.pipeline._frame_times == []
+
+    def test_resume_starts_a_fresh_fps_window(self, rig):
+        rig.detection.release.set()
+        assert rig.pipeline.drain(1.0)
+        rig.pipeline._frame_times.append(1.0)
+        rig.pipeline.resume()
+        assert rig.pipeline._frame_times == []
+
+    def test_a_frame_finishing_after_a_drain_timeout_publishes_no_stats(self, rig):
+        # Regression: a worker outliving drain() refilled the zeroed stats.
+        rig.consumer.push(1)
+        assert rig.detection.infer_started.wait(3.0)
+        assert rig.pipeline.drain(0.2) is False
+        rig.detection.release.set()
+        assert _wait_until(lambda: rig.ring.published == [b"jpg"])
+        assert rig.pipeline._stats.resets == 1
+        assert rig.pipeline._stats.updates == 0
+
     def test_times_out_and_reports_when_a_worker_is_wedged(self, rig):
         rig.consumer.push(1)
         assert rig.detection.infer_started.wait(3.0)
@@ -228,9 +267,12 @@ class TestDetectionServiceTransitions:
         model.write_bytes(b"x")
         config = Config()
         config.MODEL_PATH = str(model)
-        monkeypatch.setattr(mod, "ModelManager", lambda cfg: SimpleNamespace(tiling_active=False))
+        monkeypatch.setattr(mod, "ModelManager", lambda cfg, **kw: SimpleNamespace(
+            tiling_active=False, output_details=[{"shape": [1, 300, 6]}],
+            input_details=[{"shape": [1, 3, 640, 640]}]))
         monkeypatch.setattr(mod, "load_class_labels", lambda cfg: ["a"])
-        monkeypatch.setattr(mod, "YOLODetector", lambda labels, cfg: SimpleNamespace())
+        monkeypatch.setattr(mod.postprocess, "create",
+                            lambda task, labels, cfg: SimpleNamespace())
         service = DetectionService(config)
         pipeline = self._Pipeline()
         service.attach_pipeline(pipeline)

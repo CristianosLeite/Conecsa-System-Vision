@@ -1,11 +1,15 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::api;
 use crate::app::{load_models, refresh_status, ModelInfo, SystemStatus};
+use crate::components::application_select::use_application;
 use crate::components::class_names::ClassNames;
 use crate::components::detection_models::DetectionModels;
 use crate::components::panel_header::PanelHeader;
 use crate::i18n::*;
+use crate::models::Task;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -13,7 +17,6 @@ use super::conversion_overlay::ConversionOverlay;
 use super::model_conversion;
 use super::threshold_slider::ThresholdSlider;
 
-/// The `Configuration` view component.
 #[component]
 pub fn Configuration(
     _status: ReadSignal<Option<SystemStatus>>,
@@ -54,6 +57,40 @@ pub fn Configuration(
             t_string!(i18n, common::restricted_to_admins)
         }
     };
+    // Classification has no NMS, so the overlay (IoU) threshold does not
+    // apply and its slider is hidden. For face recognition both thresholds
+    // apply, as the face detector's score gate and its NMS overlap.
+    let application = use_application();
+    let overlay_applies = move || application.task() != Some(Task::Classify);
+    // Per-model segmentation instance limit: shown on a segmentation device
+    // only, following the value the status reports.
+    let segment_applies = move || application.task() == Some(Task::Segment);
+    let (max_instances, set_max_instances) = signal(32u32);
+    Effect::new(move |_| {
+        if let Some(limit) = _status.get().and_then(|s| s.segment_max_instances) {
+            set_max_instances.set(limit);
+        }
+    });
+    // Face recognition: the gallery match threshold, the smallest face worth
+    // recognizing and how many faces one frame may carry. Same shape as the
+    // segmentation instance limit: the status reports the values in effect and
+    // every change is one POST, followed by a status re-read.
+    let face_applies = move || application.task() == Some(Task::Face);
+    let (match_threshold, set_match_threshold) = signal(0.363f32);
+    let (min_size_px, set_min_size_px) = signal(40u32);
+    let (max_faces, set_max_faces) = signal(5u32);
+    Effect::new(move |_| {
+        let Some(status) = _status.get() else { return };
+        if let Some(v) = status.face_match_threshold {
+            set_match_threshold.set(v);
+        }
+        if let Some(v) = status.face_min_size_px {
+            set_min_size_px.set(v);
+        }
+        if let Some(v) = status.face_max_faces {
+            set_max_faces.set(v);
+        }
+    });
     // State for loading / conversion overlay — owned here so the overlay covers the full panel
     let (active_job_id, set_active_job_id) = signal(Option::<String>::None);
     let (overlay_message, set_overlay_message) = signal(String::new());
@@ -241,8 +278,51 @@ pub fn Configuration(
         });
     });
 
+    let update_max_instances = Callback::new(move |val: u32| {
+        let locale = i18n.get_locale_untracked();
+        spawn_local(async move {
+            match api::set_segment_max_instances(val).await {
+                Ok(_) => {
+                    set_success_msg.set(td_string!(
+                        locale,
+                        models::segment_max_instances_set,
+                        value = val.to_string()
+                    ));
+                    refresh_status(set_status, set_error_msg).await;
+                }
+                Err(e) => set_error_msg.set(td_string!(
+                    locale,
+                    models::failed_to_set_segment_max_instances,
+                    err = e
+                )),
+            }
+        });
+    });
+
+    // One writer for the three face settings: only the changed field is sent.
+    let update_face_settings = Callback::new(move |(settings, message): (api::FaceSettings, String)| {
+        let locale = i18n.get_locale_untracked();
+        spawn_local(async move {
+            match api::set_face_settings(settings).await {
+                Ok(_) => {
+                    set_success_msg.set(message);
+                    refresh_status(set_status, set_error_msg).await;
+                }
+                Err(e) => set_error_msg.set(td_string!(
+                    locale,
+                    models::failed_to_set_face_settings,
+                    err = e
+                )),
+            }
+        });
+    });
+
     view! {
-        <div class="ui-card ui-card-pad h-full flex flex-col relative">
+        // Scrolls at every width: the side panel only grants the card its own
+        // scroll from 1280px up (app-layout.css), and in the hub's narrower
+        // webview a task with more settings would otherwise cut its last
+        // sections off.
+        <div class="ui-card ui-card-pad ui-card-scroll h-full min-h-0 flex flex-col relative">
             <ConversionOverlay
                 active_job_id=active_job_id
                 message=overlay_message
@@ -268,7 +348,11 @@ pub fn Configuration(
             // ===== Confidence Threshold Section =====
             <ThresholdSlider
                 label=move || t_string!(i18n, models::confidence_threshold)
-                description=move || t_string!(i18n, models::confidence_threshold_desc)
+                description=move || if face_applies() {
+                    t_string!(i18n, models::confidence_threshold_desc_face)
+                } else {
+                    t_string!(i18n, models::confidence_threshold_desc)
+                }
                 value=threshold
                 set_value=set_threshold
                 on_change=update_threshold
@@ -276,22 +360,213 @@ pub fn Configuration(
                 title=restricted_title
             />
 
-            // ===== Overlay Threshold Section =====
-            <ThresholdSlider
-                label=move || t_string!(i18n, models::overlay_threshold)
-                description=move || t_string!(i18n, models::overlay_threshold_desc)
-                value=overlay_threshold
-                set_value=set_overlay_threshold
-                on_change=update_overlay_threshold
-                disabled=!privileged
-                title=restricted_title
-            />
+            // ===== Overlay Threshold Section (detection only) =====
+            <Show when=overlay_applies>
+                <ThresholdSlider
+                    label=move || t_string!(i18n, models::overlay_threshold)
+                    description=move || if face_applies() {
+                        t_string!(i18n, models::overlay_threshold_desc_face)
+                    } else {
+                        t_string!(i18n, models::overlay_threshold_desc)
+                    }
+                    value=overlay_threshold
+                    set_value=set_overlay_threshold
+                    on_change=update_overlay_threshold
+                    disabled=!privileged
+                    title=restricted_title
+                />
+            </Show>
+
+            // ===== Instance Limit Section (segmentation only) =====
+            <Show when=segment_applies>
+                <div class="mb-4">
+                    <h3 class="ui-section-title mb-2">
+                        {move || t_string!(i18n, models::segment_max_instances)}
+                    </h3>
+                    <div class="flex items-center gap-3 mb-2">
+                        <input
+                            type="range"
+                            min="1"
+                            max="64"
+                            step="1"
+                            prop:value=move || max_instances.get().to_string()
+                            on:input=move |ev| {
+                                if let Ok(val) = event_target_value(&ev).parse::<u32>() {
+                                    set_max_instances.set(val);
+                                }
+                            }
+                            on:change=move |ev| {
+                                if let Ok(val) = event_target_value(&ev).parse::<u32>() {
+                                    update_max_instances.run(val);
+                                }
+                            }
+                            disabled=!privileged
+                            title=restricted_title
+                            aria-label=move || t_string!(i18n, models::segment_max_instances)
+                            class="ui-range"
+                        />
+                        <span class="ui-value min-w-12 text-center text-sm">
+                            {move || max_instances.get().to_string()}
+                        </span>
+                    </div>
+                    <p class="ui-help text-sm leading-relaxed">
+                        {move || t_string!(i18n, models::segment_max_instances_desc)}
+                    </p>
+                </div>
+            </Show>
+
+            // ===== Face Recognition Section (face only) =====
+            <Show when=face_applies>
+                <div class="mb-4">
+                    <h3 class="ui-section-title mb-2">
+                        {move || t_string!(i18n, models::face_match_threshold)}
+                    </h3>
+                    <div class="flex items-center gap-3 mb-2">
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.005"
+                            prop:value=move || match_threshold.get().to_string()
+                            on:input=move |ev| {
+                                if let Ok(val) = event_target_value(&ev).parse::<f32>() {
+                                    set_match_threshold.set(val);
+                                }
+                            }
+                            on:change=move |ev| {
+                                if let Ok(val) = event_target_value(&ev).parse::<f32>() {
+                                    set_match_threshold.set(val);
+                                    let locale = i18n.get_locale_untracked();
+                                    update_face_settings.run((
+                                        api::FaceSettings {
+                                            match_threshold: Some(val),
+                                            ..Default::default()
+                                        },
+                                        td_string!(
+                                            locale,
+                                            models::face_match_threshold_set,
+                                            value = format!("{val:.3}")
+                                        ),
+                                    ));
+                                }
+                            }
+                            disabled=!privileged
+                            title=restricted_title
+                            aria-label=move || t_string!(i18n, models::face_match_threshold)
+                            class="ui-range"
+                        />
+                        <span class="ui-value min-w-12 text-center text-sm">
+                            {move || format!("{:.3}", match_threshold.get())}
+                        </span>
+                    </div>
+                    <p class="ui-help text-sm leading-relaxed mb-4">
+                        {move || t_string!(i18n, models::face_match_threshold_desc)}
+                    </p>
+
+                    <h3 class="ui-section-title mb-2">
+                        {move || t_string!(i18n, models::face_min_size)}
+                    </h3>
+                    <div class="flex items-center gap-3 mb-2">
+                        <input
+                            type="range"
+                            min="0"
+                            max="1024"
+                            step="8"
+                            prop:value=move || min_size_px.get().to_string()
+                            on:input=move |ev| {
+                                if let Ok(val) = event_target_value(&ev).parse::<u32>() {
+                                    set_min_size_px.set(val);
+                                }
+                            }
+                            on:change=move |ev| {
+                                if let Ok(val) = event_target_value(&ev).parse::<u32>() {
+                                    set_min_size_px.set(val);
+                                    let locale = i18n.get_locale_untracked();
+                                    update_face_settings.run((
+                                        api::FaceSettings {
+                                            min_size_px: Some(val),
+                                            ..Default::default()
+                                        },
+                                        td_string!(
+                                            locale,
+                                            models::face_min_size_set,
+                                            value = val.to_string()
+                                        ),
+                                    ));
+                                }
+                            }
+                            disabled=!privileged
+                            title=restricted_title
+                            aria-label=move || t_string!(i18n, models::face_min_size)
+                            class="ui-range"
+                        />
+                        <span class="ui-value min-w-12 text-center text-sm">
+                            {move || format!("{} px", min_size_px.get())}
+                        </span>
+                    </div>
+                    <p class="ui-help text-sm leading-relaxed mb-4">
+                        {move || t_string!(i18n, models::face_min_size_desc)}
+                    </p>
+
+                    <h3 class="ui-section-title mb-2">
+                        {move || t_string!(i18n, models::face_max_faces)}
+                    </h3>
+                    <div class="flex items-center gap-3 mb-2">
+                        <input
+                            type="range"
+                            min="1"
+                            max="20"
+                            step="1"
+                            prop:value=move || max_faces.get().to_string()
+                            on:input=move |ev| {
+                                if let Ok(val) = event_target_value(&ev).parse::<u32>() {
+                                    set_max_faces.set(val);
+                                }
+                            }
+                            on:change=move |ev| {
+                                if let Ok(val) = event_target_value(&ev).parse::<u32>() {
+                                    set_max_faces.set(val);
+                                    let locale = i18n.get_locale_untracked();
+                                    update_face_settings.run((
+                                        api::FaceSettings {
+                                            max_faces: Some(val),
+                                            ..Default::default()
+                                        },
+                                        td_string!(
+                                            locale,
+                                            models::face_max_faces_set,
+                                            value = val.to_string()
+                                        ),
+                                    ));
+                                }
+                            }
+                            disabled=!privileged
+                            title=restricted_title
+                            aria-label=move || t_string!(i18n, models::face_max_faces)
+                            class="ui-range"
+                        />
+                        <span class="ui-value min-w-12 text-center text-sm">
+                            {move || max_faces.get().to_string()}
+                        </span>
+                    </div>
+                    // One paragraph, not two: this is the tallest section in
+                    // the panel and every line pushes the models further down.
+                    <p class="ui-help text-sm leading-relaxed">
+                        {move || format!(
+                            "{} {}",
+                            t_string!(i18n, models::face_max_faces_desc),
+                            t_string!(i18n, models::face_privacy_note),
+                        )}
+                    </p>
+                </div>
+            </Show>
 
             // ===== Class Names Section =====
             <ClassNames
                 refresh_classes=refresh_classes
                 set_error_msg=set_error_msg
                 set_success_msg=set_success_msg
+                face=Signal::derive(face_applies)
             />
 
             // ===== Detection Models Section =====

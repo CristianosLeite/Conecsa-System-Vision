@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for ConversionService pure helpers and job serialization."""
 import time
 
@@ -60,6 +64,7 @@ class TestToDict:
             "engine_filename",
             "imgsz",
             "train_geometry",
+            "task",
             "started_at",
             "elapsed_secs",
         }
@@ -146,34 +151,58 @@ class TestJobRegistry:
         assert ids == {"a"}
 
 
+def _run_inline(monkeypatch, tmp_path, *, engine_ok=True, exported=None, task=None,
+                onnx_shapes=None, onnx=False, built=None, from_checkpoint=False,
+                exports=None):
+    """Run one conversion job body inline with the converter and builder faked."""
+    import api.services.conversion_service as cs
+
+    def export(pt, onnx_path, imgsz, from_checkpoint=False):
+        if exports is not None:
+            exports.append((imgsz, from_checkpoint))
+        open(onnx_path, "w").close()
+        return exported if exported is not None else cs.ConverterOutput(
+            [], "detect", [[1, 300, 6]])
+
+    def build(onnx_path, engine):
+        if built is not None:
+            built.append(engine)
+        if not engine_ok:
+            raise RuntimeError("no workspace")
+        open(engine, "w").close()
+
+    monkeypatch.setattr(cs, "_convert_pt_to_onnx", export)
+    monkeypatch.setattr(cs, "_build_engine_from_onnx", build)
+    monkeypatch.setattr(cs, "_inspect_onnx", lambda path: onnx_shapes)
+    # Enqueue without the worker thread, then run the job body inline.
+    run_job = ConversionService._run_job
+    monkeypatch.setattr(ConversionService, "_run_job", lambda self, job_id: None)
+    svc = ConversionService()
+    if onnx:
+        src = tmp_path / "Teste.onnx"
+        src.write_bytes(b"onnx")
+        job = svc.start_onnx_conversion(str(src), "Teste.onnx", str(tmp_path), task=task)
+    else:
+        src = tmp_path / "Teste.pt"
+        src.write_bytes(b"pt")
+        job = svc.start_pt_conversion(str(src), "Teste.pt", str(tmp_path), imgsz=640,
+                                      task=task, imgsz_from_checkpoint=from_checkpoint)
+    run_job(svc, job.job_id)
+    done = svc.get_job(job.job_id)
+    assert done is not None
+    return done
+
+
+def _sidecar(tmp_path):
+    import json
+    return json.loads((tmp_path / "Teste.settings.json").read_text())
+
+
 class TestRunJobKeepsTheCheckpoint:
     """The .pt a conversion starts from becomes the model's weights sidecar."""
 
     def _run(self, monkeypatch, tmp_path, *, engine_ok=True):
-        import api.services.conversion_service as cs
-
-        def export(pt, onnx, imgsz):
-            open(onnx, "w").close()
-            return []
-
-        def build(onnx, engine):
-            if not engine_ok:
-                raise RuntimeError("no workspace")
-            open(engine, "w").close()
-
-        monkeypatch.setattr(cs, "_convert_pt_to_onnx", export)
-        monkeypatch.setattr(cs, "_build_engine_from_onnx", build)
-        # Enqueue without the worker thread, then run the job body inline.
-        run_job = ConversionService._run_job
-        monkeypatch.setattr(ConversionService, "_run_job", lambda self, job_id: None)
-        svc = ConversionService()
-        pt = tmp_path / "Teste.pt"
-        pt.write_bytes(b"pt")
-        job = svc.start_pt_conversion(str(pt), "Teste.pt", str(tmp_path), imgsz=640)
-        run_job(svc, job.job_id)
-        done = svc.get_job(job.job_id)
-        assert done is not None
-        return done
+        return _run_inline(monkeypatch, tmp_path, engine_ok=engine_ok)
 
     def test_pt_moves_into_the_weights_sidecar(self, monkeypatch, tmp_path):
         job = self._run(monkeypatch, tmp_path)
@@ -187,3 +216,76 @@ class TestRunJobKeepsTheCheckpoint:
         assert job.status == ConversionStatus.FAILED
         assert not (tmp_path / "Teste.pt").exists()
         assert not (tmp_path / "weights").exists()
+
+
+class TestRunJobImgsz:
+    """An upload that names no size exports at the checkpoint's training size."""
+
+    def test_the_converter_is_asked_for_the_checkpoint_size(self, monkeypatch, tmp_path):
+        exports = []
+        job = _run_inline(monkeypatch, tmp_path, from_checkpoint=True, exports=exports)
+        assert job.status == ConversionStatus.DONE, job.error
+        assert exports == [(640, True)], "640 is only the fallback"
+
+    def test_the_size_the_export_used_is_recorded(self, monkeypatch, tmp_path):
+        import api.services.conversion_service as cs
+        job = _run_inline(monkeypatch, tmp_path, task="classify", from_checkpoint=True,
+                          exported=cs.ConverterOutput(["a", "b"], "classify", [[1, 2]], 320))
+        assert job.status == ConversionStatus.DONE, job.error
+        assert job.imgsz == 320
+        assert _sidecar(tmp_path) == {"imgsz": 320, "task": "classify"}
+
+    def test_a_named_size_is_not_replaced(self, monkeypatch, tmp_path):
+        exports = []
+        _run_inline(monkeypatch, tmp_path, exports=exports)
+        assert exports == [(640, False)]
+
+
+class TestRunJobTask:
+    """Declare at upload, verify at conversion."""
+
+    def test_the_declared_task_is_recorded_with_the_export_size(self, monkeypatch, tmp_path):
+        job = _run_inline(monkeypatch, tmp_path, task="detect")
+        assert job.status == ConversionStatus.DONE, job.error
+        assert _sidecar(tmp_path) == {"imgsz": 640, "task": "detect"}
+
+    def test_an_undeclared_task_records_what_the_converter_found(self, monkeypatch, tmp_path):
+        job = _run_inline(monkeypatch, tmp_path, task=None)
+        assert job.status == ConversionStatus.DONE, job.error
+        assert _sidecar(tmp_path)["task"] == "detect"
+
+    def test_a_model_of_another_task_fails_before_the_engine_build(self, monkeypatch, tmp_path):
+        import api.services.conversion_service as cs
+        built = []
+        job = _run_inline(monkeypatch, tmp_path, task="detect", built=built,
+                          exported=cs.ConverterOutput(["a", "b"], "classify", [[1, 2]]))
+        assert job.status == ConversionStatus.FAILED
+        assert job.error is not None
+        assert "'classify'" in job.error and "'detect'" in job.error
+        assert built == []
+        assert not (tmp_path / "Teste.settings.json").exists()
+
+    def test_the_graph_shape_decides_when_ultralytics_does_not_say(self, monkeypatch, tmp_path):
+        import api.services.conversion_service as cs
+        job = _run_inline(monkeypatch, tmp_path, task="detect",
+                          exported=cs.ConverterOutput([], None, [[1, 32, 160, 160],
+                                                                 [1, 300, 38]]))
+        assert job.status == ConversionStatus.FAILED
+        assert job.error is not None and "'segment'" in job.error
+
+    def test_onnx_upload_is_inspected_and_its_task_recorded(self, monkeypatch, tmp_path):
+        job = _run_inline(monkeypatch, tmp_path, onnx=True, task="detect",
+                          onnx_shapes=[[1, 300, 6]])
+        assert job.status == ConversionStatus.DONE, job.error
+        assert _sidecar(tmp_path) == {"task": "detect"}
+
+    def test_onnx_of_another_task_fails(self, monkeypatch, tmp_path):
+        job = _run_inline(monkeypatch, tmp_path, onnx=True, task="detect",
+                          onnx_shapes=[[1, 4]])
+        assert job.status == ConversionStatus.FAILED
+        assert job.error is not None and "'classify'" in job.error
+
+    def test_uninspectable_onnx_is_left_to_activation(self, monkeypatch, tmp_path):
+        job = _run_inline(monkeypatch, tmp_path, onnx=True, task="detect", onnx_shapes=None)
+        assert job.status == ConversionStatus.DONE, job.error
+        assert _sidecar(tmp_path) == {"task": "detect"}

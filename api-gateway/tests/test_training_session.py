@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for the shared exit-training-mode helper (session._do_exit)."""
 from types import SimpleNamespace
 
@@ -23,8 +27,11 @@ def events(monkeypatch):
 
 
 def _wire(monkeypatch, resume_result=None, resume_raises=False,
-          unload_raises=False, job_status="idle"):
-    """Stub the gRPC surfaces _do_exit touches; returns the call log."""
+          unload_raises=False, job_status="idle", resumes=None):
+    """Stub the gRPC surfaces _do_exit touches; returns the call log.
+
+    ``resumes`` (a list) collects every ResumeRuntime request.
+    """
     calls = []
 
     def get_training(_):
@@ -41,8 +48,10 @@ def _wire(monkeypatch, resume_result=None, resume_raises=False,
         if unload_raises:
             raise FakeRpcError()
 
-    def resume(_):
+    def resume(request):
         calls.append("resume")
+        if resumes is not None:
+            resumes.append(request)
         if resume_raises:
             raise FakeRpcError()
         return resume_result
@@ -57,31 +66,51 @@ def _wire(monkeypatch, resume_result=None, resume_raises=False,
     return calls
 
 
-def test_no_resume_leaves_the_runtime_released(monkeypatch, events):
-    calls = _wire(monkeypatch)
+def test_no_resume_ends_the_handover_but_keeps_detection_stopped(monkeypatch, events):
+    # The post-training handoff: the conversion keeps the GPU (detection is
+    # not restarted), but the handover ends so the application type can change
+    # again.
+    resumes = []
+    calls = _wire(monkeypatch, resumes=resumes,
+                  resume_result=SimpleNamespace(success=True, message="ended"))
     ok, message = session._do_exit(resume_detection=False)
     assert ok
     assert "conversion" in message
-    assert "resume" not in calls, "the runtime must stay released"
+    assert calls == ["unload_sam", "unload_label_model", "get_training", "resume"]
+    assert [r.keep_detection_stopped for r in resumes] == [True]
+    assert events == [("detection_state_changed", {"is_running": False})]
+
+
+def test_ending_the_handover_on_exit_is_best_effort(monkeypatch, events):
+    _wire(monkeypatch, resume_raises=True)
+    ok, message = session._do_exit(resume_detection=False)
+    assert ok
+    assert "conversion" in message
     assert events == [("detection_state_changed", {"is_running": False})]
 
 
 def test_resume_success(monkeypatch, events):
-    calls = _wire(monkeypatch,
+    resumes = []
+    calls = _wire(monkeypatch, resumes=resumes,
                   resume_result=SimpleNamespace(success=True, message="resumed"))
     ok, message = session._do_exit(resume_detection=True)
     assert (ok, message) == (True, "resumed")
     assert calls == ["unload_sam", "unload_label_model", "get_training", "resume"]
+    assert [r.keep_detection_stopped for r in resumes] == [False]
     assert events == [("detection_state_changed", {"is_running": True})]
 
 
+@pytest.mark.parametrize("resume_detection", [True, False])
 @pytest.mark.parametrize("job_status", ["preparing", "training", "uploading"])
-def test_resume_is_skipped_while_a_training_job_runs(monkeypatch, events, job_status):
+def test_resume_is_skipped_while_a_training_job_runs(monkeypatch, events, job_status,
+                                                    resume_detection):
     # Leaving the training page mid-run must not restart detection on top of
-    # the trainer: the runtime stays released, like the conversion handoff.
+    # the trainer, nor end the handover the trainer still holds (an application
+    # switch would then pass the inference-service's check): the runtime stays
+    # released, like the conversion handoff.
     calls = _wire(monkeypatch, job_status=job_status,
                   resume_result=SimpleNamespace(success=True, message="resumed"))
-    ok, message = session._do_exit(resume_detection=True)
+    ok, message = session._do_exit(resume_detection=resume_detection)
     assert ok
     assert "training" in message
     assert "resume" not in calls, "the runtime must stay released"

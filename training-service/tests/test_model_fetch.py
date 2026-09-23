@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for fetching device-model checkpoints through the gateway."""
 import pytest
 import service.model_fetch as mf
@@ -57,7 +61,16 @@ class TestListModelsWithWeights:
                            {"name": "c.onnx"}, "junk"]}
         monkeypatch.setattr(mf.requests, "get",
                             lambda url, timeout: FakeResponse(body=body))
-        assert list_models_with_weights("http://gw") == ["a.engine"]
+        # A model listed without a task (older inference-service) is detection.
+        assert list_models_with_weights("http://gw") == {"a.engine": "detect"}
+
+    def test_reports_each_model_task(self, monkeypatch):
+        body = {"models": [{"name": "pets.engine", "has_weights": True, "task": "classify"},
+                           {"name": "parts.engine", "has_weights": True, "task": "detect"}]}
+        monkeypatch.setattr(mf.requests, "get",
+                            lambda url, timeout: FakeResponse(body=body))
+        assert list_models_with_weights("http://gw") == {"pets.engine": "classify",
+                                                         "parts.engine": "detect"}
 
     def test_gateway_error_propagates(self, monkeypatch):
         monkeypatch.setattr(mf.requests, "get",

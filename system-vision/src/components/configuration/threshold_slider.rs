@@ -1,8 +1,9 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use leptos::prelude::*;
 
-/// The `ThresholdSlider` view component.
 #[component]
 pub fn ThresholdSlider(
     /// Accepts plain `&str` literals and reactive closures (translated labels
@@ -34,6 +35,9 @@ pub fn ThresholdSlider(
         }
     };
 
+    // The heading does not label the range input, so it repeats as its accessible name.
+    let aria_label = label.clone();
+
     view! {
         <div class="mb-4">
             <h3 class="ui-section-title mb-2">{move || label.get()}</h3>
@@ -48,6 +52,7 @@ pub fn ThresholdSlider(
                     on:change=on_commit
                     disabled=disabled
                     title=move || title.get()
+                    aria-label=move || aria_label.get()
                     class="ui-range"
                 />
                 <span class="ui-value min-w-12 text-center text-sm">

@@ -1,9 +1,16 @@
-//! Leptos UI components for the web frontend.
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::app::SystemStatus;
+use crate::apps::classification::ClassificationPanel;
+use crate::apps::face_recognition::IdentityPanel;
+use crate::apps::segmentation::SegmentationLegend;
+use crate::components::application_select::use_application;
 use crate::components::area_chips::AreaView;
 use crate::components::panel_header::PanelHeader;
 use crate::i18n::*;
+use crate::models::Task;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -11,7 +18,6 @@ use crate::api;
 
 use super::video_content::VideoContent;
 
-/// The `LiveVideoStream` view component.
 #[component]
 pub fn LiveVideoStream(
     status: ReadSignal<Option<SystemStatus>>,
@@ -30,6 +36,22 @@ pub fn LiveVideoStream(
     // Shared open-panel id for the stream overlays (0 = none). Keeps the stereo
     // and image-adjustment panels mutually exclusive.
     let panel = RwSignal::new(0u8);
+
+    // Detection areas belong to object detection; a classifier judges the
+    // whole frame and shows its result in a panel under the video instead.
+    let application = use_application();
+    let classify = Memo::new(move |_| application.task() == Some(Task::Classify));
+    // Segmentation keeps the areas and names the frame's objects by class
+    // under the video (the masks are drawn on the stream).
+    let segment = Memo::new(move |_| application.task() == Some(Task::Segment));
+    // Face recognition keeps the areas too (the boxes and names are drawn on
+    // the stream) and lists the people in the frame under the video.
+    let face = Memo::new(move |_| application.task() == Some(Task::Face));
+    let running = Memo::new(move |_| {
+        status
+            .get()
+            .is_some_and(|s| s.is_running && s.camera_connected)
+    });
 
     let editing_id: Signal<Option<String>> = Signal::derive(move || {
         areas
@@ -71,16 +93,18 @@ pub fn LiveVideoStream(
         };
     }
 
-    // Initial load on mount.
+    // Initial load on mount (and when the application becomes detection).
     Effect::new(move |_| {
-        spawn_api!(api::list_detection_areas());
+        if !classify.get() {
+            spawn_api!(api::list_detection_areas());
+        }
     });
 
     // Re-fetch areas when a different model is selected (areas are per-model).
     // Skip the initial run - the mount Effect above already loads them.
     Effect::new(move |prev: Option<u32>| {
         let key = model_refresh.get();
-        if prev.is_some() {
+        if prev.is_some() && !classify.get_untracked() {
             spawn_api!(api::list_detection_areas());
         }
         key
@@ -152,6 +176,9 @@ pub fn LiveVideoStream(
                 on_save=on_save
                 on_cancel=on_cancel_editing
             />
+            {move || (classify.get() && running.get()).then(|| view! { <ClassificationPanel /> })}
+            {move || (segment.get() && running.get()).then(|| view! { <SegmentationLegend /> })}
+            {move || (face.get() && running.get()).then(|| view! { <IdentityPanel /> })}
         </div>
     }
 }

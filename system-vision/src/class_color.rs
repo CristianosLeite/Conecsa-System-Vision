@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `"name #hex"` class convention, shared by every renderer.
 //!
 //! A class entry is either `name` or `name #rgb` / `name #rrggbb`. The name is
@@ -6,7 +10,7 @@
 //! name.
 //!
 //! When a class carries no hex, the color falls back to a palette that is a
-//! port of the inference service's `generate_colors` (`api/utils.py`) — same
+//! port of the inference-service's `generate_colors` (`api/utils.py`) — same
 //! base list, same HSV spread beyond it — so an uncolored class looks the same
 //! in the label editor as it does on the burned-in live stream.
 
@@ -58,6 +62,16 @@ pub fn class_display_name(entry: &str) -> String {
     } else {
         name
     }
+}
+
+/// The class name a face nobody matches carries (`conecsa_common.tasks.UNKNOWN_FACE`).
+pub const UNKNOWN_FACE: &str = "unknown";
+
+/// True when `entry` is the reserved [`UNKNOWN_FACE`] name in any letter case,
+/// with or without a `#hex` suffix: it can never name an enrolled person, or a
+/// stranger and that person would be indistinguishable.
+pub fn is_reserved_person_name(entry: &str) -> bool {
+    class_display_name(entry).eq_ignore_ascii_case(UNKNOWN_FACE)
 }
 
 /// The palette color for a class with no explicit hex.

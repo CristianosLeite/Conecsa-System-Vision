@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Direct V4L2 capture paths (bypassing nokhwa): MJPEG passthrough and raw
 //! Bayer/greyscale capture loops.
 
@@ -150,7 +154,7 @@ impl WebcamServer {
         // Apply exposure/gamma/gain in hardware. RGB levels are applied
         // downstream by the inference-service on the decoded frame (this camera
         // has no red/blue balance controls), so passthrough stays fast and we
-        // never bail to the slow nokhwa decode path for a colour change.
+        // never bail to the slow nokhwa decode path for a color change.
         let rgb_hw = Self::apply_exposure(cfg.camera_index, cfg);
         rgb_hardware_supported.store(rgb_hw, Ordering::Relaxed);
 

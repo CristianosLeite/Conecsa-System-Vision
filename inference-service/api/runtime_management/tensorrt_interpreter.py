@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 TensorRT interpreter: a native Python-API wrapper exposing the small
 interpreter surface ModelManager uses.
@@ -12,7 +16,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 # noinspection PyPackageRequirements
-import numpy as np  # Package is included on os build.
+import numpy as np  # ships in conecsa-os-base:base
 
 from api.runtime_management._trt_engine_builder import (
     build_engine as build_engine_from_onnx,
@@ -29,7 +33,6 @@ logger = logging.getLogger(__name__)
 class TensorRTInterpreter:
     """
     TensorRT interpreter with the small interpreter interface ModelManager uses.
-    Provides seamless integration with existing model management code.
     """
 
     def __init__(self, model_path: str, use_cuda: bool = True):
@@ -43,8 +46,8 @@ class TensorRTInterpreter:
         ensure_cudla_compat()
         # noinspection PyPackageRequirements
         # noinspection PyPackageRequirements
-        import pycuda.driver as cuda  # type: ignore  # Package is included on os build.
-        import tensorrt as trt  # type: ignore  # Package is included on os build.
+        import pycuda.driver as cuda  # type: ignore  # ships in conecsa-os-base:base
+        import tensorrt as trt  # type: ignore  # ships in conecsa-os-base:base
 
         self.trt = trt  # type: ignore
         self.cuda = cuda  # type: ignore
@@ -60,20 +63,17 @@ class TensorRTInterpreter:
         self.engine: Any = None
         self.context: Any = None
 
-        # Tensor information
         self._input_details: List[Dict[str, Any]] = []
         self._output_details: List[Dict[str, Any]] = []
 
-        # CUDA memory buffers
+        # Device buffers, the context's tensor addresses and their host mirrors.
         self._input_buffers: List[Any] = []
         self._output_buffers: List[Any] = []
         self._bindings: List[int] = []
 
-        # Host memory for input/output
         self._input_host: List[np.ndarray] = []
         self._output_host: List[np.ndarray] = []
 
-        # Load the engine
         self._load_engine()
 
     def _load_engine(self):
@@ -200,7 +200,7 @@ class TensorRTInterpreter:
         # Reset binding/buffer lists. Without this, a rebuild_engine_from_onnx
         # call on an existing interpreter would APPEND new pycuda mem_alloc()
         # handles + numpy buffers to the lists, leaking the previous engine's
-        # device memory every time (root cause of the TRT worker process
+        # device memory every time (root cause of the TensorRT worker process
         # reaching VmPeak 10.6 GB on the Yocto host).
         self._bindings.clear()
         self._input_buffers.clear()
@@ -218,19 +218,14 @@ class TensorRTInterpreter:
             tensor_shape = self.engine.get_tensor_shape(tensor_name)
             tensor_dtype = self.engine.get_tensor_dtype(tensor_name)
 
-            # Convert TensorRT dtype to numpy dtype
             np_dtype = self._get_numpy_dtype(tensor_dtype)
 
-            # Calculate tensor size
             tensor_size = int(np.prod(tensor_shape)) * int(np_dtype().itemsize)
 
-            # Allocate device memory
             device_mem = self._allocate_tensor_memory(tensor_size)
 
-            # Allocate host memory
             host_mem = np.empty(tensor_shape, dtype=np_dtype)
 
-            # Classify as input or output and create tensor info
             is_input = self.engine.get_tensor_mode(tensor_name) == self.trt.TensorIOMode.INPUT  # type: ignore
 
             if is_input:
@@ -272,13 +267,10 @@ class TensorRTInterpreter:
         expected_shape = self._input_details[tensor_index]['shape']
         expected_dtype = self._input_details[tensor_index]['dtype']
 
-        # Ensure correct shape and dtype
         value = np.ascontiguousarray(value.reshape(expected_shape).astype(expected_dtype))
 
-        # Copy to host memory
         self._input_host[tensor_index][:] = value
 
-        # Copy to device memory if using CUDA
         if self.use_cuda and self._input_buffers[tensor_index] is not None:
             self.cuda.memcpy_htod(self._input_buffers[tensor_index], value)  # type: ignore
 
@@ -299,13 +291,12 @@ class TensorRTInterpreter:
 
     def _set_tensor_bindings(self):
         """Set input and output tensor bindings for TensorRT context."""
-        # Set input bindings
         for i, detail in enumerate(self._input_details):
             tensor_name = detail['name']
             address = self._bindings[i] if self.use_cuda else self._input_host[i].ctypes.data
             self.context.set_tensor_address(tensor_name, address)
 
-        # Set output bindings
+        # Output bindings follow the inputs in ``_bindings``.
         for i, detail in enumerate(self._output_details):
             tensor_name = detail['name']
             binding_idx = len(self._input_details) + i
@@ -324,13 +315,8 @@ class TensorRTInterpreter:
         if self.context is None:
             raise RuntimeError("TensorRT context not initialized")
 
-        # Set tensor bindings
         self._set_tensor_bindings()
-
-        # Execute inference
         self.context.execute_async_v3(stream_handle=0)
-
-        # Copy outputs from device to host
         self._copy_outputs_to_host()
 
     def close(self):

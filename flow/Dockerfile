@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Custom Node-RED image with Conecsa nodes pre-installed.
 # Pinned by digest (what :latest resolved to on 2026-08-19) so a registry-side
 # retag can never change what ships; bump deliberately by updating the digest.
@@ -6,7 +10,6 @@ FROM nodered/node-red@sha256:10f40d0a83e7e5852b13d4d472b2006b05b1cca6d55e2f29a55
 # Install theme collection (pinned; no floating latest)
 RUN npm install --prefix /usr/src/node-red @node-red-contrib-themes/theme-collection@5.0.1
 
-# Copy custom node package
 COPY nodes/conecsa-system-vision /usr/src/node-red/node_modules/@conecsa/node-red-contrib-conecsa-system-vision
 
 # Config + initial flow are baked into a seed dir; the entrypoint refreshes the

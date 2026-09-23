@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Script to compile Protocol Buffers for both Rust and Python
 # All .proto files live in the root proto/ directory.
 #

@@ -51,7 +51,11 @@ nodes use the `INFERENCE_URL` environment variable, then
 `http://api-gateway:5000`.
 
 Import → Examples → *@conecsa/node-red-contrib-conecsa-system-vision* has a ready flow
-for each mode.
+for each mode, plus **face-access**: a face recognition device releasing a GPIO
+pin only when a badge presented at a reader and the badge holder's recognized
+face arrive within a few seconds of each other (face recognition has no
+liveness check, so a name is never the only credential; the inject node stands
+in for the reader).
 
 ## Nodes
 
@@ -62,7 +66,7 @@ All nodes live in the **Conecsa** palette category.
 | **start/stop** (`conecsa-start-stop`) | Starts/stops/toggles detection. Follows the device's event stream so its badge and output reflect `is_running` whoever changed it; emits `{ payload: { is_running } }` on each transition. |
 | **camera-trigger** (`conecsa-camera-trigger`) | Enables/disables/toggles frame processing with a visual state indicator. |
 | **stats** (`conecsa-stats`) | Subscribes to the stats stream; emits `{ detections, fps, inference_time, frames_with_detections }` on change or on an interval. |
-| **detection** (`conecsa-detection`) | Per-class breakdown of the current detections (optionally with the processed frame as base64), on change or on an interval. |
+| **detection** (`conecsa-detection`) | Per-class breakdown of the current results (optionally with the processed frame as base64), on change or on an interval; emits only while `total > 0`. `payload.task` names the device's application: on a classification device the payload holds one item without `bbox` (the frame's class above the confidence threshold) and the top-k classes under `payload.candidates`. On a segmentation device each item also carries `polygons` (its outline as rings of normalized `[x, y]` vertices). On a face recognition device each item is one face, in the detection shape, whose `class_name` is the recognized person's name (or `unknown`) and whose `confidence` is the similarity to that person. |
 | **threshold** (`conecsa-threshold`) | Sets the confidence or overlay threshold (0–1); stays in sync with the device. |
 | **detection models** (`conecsa-detection-models`) | Lists the available models or selects the active one by name. |
 | **system status** (`conecsa-system-status`) | CPU, RAM, disk, temperature and GPU metrics on demand or on an interval. |

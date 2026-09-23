@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Detection buffer service - store-and-forward for hub outages.
 
@@ -8,7 +12,9 @@ detection results (same change semantics as the hub collector: class@area
 counts + total + model) are persisted to a small SQLite ring buffer on disk,
 so they survive a device reboot. The hub drains them on reconnect via
 ``ListBacklog`` and only after it confirms persistence (``AckBacklog``) are
-the local rows deleted.
+the local rows deleted. Each record keeps the task that produced it: records
+outlive an application switch, so the device's current task says nothing about
+a buffered one.
 
 Buffering never starts before the first hub contact of the device's lifetime
 (persisted ``hub_seen`` flag), so a standalone device never fills its eMMC.
@@ -23,7 +29,7 @@ import json
 import logging
 import sqlite3
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from conecsa_common import BoundedSqliteQueue
 
@@ -67,7 +73,7 @@ def signature(detections: list, total: int, model: str) -> str:
 def _encode_jpeg(image) -> Optional[bytes]:
     """JPEG-encode a BGR frame (quality 80, matching the snapshot encoder)."""
     # noinspection PyPackageRequirements
-    import cv2  # Package is included on os build; lazy so tests can stub this.
+    import cv2  # ships in conecsa-os-base:base; lazy so tests can stub this.
     ok, buf = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80])
     if not ok:
         return None
@@ -94,8 +100,14 @@ class DetectionBufferService(BoundedSqliteQueue):
         max_bytes: int,
         offline_threshold_s: float,
         clock=time.monotonic,
+        sample_interval_s: float = 1.0,
     ):
         self._offline_threshold_s = offline_threshold_s
+        # Offline, frames are compared at the hub's polling cadence rather than
+        # every frame, so a flickering set records what the hub would have
+        # stored live (at most one row per interval), not one row per flip.
+        self._sample_interval_s = sample_interval_s
+        self._last_sample: Optional[float] = None
         self._hub_seen = False
         self._last_sig: Optional[str] = None
         # No pull yet = offline: a device rebooting mid-outage must buffer the
@@ -159,23 +171,38 @@ class DetectionBufferService(BoundedSqliteQueue):
     # ── producer (single pipeline-finish thread) ─────────────────────────────
 
     def observe(self, detections: list, total: int, model: str,
-                raw_image, processed_image) -> None:
+                raw_image, processed_image, task: Optional[str] = None,
+                record_detections: Optional[Callable[[], list]] = None) -> None:
         """Consider one finished frame for buffering.
 
         Always tracks the change signature (so the first offline frame that
         equals the last state the hub saw is not re-recorded); writes a row
         only when the hub is offline, the set changed, is non-empty, and the
-        hub has been seen at least once in this device's lifetime.
+        hub has been seen at least once in this device's lifetime. ``task``
+        is the task of the strategy that produced the frame, stored with the
+        record (rows written before this field existed have none).
+        ``record_detections``, when given, builds the items the record stores
+        in place of ``detections`` (called only for a record: it can hold
+        segmentation rings that the signature never reads).
         """
         if self._disabled:
             return
         sig = signature(detections, total, model)
         with self._lock:
+            if not self._offline():
+                # The live hub covers this state; track it so the first
+                # offline sample that equals it is not re-recorded.
+                self._last_sig = sig
+                self._last_sample = None
+                return
+            now = self._clock()
+            if (self._last_sample is not None
+                    and now - self._last_sample < self._sample_interval_s):
+                return
+            self._last_sample = now
             changed = sig != self._last_sig
             self._last_sig = sig
             if not (self._hub_seen and changed and total > 0):
-                return
-            if not self._offline():
                 return
         # Encode outside the lock: JPEG compression is the expensive step, and
         # holding the lock through it would stall the drain RPCs
@@ -183,9 +210,11 @@ class DetectionBufferService(BoundedSqliteQueue):
         frame_is_raw = raw_image is not None
         image = raw_image if frame_is_raw else processed_image
         frame_bytes = _encode_jpeg(image) if image is not None else None
-        payload = json.dumps(
-            {"detections": detections, "total": total, "model": model}
-        )
+        stored = record_detections() if record_detections is not None else detections
+        record = {"detections": stored, "total": total, "model": model}
+        if task:
+            record["task"] = task
+        payload = json.dumps(record)
         size = len(payload) + len(frame_bytes or b"")
         with self._lock:
             # Re-check: a hub pull may have landed while encoding (the live

@@ -11,8 +11,8 @@
 #
 # The clock is only ever moved FORWARD. The saved stamp is a floor, not an
 # authority: whatever real time source appears later (the hub, over the pairing
-# handshake or the status poll — see gateway/clock.py — or timesyncd where
-# there is internet) refines it. The `os` hardware agent writes the same file
+# handshake or the status poll — see api-gateway/gateway/clock.py — or timesyncd
+# where there is internet) refines it. The os-base hardware agent writes the same file
 # whenever it accepts a time from the hub, so an acquired time survives an
 # abrupt power cut without waiting for the save timer.
 #

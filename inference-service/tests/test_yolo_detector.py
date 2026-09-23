@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Unit tests for YOLODetector confidence filtering and output decoding."""
 import numpy as np
 import pytest
@@ -167,6 +171,40 @@ class TestEndToEndProcess:
         assert count == 0
         assert detections == []
         assert img.shape == (480, 640, 3)
+
+
+class TestOneToManyDegenerateBoxes:
+    """Single-class one-to-many rows [x, y, w, h, conf] in pixel space.
+
+    A candidate with a non-positive width or height is dropped on its own;
+    it must not discard the valid boxes of the same frame.
+    """
+
+    @staticmethod
+    def process(detector, rows):
+        output = np.zeros((1, 5, 8400), dtype=np.float32)
+        for i, row in enumerate(rows):
+            output[0, :, i] = row
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        return detector.process_detections(output, frame)
+
+    def test_valid_box_survives_a_degenerate_neighbour(self):
+        detector = make_detector(0.5)
+        _, count, detections = self.process(detector, [
+            [320, 240, 100, 80, 0.9],
+            [100, 100, 0, 50, 0.8],
+            [200, 200, -40, 30, 0.7],
+        ])
+        assert count == len(detections) == 1
+        assert abs(detections[0].confidence - 0.9) < 1e-6
+
+    def test_only_degenerate_boxes_yield_nothing(self):
+        detector = make_detector(0.5)
+        _, count, detections = self.process(detector, [
+            [100, 100, 0, 50, 0.8],
+            [200, 200, 30, 0, 0.7],
+        ])
+        assert (count, detections) == (0, [])
 
 
 # ---------------------------------------------------------------------------

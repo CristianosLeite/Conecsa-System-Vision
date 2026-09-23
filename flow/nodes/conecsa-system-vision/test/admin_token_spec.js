@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The editor-token verifier must accept exactly what gateway/flow_token.py
 // mints (same secret, same format) and nothing else.
 const crypto = require("crypto");

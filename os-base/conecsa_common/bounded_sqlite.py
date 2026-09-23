@@ -1,9 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Bounded SQLite ring queue — the shared core of the device's durable buffers.
 
 Two services keep a small store-and-forward ring on disk that the hub drains
 over mTLS: the inference-service's detection buffer and the api-gateway's
-audit trail. They used to be ~200-line near-copies of the same machinery;
-this base class owns that machinery once:
+audit trail. This base class owns their shared machinery:
 
 - one connection (WAL, ``busy_timeout``) serialized by one lock;
 - record/byte caps enforced by oldest-first eviction (ring semantics);
@@ -128,8 +131,8 @@ class BoundedSqliteQueue:
 
         ``device_now`` and each ``captured_at`` come from the same wall clock,
         so the hub can rebase them onto its own timeline as relative offsets
-        even when this device's absolute clock is wrong — which it is on every
-        boot, since the hardware has no RTC battery.
+        even when this device's absolute clock is wrong (no RTC battery; see
+        os-base/agent/time_agent.py).
         """
         limit = max(1, min(int(limit) or self.DEFAULT_PAGE_LIMIT,
                            self.MAX_PAGE_LIMIT))

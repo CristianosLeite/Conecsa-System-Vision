@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit tests for the dataset editor's pure decision helpers (headless browser).
 use super::*;
 use wasm_bindgen_test::*;
@@ -22,7 +26,7 @@ fn done_after_active_finishes_with_conversion_handoff() {
         "status": "done", "conversion_job_id": "c1", "model_name": "m"
     }));
     assert_eq!(
-        job_transition("training", &j, true),
+        job_transition("training", &j, true, Task::Detect),
         JobTransition::Finished {
             pending: Some(PendingConversion {
                 job_id: "c1".into(),
@@ -34,10 +38,27 @@ fn done_after_active_finishes_with_conversion_handoff() {
 }
 
 #[wasm_bindgen_test]
+fn a_finished_face_run_hands_off_its_faces_package() {
+    let j = job(serde_json::json!({
+        "status": "done", "conversion_job_id": "c1", "model_name": "staff"
+    }));
+    assert_eq!(
+        job_transition("training", &j, true, Task::Face),
+        JobTransition::Finished {
+            pending: Some(PendingConversion {
+                job_id: "c1".into(),
+                filename: "staff.faces".into(),
+                elapsed_secs: 0.0,
+            })
+        }
+    );
+}
+
+#[wasm_bindgen_test]
 fn done_without_conversion_id_finishes_with_no_pending() {
     let j = job(serde_json::json!({ "status": "done", "model_name": "m" }));
     assert_eq!(
-        job_transition("training", &j, true),
+        job_transition("training", &j, true, Task::Detect),
         JobTransition::Finished { pending: None }
     );
 }
@@ -48,7 +69,7 @@ fn done_with_unseeded_baseline_still_finishes() {
     // previous status cannot tell a stale "done" from a fresh one.
     let j = job(serde_json::json!({ "status": "done" }));
     assert!(matches!(
-        job_transition("", &j, false),
+        job_transition("", &j, false, Task::Detect),
         JobTransition::Finished { .. }
     ));
 }
@@ -56,7 +77,7 @@ fn done_with_unseeded_baseline_still_finishes() {
 #[wasm_bindgen_test]
 fn stale_done_from_previous_session_is_not_a_completion() {
     let j = job(serde_json::json!({ "status": "done" }));
-    let t = job_transition("done", &j, true);
+    let t = job_transition("done", &j, true, Task::Detect);
     assert!(!matches!(t, JobTransition::Finished { .. }));
     assert_eq!(t, JobTransition::Update);
 }
@@ -64,26 +85,26 @@ fn stale_done_from_previous_session_is_not_a_completion() {
 #[wasm_bindgen_test]
 fn failed_with_empty_prev_is_ignored() {
     let j = job(serde_json::json!({ "status": "failed" }));
-    assert_eq!(job_transition("", &j, false), JobTransition::Ignore);
+    assert_eq!(job_transition("", &j, false, Task::Detect), JobTransition::Ignore);
 }
 
 #[wasm_bindgen_test]
 fn failed_after_active_prev_reports_failure() {
     let j = job(serde_json::json!({ "status": "failed" }));
-    assert_eq!(job_transition("training", &j, true), JobTransition::Failed);
+    assert_eq!(job_transition("training", &j, true, Task::Detect), JobTransition::Failed);
 }
 
 #[wasm_bindgen_test]
 fn repeated_failed_is_a_plain_update() {
     let j = job(serde_json::json!({ "status": "failed" }));
-    assert_eq!(job_transition("failed", &j, true), JobTransition::Update);
+    assert_eq!(job_transition("failed", &j, true, Task::Detect), JobTransition::Update);
 }
 
 #[wasm_bindgen_test]
 fn canceled_after_active_prev_reports_cancel() {
     let j = job(serde_json::json!({ "status": "canceled" }));
     assert_eq!(
-        job_transition("training", &j, true),
+        job_transition("training", &j, true, Task::Detect),
         JobTransition::Canceled
     );
 }
@@ -91,25 +112,25 @@ fn canceled_after_active_prev_reports_cancel() {
 #[wasm_bindgen_test]
 fn canceled_with_empty_prev_is_ignored() {
     let j = job(serde_json::json!({ "status": "canceled" }));
-    assert_eq!(job_transition("", &j, false), JobTransition::Ignore);
+    assert_eq!(job_transition("", &j, false, Task::Detect), JobTransition::Ignore);
 }
 
 #[wasm_bindgen_test]
 fn active_job_updates_even_without_prior_job() {
     let j = job(serde_json::json!({ "status": "training" }));
-    assert_eq!(job_transition("", &j, false), JobTransition::Update);
+    assert_eq!(job_transition("", &j, false, Task::Detect), JobTransition::Update);
 }
 
 #[wasm_bindgen_test]
 fn idle_without_prior_job_is_ignored() {
     let j = job(serde_json::json!({ "status": "idle" }));
-    assert_eq!(job_transition("", &j, false), JobTransition::Ignore);
+    assert_eq!(job_transition("", &j, false, Task::Detect), JobTransition::Ignore);
 }
 
 #[wasm_bindgen_test]
 fn idle_with_prior_job_updates() {
     let j = job(serde_json::json!({ "status": "idle" }));
-    assert_eq!(job_transition("training", &j, true), JobTransition::Update);
+    assert_eq!(job_transition("training", &j, true, Task::Detect), JobTransition::Update);
 }
 
 // ── active class arithmetic ──────────────────────────────────────────────────
@@ -241,4 +262,67 @@ fn labeled_count_counts_only_labeled_images() {
     .unwrap();
     assert_eq!(labeled_count(&images), 2);
     assert_eq!(labeled_count(&[]), 0);
+}
+
+// ── classification gate ──────────────────────────────────────────────────────
+
+#[wasm_bindgen_test]
+fn labeled_class_count_counts_distinct_image_classes() {
+    let images: Vec<TrainingImageInfo> = serde_json::from_value(serde_json::json!([
+        { "image_id": "a", "created_at": 0, "labeled": true, "box_count": 0, "image_class": 0 },
+        { "image_id": "b", "created_at": 0, "labeled": true, "box_count": 0, "image_class": 0 },
+        { "image_id": "c", "created_at": 0, "labeled": false, "box_count": 0 },
+        { "image_id": "d", "created_at": 0, "labeled": true, "box_count": 0, "image_class": 2 }
+    ]))
+    .unwrap();
+    // Class 0 is a real class; the unlabeled image counts for nothing.
+    assert_eq!(labeled_class_count(&images), 2);
+    assert_eq!(labeled_class_count(&images[..2]), 1);
+    assert_eq!(labeled_class_count(&[]), 0);
+}
+
+#[wasm_bindgen_test]
+fn a_classifier_needs_min_images_and_two_labeled_classes() {
+    assert!(can_train_classify(20, 20, 2));
+    assert!(!can_train_classify(20, 20, 1));
+    assert!(!can_train_classify(19, 20, 2));
+}
+
+// ── face gallery gate ────────────────────────────────────────────────────────
+
+#[wasm_bindgen_test]
+fn a_face_gallery_needs_one_person_with_one_labeled_photo() {
+    assert!(can_train_face(1));
+    assert!(can_train_face(3));
+    assert!(!can_train_face(0));
+}
+
+fn polygon(instance: u32) -> LabelPolygon {
+    LabelPolygon {
+        class_id: 0,
+        instance,
+        points: vec![[0.1, 0.1], [0.2, 0.1], [0.2, 0.2]],
+    }
+}
+
+#[wasm_bindgen_test]
+fn new_objects_get_the_next_free_instance() {
+    assert_eq!(next_instance(&[]), 0);
+    assert_eq!(next_instance(&[polygon(0), polygon(3), polygon(3)]), 4);
+}
+
+#[wasm_bindgen_test]
+fn an_accepted_suggestion_keeps_its_mask_or_promotes_its_box() {
+    let b = LabelBox {
+        class_id: 0,
+        cx: 0.5,
+        cy: 0.5,
+        w: 0.2,
+        h: 0.4,
+    };
+    let mask = vec![vec![[0.45, 0.35], [0.55, 0.35], [0.5, 0.65]]];
+    assert_eq!(suggestion_rings(&b, Some(&mask)), mask);
+    let promoted = suggestion_rings(&b, None);
+    assert_eq!((promoted.len(), promoted[0].len()), (1, 4));
+    assert_eq!(suggestion_rings(&b, Some(&Vec::new())), promoted);
 }

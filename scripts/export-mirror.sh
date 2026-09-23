@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # export-mirror.sh — export the open-source tree to the public mirror repo.
 #
@@ -20,7 +25,7 @@
 # manual, reviewed step.
 #
 # Usage:
-#   scripts/export-mirror.sh                       # stage + sync to ../conecsa-object-detection-public
+#   scripts/export-mirror.sh                       # stage + sync to ../conecsa-system-vision
 #   scripts/export-mirror.sh --ref v2026.2 --commit
 #   scripts/export-mirror.sh --out /tmp/mirror-check   # dry destination for inspection
 set -euo pipefail
@@ -29,7 +34,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 REF="HEAD"
-OUT="$REPO_ROOT/../conecsa-object-detection-public"
+OUT="$REPO_ROOT/../conecsa-system-vision"
 DO_COMMIT=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -72,6 +77,12 @@ ALLOWLIST=(
   pyrightconfig.json
   README.md
   TRADEMARKS.md
+  # Licensing: the root AGPL text, every license text in use, the REUSE
+  # annotations and the contribution terms (inbound = outbound, no CLA).
+  LICENSE
+  LICENSES
+  REUSE.toml
+  CONTRIBUTING.md
   .gitignore
   .dockerignore
 )
@@ -84,11 +95,21 @@ EXCLUDES=(
   "scripts/build-hub.sh"
   "scripts/build-hub-jetson.sh"
   "scripts/check-hub-builder.sh"
+  # Builds the closed hub crate to generate enrollment test certificates;
+  # init.sh runs it only when present, and the tests skip without it.
+  "scripts/gen-enroll-fixtures.sh"
+  # Pins the tool that generates the closed hub's third-party notices.
+  "scripts/cargo-about.pin"
   # The interactive user manual is private (manual/ links hub-vision); its
   # build/publish scripts would fail immediately on the mirror.
   "scripts/build-manual.sh"
   "scripts/publish-manual.sh"
   "system-vision/public/Good Times Rg.otf"
+  # License texts used only by files that never reach the mirror (the private
+  # trees and the commercial font above): exported, REUSE would fail on them as
+  # unused.
+  "LICENSES/LicenseRef-Conecsa-Proprietary.txt"
+  "LICENSES/LicenseRef-Typodermic-Commercial.txt"
   # Hub deployment glue (weston kiosk wrapper): no hub source, but reveals the
   # closed hub's runtime/KEK details and depends on the excluded
   # build-hub-jetson.sh. conecsa-image.bb installs it conditionally, only when

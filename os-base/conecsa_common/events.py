@@ -1,14 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """In-process event bus shared by the inference and training services.
 
 Publishes lightweight invalidation events that a gRPC server stream relays to
 the api-gateway, which republishes them over SSE so every client surface (web
 UI, Node-RED, curl-driven flows) can reconcile with the backend state. The
-two services used to carry near-copies of this class and had already drifted:
-only one of them forced a snapshot when a subscriber fell behind the replay
-buffer. The transport-neutral logic lives here; each service configures its
-event source, its snapshot keys and whether it uses the stats channel.
+transport-neutral logic lives here; each service configures its event source,
+its snapshot keys and whether it uses the stats channel.
 
-Dependency-free (stdlib only), like the rest of ``conecsa_common``.
+This module is dependency-free (stdlib only).
 """
 import threading
 import time

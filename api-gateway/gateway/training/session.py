@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Training session lifecycle: GPU handover (enter/exit) and the CPU-only
 combined camera preview."""
 import logging
@@ -26,10 +30,11 @@ def _do_exit(resume_detection: bool) -> tuple[bool, str]:
 
     Shared by the /training/exit route and the orphan watchdog. Returns
     ``(success, message)``; raises ``grpc.RpcError`` when the resume RPC
-    itself fails (callers map/log it). A resume is never performed while a
-    training job is active: the trainer owns the GPU, so leaving the training
-    page mid-run keeps detection stopped (the dashboard's Start stays disabled
-    until the job ends), exactly like the post-training conversion handoff.
+    itself fails (callers map/log it). While a training job is active the
+    handover is left alone, whatever ``resume_detection`` asks: the trainer
+    owns the GPU, so leaving the training page mid-run keeps detection stopped
+    (the dashboard's Start stays disabled until the job ends) and the
+    application type locked, exactly like the post-training conversion handover.
     """
     # Best-effort unload of both labeling assistants first (SAM3 in the
     # training-service, the labeling engine in the inference-service);
@@ -43,16 +48,25 @@ def _do_exit(resume_detection: bool) -> tuple[bool, str]:
     except grpc.RpcError as exc:
         logger.warning("UnloadLabelModel on exit failed: %s", exc)
 
-    if resume_detection and training_job_active():
+    if training_job_active():
         event_service.publish("detection_state_changed", keys=["status"],
                               data={"is_running": False})
         return True, "Inference left stopped: a model training is in progress"
     if not resume_detection:
+        # End the GPU handover without restarting detection: the runtime stays
+        # unloaded for the model conversion, but the application type can
+        # change again. Best-effort, like the unloads above:
+        # an explicit Start ends the handover too.
+        try:
+            clients.management.ResumeRuntime(
+                inf.ResumeRuntimeRequest(keep_detection_stopped=True))
+        except grpc.RpcError as exc:
+            logger.warning("Ending the GPU handover on exit failed: %s", exc)
         event_service.publish("detection_state_changed", keys=["status"],
                               data={"is_running": False})
         return True, "Inference left stopped for model conversion"
 
-    r = clients.management.ResumeRuntime(inf.Empty())
+    r = clients.management.ResumeRuntime(inf.ResumeRuntimeRequest())
     if not r.success:
         return False, r.message
     event_service.publish("detection_state_changed", keys=["status"],
@@ -102,14 +116,9 @@ def training_heartbeat():
     """POST /api/v1/training/heartbeat — keep the orphan watchdog fed.
 
     The device UI beats every ~10s while the training page is mounted; the
-    blueprint-level before_request hook (tracker.touch) is the entire effect,
-    which lets TRAINING_ORPHAN_TIMEOUT_SEC be short without auto-exiting a
-    user who is quietly labeling. Deliberately does NOT arm the tracker: an
-    in-flight beat racing a normal exit would re-arm it and fire a spurious
-    resume later. (Known pre-existing gap, unchanged: after a gateway restart
-    with no active job, _recover leaves the tracker disarmed.) The JSON body
-    exists because the frontend transport parses every response as JSON —
-    deliberately not a 204."""
+    blueprint's before_request hook (tracker.touch) is the whole effect. It
+    never arms the tracker, so a beat racing a normal exit cannot re-arm it.
+    Answers JSON, not 204, because the frontend parses every response as JSON."""
     return _json({"status": "ok"})
 
 

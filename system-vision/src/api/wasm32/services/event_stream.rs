@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Conecsa
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Application event stream consumer.
 //!
 //! Opens `/api/v1/events/stream?stats=1` and forwards each event to the
@@ -15,7 +19,6 @@ use web_sys::{EventSource, MessageEvent};
 
 use crate::app::get_api_base_url;
 
-/// An `AppEvent` struct.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppEvent {
     pub version: u64,
@@ -28,7 +31,6 @@ pub struct AppEvent {
     pub data: Value,
 }
 
-/// An `AppEventStreamHandle` struct.
 pub struct AppEventStreamHandle {
     es: EventSource,
     _on_message: Closure<dyn FnMut(MessageEvent)>,
@@ -36,19 +38,17 @@ pub struct AppEventStreamHandle {
 }
 
 impl Drop for AppEventStreamHandle {
-    /// Drop.
     fn drop(&mut self) {
         self.es.close();
     }
 }
 
-/// Subscribe app events.
 pub fn subscribe_app_events<F>(on_event: F) -> Result<AppEventStreamHandle, String>
 where
     F: Fn(AppEvent) + 'static,
 {
     // ?stats=1 opts this connection into the multiplexed high-rate stats
-    // channel, so the web UI needs a single SSE connection (events + stats).
+    // channel, so the device UI needs a single SSE connection (events + stats).
     // EventSource cannot set headers, so the hub-proxy capability (when
     // present) travels as ?cap= instead.
     let url = crate::components::access::with_cap(&format!(

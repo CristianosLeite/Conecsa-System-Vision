@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """
 Direct client for the wpa_supplicant control interface.
 
@@ -17,6 +21,7 @@ NOTE: never log PSKs — SET_NETWORK psk arguments are not echoed to the logger.
 import itertools
 import logging
 import os
+import re
 import socket
 import string
 import time
@@ -40,6 +45,10 @@ class WpaError(RuntimeError):
 # SET_NETWORK values are parsed by wpa_supplicant's config grammar: a
 # double-quoted string with backslash escapes, or a bare hex string. The
 # operator's SSID/passphrase must never be able to change that grammar.
+
+# One line of ``GET_CAPABILITY freq``: " 36 = 5180 MHz (NO_IR)" or " 44 = 5220 MHz".
+_FREQ_LINE = re.compile(r"^\s*(\d+)\s*=\s*(\d+)\s*MHz(.*)$")
+
 
 def encode_ssid(ssid: str) -> str:
     """Serialize an SSID for ``SET_NETWORK <id> ssid`` as its hex byte form.
@@ -77,10 +86,10 @@ def encode_psk(password: str) -> str:
     return f'"{escaped}"'
 
 
-class WpaCli:
-    """Stateless control-interface client for a single wireless interface.
+class WpaCtrl:
+    """Stateless control-socket client for a single wireless interface.
 
-    (Name kept for call-site compatibility; it no longer shells out to wpa_cli.)
+    Speaks the ``wpa_ctrl`` protocol over the socket in ``CTRL_DIR``.
     """
 
     def __init__(self, iface: str):
@@ -139,6 +148,38 @@ class WpaCli:
             if sep:
                 result[key.strip()] = value.strip()
         return result
+
+    def usable_frequencies(self) -> set[int]:
+        """Frequencies (MHz) the radio may *start* a network on right now.
+
+        ``GET_CAPABILITY freq`` lists every channel with the driver's live
+        regulatory flags. ``NO_IR`` (no initiating radiation) is not fixed per
+        channel: the driver lifts it on a channel once it has heard a beacon
+        there and puts it back after a while, so the set changes from one hour
+        to the next and is read at start time, never cached. ``DISABLED`` and
+        ``RADAR`` (DFS) channels are out as well. Raises :class:`WpaError` when
+        the daemon cannot say.
+        """
+        reply = self._cmd("GET_CAPABILITY freq")
+        if reply.strip() in ("", "FAIL"):
+            raise WpaError("GET_CAPABILITY freq returned " + (reply.strip() or "no reply"))
+        usable: set[int] = set()
+        for line in reply.splitlines():
+            match = _FREQ_LINE.match(line)
+            if not match:
+                continue
+            flags = match.group(3).upper()
+            if "NO_IR" in flags or "DISABLED" in flags or "RADAR" in flags:
+                continue
+            usable.add(int(match.group(2)))
+        return usable
+
+    def get_country(self) -> str:
+        """The regulatory country the daemon runs under (``GET country``);
+        empty when none is set."""
+        reply = self._cmd("GET country").strip()
+        last = reply.splitlines()[-1].strip() if reply else ""
+        return "" if last == "FAIL" else last
 
     def scan(self) -> list[dict]:
         """Trigger a scan and return parsed results (one entry per BSS)."""
@@ -220,7 +261,18 @@ class WpaCli:
         self._cmd_ok(f"REMOVE_NETWORK {net_id}")
 
     def save_config(self) -> None:
-        """Persist the in-memory config to disk (SAVE_CONFIG)."""
+        """Persist the in-memory config to disk (SAVE_CONFIG).
+
+        Access-point blocks (``mode=2``) are removed first: they are volatile
+        by design, and one that reached the file would bring the access point
+        back on the next RECONFIGURE or reboot.
+        """
+        for net in self.list_networks():
+            try:
+                if self.get_network(net["id"], "mode") == "2":
+                    self.remove_network(net["id"])
+            except WpaError as exc:
+                raise WpaError(f"could not drop access point block {net['id']} before saving: {exc}") from exc
         self._cmd_ok("SAVE_CONFIG")
 
     def reconfigure(self) -> None:
@@ -232,12 +284,48 @@ class WpaCli:
 
     def enable_all(self) -> None:
         """Re-enable every saved network (SELECT_NETWORK disables the others),
-        so all known networks stay eligible for auto-reconnect on reboot."""
+        so all known networks stay eligible for auto-reconnect on reboot.
+
+        Access-point blocks (``mode=2``) are skipped: enabling one would turn
+        the radio into an access point on the next scan.
+        """
         for net in self.list_networks():
             try:
+                if self.get_network(net["id"], "mode") == "2":
+                    continue
                 self.enable_network(net["id"])
             except WpaError:
                 pass
+
+    def get_network(self, net_id: str, key: str) -> str | None:
+        """Read one network variable as text (GET_NETWORK); ``None`` when unset."""
+        reply = self._cmd(f"GET_NETWORK {net_id} {key}").strip()
+        if not reply or reply.splitlines()[-1].strip() == "FAIL":
+            return None
+        return reply.splitlines()[-1].strip().strip('"')
+
+    def all_sta(self) -> list[dict]:
+        """Return the stations joined to this access point (ALL_STA).
+
+        Each entry is ``{mac, signal}``; ``signal`` is 0 when the driver does not
+        report it. The MAC is needed to match a DHCP lease and must never leave
+        the agent.
+        """
+        out = self._cmd("ALL_STA")
+        stations: list[dict] = []
+        current: dict | None = None
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "=" not in line:
+                current = {"mac": line.lower(), "signal": 0}
+                stations.append(current)
+            elif current is not None:
+                key, _, value = line.partition("=")
+                if key.strip() == "signal":
+                    current["signal"] = _safe_int(value.strip())
+        return stations
 
 
 def _safe_int(value: str, default: int = 0) -> int:

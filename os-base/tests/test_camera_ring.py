@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Tests for the camera-ring seqlock reader (conecsa_shm.camera_ring, v2).
 
 A stub writer emits the exact byte protocol of webcam-server's ShmProducer
@@ -16,6 +20,7 @@ import numpy as np
 import pytest
 from conecsa_shm import camera_ring
 from conecsa_shm.camera_ring import (
+    CONFIG_PAYLOAD_MAX,
     FORMAT_JPEG,
     FORMAT_RAW_RGB,
     HEADER_SIZE,
@@ -209,7 +214,7 @@ class TestProducerRestartRecovery:
     def test_the_reader_survives_a_producer_restart(self):
         # webcam-server unlinks + recreates its segment on start; a consumer
         # holding the old mapping must detect the new inode and keep going,
-        # with seqs still monotonic (REFACTORING.md H4).
+        # with seqs still monotonic.
         name = f"conecsa-test-cam-{uuid.uuid4().hex[:8]}"
         writer = StubCameraWriter(name)
         reader = CameraRingReader(name)
@@ -251,3 +256,47 @@ class TestProducerRestartRecovery:
             assert reader.get_latest_frame(0) is None
         finally:
             reader.close()
+
+
+class TestConfigChannel:
+    """The config write-back, and how a writer learns its config was lost."""
+
+    def test_a_write_is_confirmed_only_when_it_reaches_a_segment(self):
+        name = f"conecsa-test-cam-{uuid.uuid4().hex[:8]}"
+        reader = CameraRingReader(name, writable=True)
+        assert reader.attach_generation == 0
+        assert reader.write_config_bytes(b"cfg") is False, "no segment yet: not written"
+
+        writer = StubCameraWriter(name)
+        try:
+            reader.open()
+            assert reader.attach_generation == 1
+            assert reader.write_config_bytes(b"cfg") is True
+            assert reader.write_config_bytes(b"x" * (CONFIG_PAYLOAD_MAX + 1)) is False
+            assert reader.write_config_bytes(b"x" * CONFIG_PAYLOAD_MAX) is True
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_a_read_only_mapping_never_confirms_a_write(self, ring):
+        _, reader = ring
+        assert reader.write_config_bytes(b"cfg") is False
+
+    def test_a_recreated_segment_bumps_the_attach_generation(self):
+        # The producer unlinks and recreates its segment on start; the fresh one
+        # holds no config, so the writer must be able to tell and publish again.
+        name = f"conecsa-test-cam-{uuid.uuid4().hex[:8]}"
+        writer = StubCameraWriter(name)
+        reader = CameraRingReader(name, writable=True)
+        try:
+            assert reader.attach_generation == 1
+            assert reader.is_available()
+            assert reader.attach_generation == 1, "same segment: no new generation"
+
+            writer.close()
+            writer = StubCameraWriter(name)
+            assert reader.is_available()
+            assert reader.attach_generation == 2
+        finally:
+            reader.close()
+            writer.close()
