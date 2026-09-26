@@ -362,8 +362,25 @@ class ApAgent:
         one. An explicit channel that is blocked right now is refused here,
         before the radio is touched, with the usable ones named: letting
         wpa_supplicant fail on it costs the full wait and says nothing.
+
+        When nothing fits on the first read, one scan limited to the four
+        frequencies is tried before refusing: a beacon received during it
+        lifts ``NO_IR`` on that channel (the kernel's beacon hint), which is
+        the only way a stock world-wide channel plan ever opens 5 GHz.
         """
         usable = self._usable_channels(wpa)
+        if usable is not None and (not usable if channel == AUTO_CHANNEL else channel not in usable):
+            logger.info("no usable 5 GHz channel on first read (usable: %s); scanning once", usable)
+            try:
+                wpa.scan_frequencies(CHANNELS.values())
+            except WpaError as exc:
+                logger.warning("scan before refusing failed: %s", exc)
+            # Keep the first read's answer unless the re-read says something:
+            # a transient control-socket failure must not turn "blocked" into
+            # "unknown" and let the request through unchecked.
+            rescanned = self._usable_channels(wpa)
+            if rescanned is not None:
+                usable = rescanned
         if channel == AUTO_CHANNEL:
             if usable is None:
                 return min(CHANNELS), None

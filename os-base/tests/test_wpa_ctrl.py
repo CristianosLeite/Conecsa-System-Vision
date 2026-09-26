@@ -29,7 +29,7 @@ class ScriptedWpa(WpaCtrl):
             return "FAIL" if value is None else value
         if verb == "REMOVE_NETWORK":
             return "OK" if self.networks.pop(args[0], None) is not None else "FAIL"
-        if verb in ("SAVE_CONFIG", "ENABLE_NETWORK"):
+        if verb in ("SAVE_CONFIG", "ENABLE_NETWORK", "SCAN"):
             return "OK"
         if verb == "GET" and args == ["country"]:
             return self.country or "FAIL"
@@ -86,6 +86,14 @@ def test_usable_frequencies_raises_when_the_daemon_cannot_say():
     wpa.capability = "FAIL"
     with pytest.raises(WpaError, match="GET_CAPABILITY"):
         wpa.usable_frequencies()
+
+
+def test_scan_frequencies_asks_for_the_given_frequencies_once_and_waits(monkeypatch):
+    slept = []
+    monkeypatch.setattr("agent.wpa.time.sleep", slept.append)
+    wpa = ScriptedWpa()
+    wpa.scan_frequencies([5220, 5180, 5180])
+    assert wpa.sent == ["SCAN freq=5180,5220"] and slept == [2.0]
 
 
 def test_enable_all_skips_access_point_blocks():

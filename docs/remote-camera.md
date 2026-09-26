@@ -81,9 +81,11 @@ token were already in the form, the source is applied right after the access
 point starts. The same access point can also be managed from
 **Settings → Network → Access point**, which lists the joined remote cameras
 with their addresses and turns it off. A start that ends with "cannot start an
-access point right now" names the channels that can; the radio's regulatory
-flags move with the Wi-Fi networks it has heard, which is why Automatic is the
-default.
+access point right now" names the channels that can, after the device has
+scanned once for them; on the Conecsa image 36–48 are always startable, while
+on a stock NVIDIA channel plan the radio's regulatory flags move with the
+5 GHz networks it has heard (join one, or bring one in range, then retry),
+which is why Automatic is the default.
 
 In the remote camera app, choose **Device access point** as the connection,
 enter the network name (the device id) and the passphrase, and press **Join and

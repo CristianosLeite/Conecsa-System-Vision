@@ -9,6 +9,13 @@ inherit packagegroup
 # equivalent meta-tegra scarthgap recipes.
 # Validated via inventory in meta-tegra/recipes-bsp/tegra-binaries/ and
 # meta-tegra/recipes-devtools/cuda/.
+#
+# tegra-redundant-boot is what meta-tegra's MACHINE_EXTRA_RDEPENDS would add
+# on a stock image; conecsa-image sets IMAGE_INSTALL explicitly, so it must be
+# listed here. It ships nv_update_verifier.service (`nvbootctrl verify`),
+# which resets the L4TLauncher rootfs retry counter after every successful
+# boot. Without it the UEFI flags rootfs slot A unbootable after three warm
+# reboots and drops to the UEFI Shell (docs/yocto-build.md, Troubleshooting).
 
 RDEPENDS:${PN} = " \
     \
@@ -44,6 +51,8 @@ RDEPENDS:${PN} = " \
     tegra-nvfancontrol \
     tegra-nvs-service \
     tegra-nvsciipc \
+    \
+    tegra-redundant-boot \
     \
     cuda-cudart \
     cuda-driver \

@@ -23,6 +23,13 @@
   with the reason in `message` (no wired link, subnet overlap, blocked
   channel, no `/run/systemd/network` mount, …) and a failed one leaves the
   radio back in station mode; an agent restart or a reboot always stops it.
+  "No 5 GHz channel can start an access point right now" after the agent's
+  own scan means the radio runs NVIDIA's stock world-wide channel plan
+  (`cat /proc/net/rtl88x2ce/chplan_id_list` prints `0x7F` alone): the Conecsa
+  image adds plan `0x62`, see
+  [regulatory channel plan](yocto-build.md#regulatory-channel-plan); until
+  the device is reflashed, join a 5 GHz network on 36–48 or bring one in
+  range and retry.
   While it is up the hub reaches the device over the cable only, and a Wi-Fi
   change answers `409`. See the
   [hardware agent](services/os-hardware-agent.md#wi-fi-access-point)
@@ -106,6 +113,10 @@ JetPack/Ubuntu, there are differences that affect `docker-compose.yml`:
   `from=` — the root key is provisioned over serial after flashing (see
   [SSH hardening](yocto-build.md#ssh-hardening-key-only-permitted-hosts)).
   Until then SSH refuses logins; serial is the provisioning channel.
+- **A reboot never comes back, serial console at `Shell>`**: the UEFI rootfs
+  retry counter ran out (images built before 2026-09-25 lacked the service
+  that resets it). Clear the flag from the shell and rebuild, see
+  [UEFI Shell after a few reboots](yocto-build.md#uefi-shell-after-a-few-reboots-rootfs-retry-count).
 - **Kiosk troubleshooting** (blank webview, weston/seatd failures, slow boot
   from `wait-online`): see the Troubleshooting section of
   [Yocto build](yocto-build.md#troubleshooting).

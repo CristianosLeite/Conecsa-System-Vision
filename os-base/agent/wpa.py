@@ -25,6 +25,7 @@ import re
 import socket
 import string
 import time
+from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,19 @@ class WpaCtrl:
         reply = self._cmd("GET country").strip()
         last = reply.splitlines()[-1].strip() if reply else ""
         return "" if last == "FAIL" else last
+
+    def scan_frequencies(self, mhz: Iterable[int], wait_s: float = 2.0) -> None:
+        """Ask the daemon for one scan limited to *mhz* and wait for it.
+
+        The point is the kernel's beacon hint, not the results: a beacon
+        received on a ``NO_IR`` channel lifts the flag there, so
+        :meth:`usable_frequencies` can answer differently after this call.
+        A ``FAIL-BUSY`` reply (a scan already running) is as good as ours.
+        Raises :class:`WpaError` only when the daemon cannot be reached.
+        """
+        freqs = ",".join(str(f) for f in sorted(set(mhz)))
+        self._cmd(f"SCAN freq={freqs}")
+        time.sleep(wait_s)
 
     def scan(self) -> list[dict]:
         """Trigger a scan and return parsed results (one entry per BSS)."""

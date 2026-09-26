@@ -57,6 +57,11 @@ class FakeWpa:
         self.usable = {5180, 5200, 5220}
         self.capability_fails = False
         self.station_freq = "5220"
+        # ``SCAN freq=...``: what the beacon hint leaves usable afterwards.
+        self.scans = []
+        self.after_scan: set[int] | None = None
+        self.scan_fails = False
+        self.capability_fails_after_scan = False
 
     def add_network(self):
         if self.fail_add:
@@ -93,6 +98,15 @@ class FakeWpa:
         if self.capability_fails:
             raise WpaError("GET_CAPABILITY freq returned FAIL")
         return set(self.usable)
+
+    def scan_frequencies(self, mhz, wait_s=2.0):
+        self.scans.append(sorted(mhz))
+        if self.scan_fails:
+            raise WpaError("control socket not found")
+        if self.after_scan is not None:
+            self.usable = set(self.after_scan)
+        if self.capability_fails_after_scan:
+            self.capability_fails = True
 
     def reconfigure(self):
         self.reconfigured += 1
@@ -291,6 +305,58 @@ class TestStart:
         result = agent.start("dev", PASS, 0)
         assert not result["success"] and "beacon" in result["message"]
         assert holder[0].selected is None and networkd.calls == [] and not ap_file(tmp_path).exists()
+
+    def test_automatic_scans_the_four_frequencies_once_before_refusing(self, rig):
+        # A stock world-wide channel plan opens a 5 GHz channel only after a
+        # beacon was heard there: one targeted scan is worth the 2 s.
+        agent, _networkd, holder, _clock, _tmp = rig
+        holder[0] = FakeWpa(WIFI[1])
+        holder[0].usable = set()
+        holder[0].after_scan = {5180}
+        result = agent.start("dev", PASS, 0)
+        assert result["success"], result["message"]
+        assert holder[0].scans == [[5180, 5200, 5220, 5240]]
+        assert agent.status()["frequency_mhz"] == 5180
+
+    def test_a_blocked_channel_is_retried_after_a_scan(self, rig):
+        agent, _networkd, holder, _clock, _tmp = rig
+        holder[0] = FakeWpa(WIFI[1])
+        holder[0].after_scan = {5180, 5200, 5220, 5240}
+        result = agent.start("dev", PASS, 48)
+        assert result["success"], result["message"]
+        assert len(holder[0].scans) == 1 and agent.status()["frequency_mhz"] == 5240
+
+    def test_the_refusal_stands_when_the_scan_does_not_help(self, rig):
+        agent, networkd, holder, _clock, tmp_path = rig
+        holder[0] = FakeWpa(WIFI[1])
+        holder[0].usable = set()
+        result = agent.start("dev", PASS, 0)
+        assert not result["success"] and "beacon" in result["message"]
+        assert len(holder[0].scans) == 1
+        assert holder[0].selected is None and networkd.calls == [] and not ap_file(tmp_path).exists()
+
+    def test_a_failed_scan_still_ends_in_the_plain_refusal(self, rig):
+        agent, _networkd, holder, _clock, _tmp = rig
+        holder[0] = FakeWpa(WIFI[1])
+        holder[0].scan_fails = True
+        result = agent.start("dev", PASS, 48)
+        assert not result["success"] and "channel 48" in result["message"]
+
+    def test_a_failed_reread_after_the_scan_keeps_the_first_answer(self, rig):
+        # The first read said 48 is blocked; a control-socket hiccup on the
+        # re-read must not turn that into "unknown" and pass 48 through.
+        agent, networkd, holder, _clock, tmp_path = rig
+        holder[0] = FakeWpa(WIFI[1])
+        holder[0].capability_fails_after_scan = True
+        result = agent.start("dev", PASS, 48)
+        assert not result["success"] and "channel 48" in result["message"]
+        assert len(holder[0].scans) == 1
+        assert holder[0].selected is None and networkd.calls == [] and not ap_file(tmp_path).exists()
+
+    def test_no_scan_when_a_channel_is_already_usable(self, rig):
+        agent, _networkd, holder, _clock, _tmp = rig
+        assert agent.start("dev", PASS, 0)["success"]
+        assert holder[0].scans == []
 
     def test_when_the_daemon_cannot_list_channels_the_request_is_taken_as_is(self, rig):
         agent, _networkd, holder, _clock, _tmp = rig

@@ -50,17 +50,23 @@ can turn the device's single radio into a WPA2 access point (`StartAp`,
 channel is 36, 40, 44 or 48 (the non-DFS block) or automatic, and the device
 takes `AP_ADDRESS_CIDR` with a networkd DHCP server for the remote cameras.
 
-Which of those channels the radio may *start* a network on is not fixed: the
-regulatory `NO_IR` flag is lifted on a channel once the driver has heard a
-beacon there and comes back later, so the set of usable channels changes over
-time, even while the station link stays on one channel. The agent reads
-the live set from `GET_CAPABILITY freq` on every status (`channels`) and at
-start; a channel flagged `DISABLED` or `RADAR` is left out like a `NO_IR` one.
-Automatic (channel 0, the UI default) takes the channel the station
-link uses when it is usable, otherwise the lowest usable one; an explicit
-channel that is blocked at the moment is refused before the radio is touched,
-naming the usable ones, instead of costing the full wait on wpa_supplicant's
-silent "Failed to start AP functionality". When the daemon cannot list its
+Which of those channels the radio may *start* a network on is the driver's
+regulatory state, not wpa_supplicant's `country`: the RTL8822CE vendor driver
+takes its channel plan from `/lib/firmware/rtl8822_setting.bin` and has no
+country table, so on NVIDIA's stock plan every 5 GHz channel is `NO_IR` until
+the driver has heard a beacon there, and the flag comes back later. The
+Conecsa image ships a plan in which 36–48 may always start (see
+[Wi-Fi regulatory channel plan](../yocto-build.md#regulatory-channel-plan)).
+The agent reads the live set from `GET_CAPABILITY freq` on every status
+(`channels`) and at start; a channel flagged `DISABLED` or `RADAR` is left
+out like a `NO_IR` one. Automatic (channel 0, the UI default) takes the
+channel the station link uses when it is usable, otherwise the lowest usable
+one. When nothing fits on the first read, the agent asks for one scan limited
+to the four frequencies (about 2 s) and reads the set again, because a beacon
+received during it lifts `NO_IR` on that channel; only then is an explicit
+channel that is still blocked refused before the radio is touched, naming
+the usable ones, instead of costing the full wait on wpa_supplicant's silent
+"Failed to start AP functionality". When the daemon cannot list its
 frequencies at all, the status reports no `channels`, automatic falls back to
 36 and an explicit channel is passed on unchecked. The passphrase must be
 printable ASCII (8–63 characters) or a 64-digit hex PSK.

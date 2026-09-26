@@ -22,6 +22,7 @@ SRC_URI = " \
     file://conecsa-set-hostname.sh \
     file://conecsa-hostname.service \
     file://10-conecsa-wait-online.conf \
+    file://rtl8822ce.conf \
     file://conecsa-fake-hwclock.sh \
     file://conecsa-fake-hwclock.service \
     file://conecsa-fake-hwclock-save.service \
@@ -93,6 +94,14 @@ do_install() {
     install -m 0644 ${WORKDIR}/wpa_supplicant.conf.example \
         ${D}${sysconfdir}/wpa_supplicant/wpa_supplicant.conf.example
 
+    # RTL8822CE regulatory channel plan: the vendor driver has no country
+    # table, so the plan that lets 36-48 start an access point is chosen by
+    # module parameter (the plan itself is added to rtl8822_setting.bin by the
+    # tegra-firmware bbappend in recipes-tegra-overrides).
+    install -d ${D}${sysconfdir}/modprobe.d
+    install -m 0644 ${WORKDIR}/rtl8822ce.conf \
+        ${D}${sysconfdir}/modprobe.d/rtl8822ce.conf
+
     # Don't let systemd-networkd-wait-online block boot (and thus docker and
     # the whole compose stack) on a managed-but-down NIC. The default waits for
     # ALL links and times out after 120s; --any + a short timeout caps it.
@@ -160,6 +169,7 @@ FILES:${PN} = " \
     ${sysconfdir}/default/zram \
     ${sysconfdir}/sysctl.d/99-conecsa-memory.conf \
     ${sysconfdir}/wpa_supplicant/wpa_supplicant.conf.example \
+    ${sysconfdir}/modprobe.d/rtl8822ce.conf \
     ${systemd_system_unitdir}/systemd-networkd-wait-online.service.d/10-conecsa-wait-online.conf \
     ${sysconfdir}/ssh/sshd_config.d/10-conecsa-sshd-hardening.conf \
     ${sysconfdir}/avahi/services/conecsa-hub.service \

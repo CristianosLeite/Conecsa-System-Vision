@@ -175,6 +175,11 @@ cat etc/systemd/timesyncd.conf.d/00-conecsa-ntp.conf
 # Wi-Fi (Realtek RTL8822CE): driver, TX-power-limit blob, regdb, supplicant:
 ls -la usr/lib/modules/*/updates/drivers/net/wireless/realtek/rtl8822ce/rtl8822ce.ko
 ls -la usr/lib/firmware/rtl8822_setting.bin                  # MANDATORY — power init
+# 2155 bytes = NVIDIA's blob plus channel plan 0x62 (2130 = unpatched); the
+# script prints both plans when run from the repo root:
+#   python3 yocto/meta-conecsa/recipes-tegra-overrides/tegra-firmware/files/rtl8822-chplan.py \
+#     <rootfs>/usr/lib/firmware/rtl8822_setting.bin /tmp/chplan.bin --dump | grep '^plan'
+cat etc/modprobe.d/rtl8822ce.conf                            # rtw_channel_plan=0x62
 ls -la usr/lib/firmware/regulatory.db
 ls usr/sbin/wpa_supplicant
 cat etc/systemd/network/30-wireless.network
@@ -246,6 +251,12 @@ with `sgdisk` + `dd`/`bmaptool`. `--erase-nvme` wipes the old partition
 table — recommended on a clean flash or whenever the partition layout
 changed. A successful run ends with `Final status: SUCCESS`.
 
+Re-extract the tarball into `jetson-flash/` before **every** flash. The
+directory keeps the files of the last extraction, so an `initrd-flash` run
+after a rebuild silently writes the previous image unless the `tar xzf` step
+was repeated; `ls -l conecsa-image.ext4` must show the new build's
+timestamp.
+
 ### Rebuilding after a failed `do_image_tegraflash`
 
 A pseudo abort or `Permission denied` in `tegraflash/signed` comes from
@@ -291,6 +302,7 @@ Disconnect the USB-C cable, power the Jetson normally, and wait for boot:
 | `failed to write conecsa-image.ext4` | APP partition smaller than the ext4 — adjust `ROOTFSPART_SIZE_DEFAULT` + `TEGRA_EXTERNAL_DEVICE_SECTORS` ([NVMe partition layout](#nvme-partition-layout-critical)) |
 | pseudo abort / `Permission denied` in `tegraflash/signed` | Root-owned build leftovers ([rebuilding](#rebuilding-after-a-failed-do_image_tegraflash)) |
 | Stack doesn't come back after reboot | `docker.service` not enabled ([smoke test](#post-flash-smoke-test) step 3) |
+| Serial console sits at `Shell>` after a reboot | rootfs retry counter exhausted, slot A flagged unbootable ([UEFI Shell after a few reboots](#uefi-shell-after-a-few-reboots-rootfs-retry-count)) |
 
 ## Post-flash smoke test
 
@@ -380,7 +392,8 @@ What is shipped (all in `packagegroup-conecsa-nvidia.bb` /
 | Component | Package / file | Purpose |
 |---|---|---|
 | MAC driver | `nv-kernel-module-rtl8822ce` | NVIDIA OoT Realtek driver (registers as PCI driver `rtl88x2ce`) |
-| TX power limit blob | `tegra-firmware-rtl8822` → `/lib/firmware/rtl8822_setting.bin` | **Mandatory** — without it the driver's probe aborts with `power init fail` (see Troubleshooting) |
+| TX power limit and channel-plan blob | `tegra-firmware-rtl8822` → `/lib/firmware/rtl8822_setting.bin`, patched by `recipes-tegra-overrides/tegra-firmware/tegra-firmware_36.5.2.bbappend` | **Mandatory** — without it the driver's probe aborts with `power init fail` (see Troubleshooting); the bbappend adds channel plan `0x62` (see [Regulatory channel plan](#regulatory-channel-plan)) |
+| Channel-plan selection | `conecsa-bootstrap` → `/etc/modprobe.d/rtl8822ce.conf` | `options rtl8822ce rtw_channel_plan=0x62`: lets the access point start on 36–48 |
 | Standard Realtek firmware | `linux-firmware-rtl8822` → `/lib/firmware/{rtw88,rtlwifi,rtl_bt}/*` | rtw88/rtlwifi firmware + Bluetooth firmware for the combo chip |
 | Regulatory database | `wireless-regdb-static` → `/lib/firmware/regulatory.db` | Removes the `cfg80211: failed to load regulatory.db` warning and unlocks regulatory channels |
 | Supplicant | `wpa-supplicant` | WPA1/2/3 authentication |
@@ -391,6 +404,47 @@ Once the device is reachable over wired Ethernet, Wi-Fi is normally
 configured from the device UI, through the `os-base` hardware agent (see
 [Network / Wi-Fi configuration](services/os-hardware-agent.md#network-wi-fi-configuration)).
 The shell procedure below is the fallback over the serial console or SSH.
+
+### Regulatory channel plan
+
+The NVIDIA vendor driver does not use `regulatory.db` or wpa_supplicant's
+`country=` for its own channel flags: it is built with
+`CONFIG_HEXFILE_CHANNEL_PLAN`, reads every channel plan it knows from
+`/lib/firmware/rtl8822_setting.bin`, and its country table is compiled out
+(a `country=BR` is logged as `unsupported sw_alpha2` and
+`rtw_set_country(): not applied`). NVIDIA's blob defines a single plan,
+`0x7F` world-wide, in which every 5 GHz channel is passive (`NO_IR`, no
+initiating radiation) and 52–140 are DFS: the radio may join a 5 GHz network
+but may not *start* one on a channel until it has heard a beacon there (the
+kernel's beacon hint, which the driver drops again later). That blocks the
+[remote camera access point](remote-camera.md) on 36–48 whenever no 5 GHz
+network is around.
+
+The image therefore ships two things:
+
+- `recipes-tegra-overrides/tegra-firmware/tegra-firmware_36.5.2.bbappend`
+  runs `files/rtl8822-chplan.py` on NVIDIA's blob at `do_install`. The
+  script verifies the file's checksum and layout, adds plan `0x62`
+  (Realtek's id for Brazil in its certified map) as a copy of the world-wide
+  channel lists with band 1 (36–48) allowed to initiate, leaves bands 2–3
+  passive + DFS and band 4 passive, keeps the power-limit records byte for
+  byte, recomputes the CRC and re-parses the result before writing it. It is
+  idempotent and refuses a blob it does not recognise, so an L4T bump cannot
+  silently ship a broken plan. No NVIDIA/Realtek binary is committed.
+- `conecsa-bootstrap` installs `/etc/modprobe.d/rtl8822ce.conf` with
+  `options rtl8822ce rtw_channel_plan=0x62`. The driver takes a module
+  parameter plan only when that id exists in the file, so the option is
+  harmless on a stock blob (it logs `unsupported sw_chplan:0x62` and stays on
+  `0x7F`).
+
+On the device, `cat /proc/net/rtl88x2ce/chplan_id_list` prints `0x62 0x7F`
+and `/proc/net/rtl88x2ce/<iface>/chan_plan` shows `chplan:0x62` with 36–48
+carrying no flag; `wpa_cli -i <iface> get_capability freq` lists 5180–5240
+without `(NO_IR)` and `GET /api/v1/network/ap` reports `channels`
+`[36, 40, 44, 48]` even while the station link sits on 2.4 GHz. 5150–5350 MHz
+is licence-exempt indoor spectrum without DFS under Anatel's rules, which is
+why band 1 alone is opened; a site in another country must review the plan
+before flashing.
 
 ### Shell procedure
 
@@ -625,6 +679,45 @@ hub app failures in the kiosk are in
   `recipes-oe-overrides/webkitgtk3` bbappend adds `DEPENDS +=
   "virtual/libgbm"`.
 
+### UEFI Shell after a few reboots (rootfs retry count)
+
+Symptom: the device does not come back after a reboot, the display stays
+black, and the serial console (115200 8N1) sits at a `Shell>` prompt. In
+that shell
+`dmpstore RootfsStatusSlotA -guid 781E084C-A330-417C-B678-38E696380CB9`
+prints `FF 00 00 00`: L4TLauncher has flagged rootfs slot A *unbootable*.
+The NVMe and the ESP (`map -r`, `ls FS3:\EFI\BOOT`) are intact.
+
+Cause: the L4T UEFI keeps a rootfs retry counter in a PMC scratch register
+(`L4TRootfsValidation.c` in edk2-nvidia). On the first boot after the
+register was lost (a power cycle, or the launcher clearing it) the counter is
+set to `RootfsRetryCountMax` (3); every boot decrements it, also with rootfs
+A/B disabled (`RootfsRedundancyLevel` 0). On JetPack a userspace service
+runs `nvbootctrl verify` after a successful boot, which resets the counter.
+When it reaches 0 the launcher writes `RootfsStatusSlotA = 0xFF`, boots "to
+recovery" (no recovery kernel is flashed) and the boot manager falls through
+the PXE/HTTP entries into the UEFI Shell. Images built before 2026-09-25 did
+not install that service (`conecsa-image` sets `IMAGE_INSTALL` explicitly,
+so meta-tegra's `MACHINE_EXTRA_RDEPENDS` did not apply): three consecutive
+warm reboots (`reboot`, a hub-triggered reboot, the reboot that ends
+`initrd-flash`) with no power cycle in between were enough.
+`packagegroup-conecsa-nvidia` now installs `tegra-redundant-boot`
+(`nv_update_verifier.service` → `nvbootctrl verify`, plus
+`setup-nv-boot-control`, which also mounts the ESP at `/boot/efi`).
+
+Recovery on a device that is already in the shell (the UEFI setup menu
+offers the same switch under *L4T Configuration → OS chain A status*):
+
+```text
+setvar RootfsStatusSlotA -guid 781E084C-A330-417C-B678-38E696380CB9 -nv -rt -bs =0x00000000
+reset
+```
+
+The launcher re-initialises the counter on that boot. On an image without
+the fix the flag returns after three more warm reboots; on a fixed image
+`systemctl status nv_update_verifier` shows the verifier ran and reboots no
+longer accumulate.
+
 ## Updating NVIDIA versions
 
 `kas-config.yml` follows the `scarthgap` branch of meta-tegra, so a new L4T
@@ -639,7 +732,12 @@ R36.6 / JetPack 6.3):
 5. Compare each bbappend in `meta-conecsa/recipes-tegra-overrides/` with the
    new meta-tegra recipe and delete the ones upstream has fixed. A new
    override is named after the recipe version (`<recipe>_<PV>.bbappend`,
-   never `_%`), so it stops applying at the next release.
+   never `_%`), so it stops applying at the next release. The
+   `tegra-firmware_<PV>.bbappend` (Wi-Fi
+   [regulatory channel plan](#regulatory-channel-plan)) is kept, not
+   deleted: run `files/rtl8822-chplan.py` against the new
+   `rtl8822_setting.bin` with `--dump` first (it refuses a blob whose layout
+   it does not recognise), then rename the bbappend.
 6. Fetch everything before the multi-hour build:
    `kas-container shell kas-config.yml -c "bitbake --runall=fetch conecsa-image"`.
 7. Rebuild: `kas-container build kas-config.yml`.
