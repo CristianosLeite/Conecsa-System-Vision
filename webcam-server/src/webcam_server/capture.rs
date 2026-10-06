@@ -5,12 +5,13 @@
 //! Capture orchestration: nokhwa camera open/decode paths and the main
 //! acquire→process→publish loop, with camera re-attach when the device is
 //! absent. The direct V4L2 paths live in `v4l2`, the `v4l2-ctl` hardware
-//! controls in `controls`, the format enumeration in `formats` and the remote
-//! MJPEG source in `network`.
+//! controls in `controls`, the format enumeration in `formats`, the remote
+//! MJPEG source in `network` and the RTSP IP camera source in `rtsp`.
 
 mod controls;
 mod formats;
 mod network;
+mod rtsp;
 mod v4l2;
 
 #[cfg(test)]
@@ -26,7 +27,7 @@ use nokhwa::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::config::{normalize_token, validate_network};
+use super::config::{IpCameraConfig, normalize_token, validate_ip_cameras, validate_network};
 use super::shm::proto::CameraHealthDetail;
 use super::shm::{self, ShmProducer};
 use super::{CameraConfig, CameraSource, WebcamServer};
@@ -93,14 +94,17 @@ pub(crate) enum ConfigOutcome {
     ApplyControls,
     /// Nothing to act on (tuning stored while a network source is active).
     Stored,
+    /// IP source still active, camera list edited: the IP supervisor restarts
+    /// only the cameras whose entry changed, appeared or disappeared.
+    IpCamerasChanged,
 }
 
 /// Merge a protobuf `CameraConfig` into the in-memory config and say what the
 /// change requires. Pure, so every source rule is unit-tested.
 ///
 /// A message without `source` comes from a writer that only tunes the local
-/// camera: it never changes the source or the network fields. With `source`
-/// present, fields 13-15 are the complete network state.
+/// camera: it never changes the source, the network fields or the IP camera
+/// list. With `source` present, fields 13-16 are the complete source state.
 pub(crate) fn merge_shm_config(
     proto_cfg: &shm::proto::CameraConfig,
     cfg: &mut CameraConfig,
@@ -123,6 +127,7 @@ pub(crate) fn merge_shm_config(
     cfg.gain = proto_cfg.gain;
 
     let mut source_restart = false;
+    let mut ip_changed = false;
     match proto_cfg.source.map(|raw| (raw, CameraSource::from_proto(raw))) {
         None => {}
         // Never coerce an unknown value to local: keep the source as it is.
@@ -134,6 +139,7 @@ pub(crate) fn merge_shm_config(
             cfg.network_host = proto_cfg.network_host.clone();
             cfg.network_port = proto_cfg.network_port;
             cfg.network_token = normalize_token(&proto_cfg.network_token);
+            cfg.ip_cameras = ip_cameras_from_proto(proto_cfg);
         }
         Some((_, Some(CameraSource::Network))) => {
             let token = normalize_token(&proto_cfg.network_token);
@@ -148,6 +154,23 @@ pub(crate) fn merge_shm_config(
                     cfg.network_host = proto_cfg.network_host.clone();
                     cfg.network_port = proto_cfg.network_port;
                     cfg.network_token = token;
+                    cfg.ip_cameras = ip_cameras_from_proto(proto_cfg);
+                }
+            }
+        }
+        Some((_, Some(CameraSource::Ip))) => {
+            let cameras = ip_cameras_from_proto(proto_cfg);
+            match validate_ip_cameras(&cameras) {
+                Err(why) => eprintln!("[webcam] Ignoring invalid IP camera source: {why}"),
+                Ok(()) => {
+                    source_restart = cfg.source != CameraSource::Ip;
+                    ip_changed = !source_restart && cfg.ip_cameras != cameras;
+                    cfg.source = CameraSource::Ip;
+                    cfg.ip_cameras = cameras;
+                    // Dormant while IP; kept so the full state mirrors the writer's.
+                    cfg.network_host = proto_cfg.network_host.clone();
+                    cfg.network_port = proto_cfg.network_port;
+                    cfg.network_token = normalize_token(&proto_cfg.network_token);
                 }
             }
         }
@@ -159,7 +182,22 @@ pub(crate) fn merge_shm_config(
         CameraSource::Local => ConfigOutcome::ApplyControls,
         // Resolution, framerate and the V4L2 controls mean nothing to a remote camera.
         CameraSource::Network => ConfigOutcome::Stored,
+        CameraSource::Ip if ip_changed => ConfigOutcome::IpCamerasChanged,
+        CameraSource::Ip => ConfigOutcome::Stored,
     }
+}
+
+/// The wire camera list as config entries (unvalidated).
+fn ip_cameras_from_proto(proto_cfg: &shm::proto::CameraConfig) -> Vec<IpCameraConfig> {
+    proto_cfg
+        .ip_cameras
+        .iter()
+        .map(|c| IpCameraConfig {
+            url: c.url.clone(),
+            username: c.username.clone(),
+            password: c.password.clone(),
+        })
+        .collect()
 }
 
 impl WebcamServer {
@@ -255,6 +293,10 @@ impl WebcamServer {
             }
             // A network source reports `capturing` from its own frames only.
             ConfigOutcome::Stored => {}
+            // The IP supervisor reconciles its workers on its next tick.
+            ConfigOutcome::IpCamerasChanged => {
+                eprintln!("[webcam] SHM config changed the IP camera list");
+            }
         }
     }
 
@@ -267,6 +309,7 @@ impl WebcamServer {
         shm.publish_health(&shm::proto::HealthStatus {
             status: status.to_string(),
             detail: detail as i32,
+            ip_camera_count: 0,
         });
     }
 
@@ -281,6 +324,8 @@ impl WebcamServer {
         // unavailable camera doesn't spam the same message every retry cycle.
         let mut last_error: Option<String> = None;
         let mut network_retry = network::RetryState::default();
+        // Segments a crashed previous run may have left behind.
+        rtsp::unlink_camera_rings(&config_arc.lock().unwrap().shm_name);
 
         loop {
             let cfg = config_arc.lock().unwrap().clone();
@@ -290,6 +335,14 @@ impl WebcamServer {
             // network source runs no V4L2 open and no `v4l2-ctl`, and never
             // falls back to a local camera — a silent fallback would make the
             // inspection source ambiguous.
+            if cfg.source == CameraSource::Ip {
+                last_error = None;
+                network_retry = network::RetryState::default();
+                // Returns only when a restart was requested; the workers and
+                // their rings are gone by then.
+                Self::run_ip_cameras_loop(&shm, &config_arc, &restart_flag, &rgb_hardware_supported);
+                continue;
+            }
             if cfg.source == CameraSource::Network {
                 last_error = None;
                 // Only a fresh start reports "connecting"; while retrying, the

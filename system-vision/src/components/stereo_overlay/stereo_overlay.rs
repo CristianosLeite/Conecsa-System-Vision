@@ -42,9 +42,10 @@ pub fn StereoOverlay(
         let _ = camera_refresh.get();
         spawn_local(async move {
             if let Ok(resp) = api::get_camera_devices().await {
-                // A remote camera frame is never side by side: no 3D button for it.
+                // Only a local camera frame can be side by side: no 3D button
+                // for a remote camera or the IP cameras' mosaic.
                 set_enabled.set(
-                    resp.current_stereo_enabled && resp.current_source != api::SOURCE_NETWORK,
+                    resp.current_stereo_enabled && resp.current_source == api::SOURCE_LOCAL,
                 );
                 set_alpha.set(resp.current_stereo_blend_alpha);
                 set_offset_x.set(resp.current_stereo_offset);

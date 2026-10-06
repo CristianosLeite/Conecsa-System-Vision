@@ -4,7 +4,7 @@
 
 [package]
 name = "conecsa-system-vision"
-version = "2026.6.0"
+version = "2026.7.0"
 description = "Conecsa System Vision device UI"
 license = "AGPL-3.0-only"
 authors = ["Conecsa Automação"]
@@ -15,7 +15,8 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 # Standalone workspace: the system-vision Docker build copies only system-vision/
-# (+ proto/), so this crate must not depend on the repo-root virtual manifest.
+# (+ proto/, shared/i18n/, shared/styles/ and the shared/ui-view/ crate), so this crate must
+# not depend on the repo-root virtual manifest.
 [workspace]
 
 [lib]
@@ -42,6 +43,9 @@ bytes = "1.12.1"
 
 # ── WASM/frontend dependencies ────────────────────────────────────────────────
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# Shared Apache-2.0 crate (zoomable image view, page-zoom guard), also used
+# by the hub; a plain path dependency outside this standalone workspace.
+conecsa-ui-view = { path = "../shared/ui-view" }
 leptos = { version = "0.8.15", features = ["csr"] }
 # Default features are disabled on purpose: the `cookie` default would persist
 # the locale in a cookie, fighting the ?lang= + localStorage scheme used here.
@@ -68,6 +72,8 @@ web-sys = { version = "0.3.83", features = [
     "File",
     "FileList",
     "HtmlInputElement",
+    "HtmlDivElement",
+    "HtmlImageElement",
     "FormData",
     "EventSource",
     "EventTarget",
@@ -81,7 +87,15 @@ web-sys = { version = "0.3.83", features = [
     "HtmlElement",
     "KeyboardEvent",
     "Node",
-    "NodeList"
+    "NodeList",
+    "AddEventListenerOptions",
+    "Event",
+    "MouseEvent",
+    "PointerEvent",
+    "WheelEvent",
+    "ScrollIntoViewOptions",
+    "ScrollBehavior",
+    "ScrollLogicalPosition"
 ] }
 
 # Host-side unit tests run in a headless browser (the crate is wasm32-only), via

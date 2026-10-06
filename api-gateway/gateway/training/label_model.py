@@ -7,16 +7,13 @@ into the inference-service's private TensorRT labeling worker, and per-image
 detection for label suggestions. The image itself comes from the
 training-service (the dataset's stored JPEG), so the suggestions land in the
 same normalized space the labels use."""
-import logging
-
 import grpc
 from flask import request
 
+from ..gpu import GpuBusy, Purpose, busy_response, gpu_lock, gpu_session
 from ..grpc_clients import clients, inf, trn
 from . import training_bp
 from .helpers import _grpc_error, _json, _json_error, _pairs, _result
-
-logger = logging.getLogger(__name__)
 
 
 def _status_dict(s) -> dict:
@@ -66,17 +63,17 @@ def training_label_model_load():
     model_name = str(body.get("model_name") or "").strip()
     if not model_name:
         return _json_error("'model_name' is required")
-    # One labeling assistant at a time (8 GB GPU budget): drop SAM3 in the
-    # training-service first, best-effort and status-probed.
+    # One GPU holder at a time (8 GB budget): the shared release drops SAM3,
+    # a previous labeling engine and idle TensorRT workers first; refused
+    # while detection, a training or a conversion runs.
     try:
-        if clients.training.GetSamStatus(trn.Empty()).loaded:
-            clients.training.UnloadSam(trn.Empty())
-    except grpc.RpcError as exc:
-        logger.warning("Best-effort SAM unload before label-model load failed: %s", exc)
-    try:
-        # Spawning a TensorRT worker + engine deserialization on the Orin:
-        # allow well beyond the default control-call deadline.
-        return _result(clients.model.LoadLabelModel(inf.ModelName(name=model_name), timeout=300))
+        with gpu_session(Purpose.LABEL_MODEL):
+            # Spawning a TensorRT worker + engine deserialization on the Orin:
+            # allow well beyond the default control-call deadline.
+            return _result(clients.model.LoadLabelModel(inf.ModelName(name=model_name),
+                                                        timeout=300))
+    except GpuBusy as exc:
+        return busy_response(exc)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
 
@@ -125,8 +122,13 @@ def training_label_model_detect():
             return _json_error(f"Image '{image_id}' not found", 404)
         return _grpc_error(exc)
     try:
-        r = clients.model.LabelDetect(
-            inf.LabelDetectRequest(jpeg=blob.jpeg, threshold=threshold), timeout=120)
+        # Under the GPU lock: a Start, a SAM3 load or a training handover
+        # cannot unload the engine while it runs.
+        with gpu_lock():
+            r = clients.model.LabelDetect(
+                inf.LabelDetectRequest(jpeg=blob.jpeg, threshold=threshold), timeout=120)
+    except GpuBusy as exc:
+        return busy_response(exc)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     if not r.success:

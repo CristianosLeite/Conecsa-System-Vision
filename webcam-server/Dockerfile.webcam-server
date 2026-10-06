@@ -9,7 +9,7 @@
 # Pinned rust version (repo rule: never a floating rust tag), on the bookworm
 # variant: the runtime stage is debian:bookworm-slim, so the builder must stay
 # on the same Debian release for a compatible glibc.
-FROM rust:1.98-slim-bookworm AS builder
+FROM rust:1.99-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -78,7 +78,17 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# ffmpeg/ffprobe decode the RTSP IP camera source. They run as subprocesses
+# (never linked into webcam_server); bookworm ships ffmpeg 5.1, whose RTSP
+# `-timeout` is the socket I/O timeout in microseconds.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/target/release/webcam_server /app/webcam_server
+
+# Third-party notices for the runtime packages above (ffmpeg runs as a subprocess).
+COPY webcam-server/THIRD-PARTY-NOTICES.md /usr/share/doc/conecsa/THIRD-PARTY-NOTICES-webcam-server.md
 
 ENV CAMERA_INDEX=0
 ENV CAPTURE_WIDTH=640

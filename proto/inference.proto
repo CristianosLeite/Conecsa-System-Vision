@@ -172,6 +172,15 @@ message ModelInfo {
   // report "detect". A model can only be activated on a device whose
   // application has the same task.
   string task = 7;
+  // Validation mAP@50:95 (0..1) of the checkpoint the engine was converted
+  // from: the box mAP for detect models, the mask mAP for segment models.
+  // Recorded in the settings sidecar by the .pt conversion; unset for
+  // classify and face models, engines uploaded prebuilt, and models
+  // converted by older firmware.
+  optional float map50_95 = 8;
+  // Validation top-1 accuracy (0..1) of a classify model's checkpoint; unset
+  // for the other tasks and when unrecorded, like map50_95.
+  optional float accuracy_top1 = 9;
 }
 message ModelList { repeated ModelInfo models = 1; }
 
@@ -348,9 +357,32 @@ message SetApplicationRequest {
 // and restarts detection.
 message ResumeRuntimeRequest {
   // End the GPU handover without re-activating the model or restarting
-  // detection, so a finished training's model conversion keeps the GPU. The
-  // application type can change again either way.
+  // detection, so a finished training's model conversion keeps the GPU.
   bool keep_detection_stopped = 1;
+}
+
+// Options of FreeGpu, the shared GPU release.
+message FreeGpuRequest {
+  // Stop a running detection instead of refusing (entering training mode is
+  // a confirmed stop).
+  bool stop_detection = 1;
+  // Mark the training handover in the same operation (entering training
+  // mode), so leaving it can resume detection: nothing can start detection or
+  // a conversion between the release and the mark.
+  bool begin_handover = 2;
+}
+
+// What keeps the GPU when FreeGpu refuses.
+enum GpuHolder {
+  GPU_HOLDER_NONE = 0;          // nothing: the GPU was freed
+  GPU_HOLDER_DETECTION = 1;     // detection is running
+  GPU_HOLDER_CONVERSION = 2;    // a model conversion (TensorRT build) is running
+}
+
+message FreeGpuResult {
+  bool success = 1;
+  string message = 2;
+  GpuHolder busy = 3;           // set when success is false
 }
 
 service ManagementControl {
@@ -373,20 +405,32 @@ service ManagementControl {
   rpc SetAreaShape(AreaShape) returns (AreaResult);
   rpc AreaCommand(AreaCommandRequest) returns (AreaResult);
 
-  // GPU handover for the training-service. ReleaseRuntime stops detection and
-  // terminates the TensorRT workers so their CUDA memory is freed; it refuses
-  // while a model conversion runs. ResumeRuntime (or an explicit Start) ends
-  // the handover. The application type cannot change while the GPU is handed
-  // over. Both are idempotent.
+  // FreeGpu is the shared GPU release every GPU consumer goes through (via
+  // the gateway). It refuses (success=false, `busy` names the holder) only
+  // while detection runs — unless `stop_detection` — or a model conversion
+  // does; otherwise it unloads the labeling engine, drops the detection
+  // runtime and terminates every TensorRT worker, all under one lock. It then
+  // ends a leftover training handover, or begins one with `begin_handover`.
+  // A worker that does not exit fails the call (success=false, `busy` unset):
+  // the GPU is never reported free while one survives. A training job, the
+  // third blocker, lives in the training-service and is checked by the
+  // gateway. Idempotent.
+  rpc FreeGpu(FreeGpuRequest) returns (FreeGpuResult);
+
+  // GPU handover for the training-service. ReleaseRuntime is FreeGpu with
+  // `stop_detection` and `begin_handover`, answering a plain Result; it
+  // refuses while a model conversion runs. ResumeRuntime (an explicit Start,
+  // or a FreeGpu without `begin_handover`) ends the handover. Both are
+  // idempotent.
   rpc ReleaseRuntime(Empty) returns (Result);
   rpc ResumeRuntime(ResumeRuntimeRequest) returns (Result);
 
-  // Application type. SetApplication stops detection, persists the new task,
-  // deselects an active model of another task (its files are kept) and
-  // publishes `application_changed`; detection is not restarted. Choosing the
-  // current task is a no-op. It fails with INVALID_ARGUMENT for an unknown
-  // task and FAILED_PRECONDITION for a task this build does not support or
-  // while the GPU is handed over to training or a model conversion runs.
+  // Application type. SetApplication frees the GPU as FreeGpu does, persists
+  // the new task, deselects an active model of another task (its files are
+  // kept) and publishes `application_changed`; detection is not restarted.
+  // Choosing the current task is a no-op. It fails with INVALID_ARGUMENT for
+  // an unknown task and FAILED_PRECONDITION for a task this build does not
+  // support, while detection runs or while a model conversion runs.
   rpc GetApplication(Empty) returns (ApplicationInfo);
   rpc SetApplication(SetApplicationRequest) returns (ApplicationInfo);
 }

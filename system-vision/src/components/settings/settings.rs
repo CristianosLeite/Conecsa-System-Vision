@@ -10,6 +10,8 @@ use super::ApplicationSettings;
 
 #[component]
 pub fn Settings(
+    /// Detection holds the GPU: the application switch waits for a stop.
+    detection_running: Signal<bool>,
     refresh_network: ReadSignal<u32>,
     refresh_gpio: ReadSignal<u32>,
     set_error_msg: WriteSignal<String>,
@@ -22,6 +24,7 @@ pub fn Settings(
         <div class="min-h-full grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
             {privileged.then(|| view! {
                 <ApplicationSettings
+                    detection_running=detection_running
                     set_error_msg=set_error_msg
                     set_success_msg=set_success_msg
                 />

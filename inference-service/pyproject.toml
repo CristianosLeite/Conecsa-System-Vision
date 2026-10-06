@@ -12,7 +12,7 @@
 # [build-system] table — the service is run, not pip-installed.
 [project]
 name = "conecsa-inference-service"
-version = "2026.6-LTS"
+version = "2026.7-LTS"
 description = "Headless TensorRT inference service (gRPC control + decode∥infer∥encode pipeline)."
 requires-python = ">=3.10"
 license = "AGPL-3.0-only"

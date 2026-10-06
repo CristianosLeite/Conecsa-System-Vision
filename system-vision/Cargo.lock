@@ -221,9 +221,10 @@ dependencies = [
 
 [[package]]
 name = "conecsa-system-vision"
-version = "2026.6.0"
+version = "2026.7.0"
 dependencies = [
  "bytes",
+ "conecsa-ui-view",
  "console_error_panic_hook",
  "gloo-timers",
  "js-sys",
@@ -238,6 +239,15 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
+name = "conecsa-ui-view"
+version = "2026.7.0"
+dependencies = [
+ "leptos",
+ "wasm-bindgen",
  "web-sys",
 ]
 

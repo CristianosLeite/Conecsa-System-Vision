@@ -209,6 +209,24 @@ class TestStart:
         svc.start("d1", "my-model")
         assert unloaded == ["sam"]
 
+    def test_a_sam_that_will_not_exit_fails_the_start_cleanly(self, config, dataset,
+                                                              monkeypatch):
+        monkeypatch.setattr(TrainingService, "_run", lambda self, *a, **k: None)
+
+        def stuck():
+            raise RuntimeError("SAM worker did not exit")
+
+        sam = SimpleNamespace(unload=stuck)
+        svc = TrainingService(config, FakeRegistry(dataset),  # pyright: ignore[reportArgumentType]
+                              sam_service=sam)
+        with pytest.raises(DatasetError, match="SAM3 could not be unloaded"):
+            svc.start("d1", "my-model")
+        # Nothing trains on top of it, and nothing stays claimed.
+        assert svc.get_job().status == "failed"
+        assert dataset.frozen is False
+        sam.unload = lambda: None
+        assert svc.start("d1", "my-model").status == "preparing"
+
 
 class TestTrainerArgv:
     def test_default_argv_matches_the_640_contract(self, config):
@@ -370,24 +388,73 @@ class TestRun:
         assert (tmp_path / "runs" / job_id / "weights" / "best.pt").exists()
 
 
+class TestEpochHistory:
+    """``_consume_stdout`` folds each trainer epoch line into ``history``."""
+
+    @staticmethod
+    def _proc(*payloads):
+        import json
+        return SimpleNamespace(stdout=iter(json.dumps(p) + "\n" for p in payloads))
+
+    def test_each_epoch_appends_its_charted_metrics(self, svc):
+        svc.start("d1", "my-model", epochs=3)
+        svc._consume_stdout(self._proc(
+            {"epoch": 1, "total": 3, "metrics": {
+                "train/box_loss": 1.234567891, "val/box_loss": 1.5,
+                "metrics/mAP50-95(B)": 0.1, "metrics/precision(B)": 0.4, "lr/pg0": 0.01}},
+            {"epoch": 2, "total": 3, "metrics": {"train/box_loss": 1.1}},
+            {"done": True, "best": "/runs/best.pt"},
+        ), 3)
+        job = svc.get_job()
+        assert job.history == [
+            {"epoch": 1, "train/box_loss": 1.23457, "val/box_loss": 1.5,
+             "metrics/mAP50-95(B)": 0.1},
+            {"epoch": 2, "train/box_loss": 1.1},
+        ]
+        assert job.metrics == {"train/box_loss": 1.1}
+
+    def test_the_history_never_outgrows_the_epoch_count(self, svc):
+        svc.start("d1", "my-model", epochs=2)
+        svc._consume_stdout(self._proc(
+            *({"epoch": e, "metrics": {}} for e in (1, 2, 3))), 2)
+        assert [r["epoch"] for r in svc.get_job().history] == [2, 3]
+
+    def test_a_new_job_starts_without_history(self, svc):
+        svc.start("d1", "my-model", epochs=2)
+        svc._consume_stdout(self._proc({"epoch": 1, "metrics": {}}), 2)
+        svc._set(status="done")
+        svc._registry.release(svc._job_dataset)
+        svc.start("d1", "my-model", epochs=2)
+        assert svc.get_job().history == []
+
+    def test_get_job_copies_the_history(self, svc):
+        svc.start("d1", "my-model", epochs=2)
+        svc._consume_stdout(self._proc({"epoch": 1, "metrics": {}}), 2)
+        svc.get_job().history.clear()
+        assert len(svc.get_job().history) == 1
+
+
 class TestUploadBest:
     def test_posts_imgsz_and_the_effective_geometry(self, config, dataset, monkeypatch, tmp_path):
         import service.training_service as ts
         posted = {}
 
-        def fake_post(url, files, data, timeout):
-            posted.update(url=url, filename=files["file"][0], data=data)
+        def fake_post(url, files, data, headers, timeout):
+            posted.update(url=url, filename=files["file"][0], data=data, headers=headers)
             return SimpleNamespace(status_code=202, json=lambda: {"job_id": "conv-7"})
 
         monkeypatch.setattr(ts.requests, "post", fake_post)
         svc = TrainingService(config, FakeRegistry(dataset))  # pyright: ignore[reportArgumentType]
         svc._job.model_name = "my-model"
+        svc._job.job_id = "job-7"
         svc._job.geometry = "tiles:auto"
         best = tmp_path / "best.pt"
         best.write_bytes(b"pt")
         assert svc._upload_best(str(best)) == "conv-7"
         assert posted["url"] == "http://gateway.test:5000/api/v1/model"
         assert posted["filename"] == "my-model.pt"
+        # The gateway's proof that this is the job's own result upload.
+        assert posted["headers"] == {"X-Conecsa-Training-Job": "job-7"}
         # A job that predates the task field uploads as detection.
         assert posted["data"] == {"imgsz": "640", "train_geometry": "tiles:auto",
                                   "task": "detect"}
@@ -469,7 +536,7 @@ class TestClassification:
         import service.training_service as ts
         posted = {}
 
-        def fake_post(url, files, data, timeout):
+        def fake_post(url, files, data, headers, timeout):
             posted.update(data=data)
             return SimpleNamespace(status_code=202, json=lambda: {"job_id": "conv-8"})
 
@@ -550,7 +617,7 @@ class TestFace:
                             lambda *a, **k: pytest.fail("a face job runs no trainer"))
         posted = {}
 
-        def fake_post(url, files, data, timeout):
+        def fake_post(url, files, data, headers, timeout):
             posted.update(url=url, filename=files["file"][0], data=data,
                           body=files["file"][1].read())
             return SimpleNamespace(status_code=202, json=lambda: {"job_id": "conv-face"})
@@ -590,3 +657,51 @@ class TestFace:
         svc._run(svc.get_job().job_id, epochs=0, batch=4, patience=10, weights_path="")
         done = svc.get_job()
         assert done.status == "failed" and "at least one photo" in done.error
+
+
+class TestSamUnload:
+    """An unload that cannot stop the SAM worker says so instead of reporting
+    a free GPU."""
+
+    class _Process:
+        def __init__(self, exits):
+            self.exits, self.signals = exits, []
+
+        def terminate(self):
+            self.signals.append("terminate")
+
+        def kill(self):
+            self.signals.append("kill")
+
+        def wait(self, timeout=None):
+            import subprocess
+            if not self.exits:
+                raise subprocess.TimeoutExpired("sam", timeout or 0.0)
+
+        def poll(self):
+            return 0 if self.exits else None
+
+    def _service(self, config, process):
+        from service.sam_service import SamService
+        sam = SamService(config)  # pyright: ignore[reportArgumentType]
+        sam._process = process  # pyright: ignore[reportAttributeAccessIssue]
+        return sam
+
+    def test_a_worker_that_exits_is_unloaded(self, config):
+        sam = self._service(config, self._Process(exits=True))
+        sam.unload()
+        assert sam.is_loaded() is False
+
+    def test_a_worker_that_will_not_exit_stays_loaded(self, config):
+        process = self._Process(exits=False)
+        sam = self._service(config, process)
+        with pytest.raises(Exception, match="SAM worker"):
+            sam.unload()
+        assert process.signals[:2] == ["terminate", "kill"]
+        assert sam.is_loaded() is True
+
+    def test_a_diverged_epoch_charts_only_its_finite_metrics(self):
+        from service.training_service import history_entry
+        entry = history_entry(4, {"train/box_loss": float("nan"),
+                                  "val/box_loss": float("inf"), "train/cls_loss": 0.5})
+        assert entry == {"epoch": 4, "train/cls_loss": 0.5}

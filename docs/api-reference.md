@@ -143,7 +143,7 @@ until then.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/v1/application` | `{"task", "supported_tasks", "migrated"}`: `task` is `null` while none is chosen, `supported_tasks` lists what this build can run, `migrated` is `true` when the task was set automatically for a device that already held models |
-| `PUT` | `/api/v1/application` | **admin** — `{"task": "detect"}`. Stops detection and deselects an active model of another task (its files are kept); detection is not restarted; `application_changed` is published on `/api/v1/events/stream`. Choosing the current task changes nothing. `400` unknown task; `409` a task this build cannot run, or while a training job or a model conversion holds the GPU; `503` when that check cannot reach the training or inference service; `500` when the device could not stop detection or store the choice (the previous application stays) |
+| `PUT` | `/api/v1/application` | **admin** — `{"task": "detect"}`. Frees the GPU ([GPU sharing](services/training-service.md#gpu-sharing)) and deselects an active model of another task (its files are kept); detection is not restarted; `application_changed` is published on `/api/v1/events/stream`. Choosing the current task changes nothing. `400` unknown task; `409` a task this build cannot run, or while detection runs (stop it first), a training job or a model conversion holds the GPU (`gpu_busy` names which); `503` when that check cannot reach the training or inference service; `500` when the device could not free the GPU or store the choice (the previous application stays) |
 
 How clients read the task:
 
@@ -165,9 +165,9 @@ dataset for the device's task (`409` while none is chosen, or when the body's
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/v1/models` | List available models (name, size, date, active, `has_weights` = the model keeps the `.pt` it was converted from as a training-checkpoint sidecar, `task` = the model's task). `?task=<task>` lists only that task's models |
-| `POST` | `/api/v1/model` | Upload a model. The optional form field `task` declares the model's task (default: the device's application; required on a device without one); a `.pt`/`.onnx` of another task fails its conversion and an engine of another task is refused (`409`). The optional form field `imgsz` is the conversion input size; without it a `.pt` is exported at the size it was trained at (ultralytics records it in the checkpoint), else at the task's default (`224` for classification, `640` otherwise). The optional form field `train_geometry` (`frames`, `tiles:auto` or `tiles:<px>`) records the geometry the model was trained at; a malformed value is ignored. A classification engine must output probabilities (softmax in the exported graph, as ultralytics exports it): one that outputs logits is refused at activation. A segmentation engine must have YOLO26's end-to-end head (detection rows plus mask prototypes); a segmentation engine with a one-to-many head is refused at activation. `.pt` and `.onnx` → async conversion to an engine (202 + `job_id`); `.engine`/`.plan` load immediately |
-| `POST` | `/api/v1/model/select` | Select active model by name |
+| `GET` | `/api/v1/models` | List available models (name, size, date, active, `has_weights` = the model keeps the `.pt` it was converted from as a training-checkpoint sidecar, `task` = the model's task, `map50_95` / `accuracy_top1` = the validation mAP@50:95 (mask mAP for segmentation) or top-1 accuracy (classification) of the checkpoint the engine was converted from, as a 0–1 fraction, `null` when unrecorded). `?task=<task>` lists only that task's models |
+| `POST` | `/api/v1/model` | Upload a model. The optional form field `task` declares the model's task (default: the device's application; required on a device without one); a `.pt`/`.onnx` of another task fails its conversion and an engine of another task is refused (`409`). The optional form field `imgsz` is the conversion input size; without it a `.pt` is exported at the size it was trained at (ultralytics records it in the checkpoint), else at the task's default (`224` for classification, `640` otherwise). The optional form field `train_geometry` (`frames`, `tiles:auto` or `tiles:<px>`) records the geometry the model was trained at; a malformed value is ignored. A classification engine must output probabilities (softmax in the exported graph, as ultralytics exports it): one that outputs logits is refused at activation. A segmentation engine must have YOLO26's end-to-end head (detection rows plus mask prototypes); a segmentation engine with a one-to-many head is refused at activation. `.pt` and `.onnx` → async conversion to an engine (202 + `job_id`); `.engine`/`.plan` load immediately. `409` (`gpu_busy`) while a training job runs — except that job's own result upload — and, for a `.engine`/`.plan`, while a conversion runs ([GPU sharing](services/training-service.md#gpu-sharing)) |
+| `POST` | `/api/v1/model/select` | Select active model by name. `409` while a training job or a model conversion holds the GPU (`gpu_busy` names which); SAM3 and the labeling engine are unloaded first |
 | `DELETE` | `/api/v1/model/<name>` | Remove a model |
 | `GET` | `/api/v1/model/<name>/download` | Download the model file |
 | `GET` | `/api/v1/model/<name>/weights` | Download the model's training checkpoint (the `.pt` it was converted from, see `has_weights`); 404 when it keeps none. Used by the training-service to fine-tune from the model |
@@ -210,30 +210,36 @@ resulting `<name>.gallery.npz` is never downloadable.
 | `POST` | `/api/v1/camera/config` | Update the camera tuning (index, width, height, framerate, exposure, ...) and/or the capture source via shared memory. Admin only |
 
 `GET /api/v1/camera/devices` also reports the capture source: `current_source`
-(`local` or `network`), `current_network_host`, `current_network_port`,
+(`local`, `network` or `ip`), `current_network_host`, `current_network_port`,
 `network_token_set` (a boolean — the token itself is never returned),
 `camera_connected` (`true` only while frames arrive),
 `camera_status` (`starting`, `capturing`, `no_camera`) and `camera_detail`, which
 says why a [remote camera](remote-camera.md) is not capturing: `unspecified`,
 `connecting`, `unauthorized`, `rate_limited`, `unreachable`, `stalled` or
-`bad_stream`.
+`bad_stream`. For [IP cameras](ip-cameras.md) it adds `ip_cameras_max` (4) and
+`ip_cameras`, the stored list in mosaic order — each entry `id`, `name`, `url`,
+`username`, `password_set` (a boolean; the password is never returned) and that
+camera's own `status` and `detail` (`no_camera` while another source is active).
 
 `POST /api/v1/camera/config` accepts the capture-source fields next to the tuning
 ones:
 
 | Field | Value |
 |---|---|
-| `source` | `local` or `network` |
+| `source` | `local`, `network` or `ip` |
 | `network_host` | The remote camera's IPv4 address. Unspecified, loopback, multicast and broadcast addresses are rejected |
 | `network_port` | `1`–`65535` |
 | `network_token` | 8–32 Crockford base32 characters; hyphens and case are ignored. **Write-only** |
+| `ip_cameras` | The complete, ordered list of 1–4 IP cameras: `{id?, name, url, username, password?}`. An omitted `password` keeps the stored one, `""` removes it. **Passwords are write-only.** See [IP cameras](ip-cameras.md#configuration-through-the-api) |
 
 The merged state is validated before anything is written: switching to `network`
 needs a complete address, port and token. An omitted `network_token` keeps the
 stored one; an empty one is an error, not a way to clear it. Switching to `local`
-keeps the stored remote camera address and token. The source is device-level — it is not
+keeps the stored remote camera address and token, and any other switch keeps
+the stored IP camera list; switching to `ip` needs at least one camera. The source is device-level — it is not
 part of any model's settings. The response, the `camera_config_changed` event and
-the audit entry (`camera.configured`) never contain the token.
+the audit entry (`camera.configured`) never contain the token or a camera
+password.
 
 ## Video (MJPEG fanned out of shared memory)
 
@@ -299,7 +305,7 @@ answers `409` with the reason.
 | `GET` | `/api/v1/network/wifi/scan` | List available Wi-Fi networks |
 | `POST` | `/api/v1/network/wifi/connect` | Connect to a network (`{ssid, password}`); `409` while the access point is up |
 | `POST` | `/api/v1/network/wifi/forget` | Remove a saved network (`{ssid}`); `409` while the access point is up |
-| `GET` | `/api/v1/network/ap` | The device's Wi-Fi access point: `active`, `ssid` (the device id, also when inactive), `frequency_mhz`, `address`, `prefix`, `stations` (`address`, `hostname`, `signal` per joined remote camera), `join_deadline_remaining_secs`, `wired_ready`, `message`, `channels` (the ones the radio may start on right now). Never the passphrase |
+| `GET` | `/api/v1/network/ap` | The device's Wi-Fi access point: `active`, `ssid` (the device id, also when inactive), `frequency_mhz`, `address`, `prefix`, `stations` (`address`, `hostname`, `signal` per joined remote camera), `wired_ready` (the admin-start precondition), `message`, `channels` (the ones the radio may start on right now). Never the passphrase |
 | `POST` | `/api/v1/network/ap/start` | Start the access point (`{passphrase, channel?}`; the SSID is the device id, `channel` 36, 40, 44 or 48, or 0/absent for automatic). A passphrase outside 8–63 characters or a channel outside that set is `400`. Every other refusal is `200` with `success: false` and the reason in `message`: already active, no wireless interface, no wired link (carrier plus an IPv4 address), the subnet overlapping an active network (or a link whose addresses cannot be read), another transition running, a passphrase that is not printable ASCII, the deployment lacking the `/run/systemd/network` mount, no regulatory country in wpa_supplicant, or the chosen channel (or, with automatic, every channel) still blocked after one targeted scan (about 2 s), naming the usable ones. A failed start rolls the radio back to station mode. Emits `network_config_changed`; audited as `network.ap_started` with the SSID only, never the passphrase |
 | `POST` | `/api/v1/network/ap/stop` | Return the radio to station mode (idempotent). Emits `network_config_changed`; audited as `network.ap_stopped` |
 
@@ -310,8 +316,8 @@ dataset-scoped route carries the `dataset_id` explicitly.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/v1/training/enter` | Enter training mode (acquire GPU handover from inference) |
-| `POST` | `/api/v1/training/exit` | Leave training mode (resume inference runtime). Body `{"resume_detection": false}` keeps detection stopped and the engine unloaded for the model conversion, but still ends the GPU handover, so the application type can change again; the resume is also skipped while a training job is active (the handover then lasts until the job ends and detection is started) |
+| `POST` | `/api/v1/training/enter` | Enter training mode: stops detection, frees the GPU and hands it over from inference. `409` while a model conversion runs (`gpu_busy: "conversion"`) |
+| `POST` | `/api/v1/training/exit` | Leave training mode (resume inference runtime). Body `{"resume_detection": false}` keeps detection stopped and the engine unloaded for the model conversion, but still ends the GPU handover; the resume is also skipped while a training job is active. A handover left behind never blocks anything: the next GPU consumer ends it |
 | `POST` | `/api/v1/training/heartbeat` | Keep the training orphan watchdog fed while the training page is open (the device UI beats about every 10 s); returns `{"status": "ok"}` and changes nothing else |
 | `GET` | `/api/v1/training/preview` | Capture-preview frame (current camera image) |
 | `GET` | `/api/v1/training/datasets` | List datasets (`dataset_id`, `name`, `task`, `created_at`, `image_count`, `labeled_count`, `class_count`, `cover_image_id`) |
@@ -323,7 +329,7 @@ dataset-scoped route carries the `dataset_id` explicitly.
 | `GET` | `/api/v1/training/datasets/<dataset_id>/export` | Export the dataset as a ZIP in the layout the import accepts (a classification dataset as `train/<class>/` folders plus `classes.txt`, unlabeled images left out); `?shards=N&index=I[&seed=S]` exports one deterministic IID shard instead (federated training): `shards` 2–16, `index` (default `0`) below `shards`; a non-integer `shards` or `index` answers `400`. A face dataset is never exported, with or without shards (`409`): its enrolment photos are biometric data that stay on the device, so the hub fetches none of its images and offers neither gallery, download nor transfer for it |
 | `PUT` | `/api/v1/training/datasets/<dataset_id>/cover` | Set the dataset cover image |
 | `POST` | `/api/v1/training/datasets/<dataset_id>/capture` | Capture the current camera frame into the dataset |
-| `POST` | `/api/v1/training/datasets/<dataset_id>/images` | Add an external image (multipart `file`) with optional pre-labels: `boxes` (JSON `[{class_name, x1, y1, x2, y2}]`, normalized corners) for a detection dataset, `polygons` (JSON `[{class_name, points: [[x, y], …], instance}]`, normalized on the uploaded image; `instance`, optional, groups the rings of one object; a ring without one is an object of its own) for a segmentation dataset, or `image_class` (a class name) for a classification dataset — the dataset's task decides which kind it accepts (`400` for the other). Stored like a capture; class names are resolved/created. Used by the hub's record-to-dataset flow |
+| `POST` | `/api/v1/training/datasets/<dataset_id>/images` | Add an external image (multipart `file`) with optional pre-labels: `boxes` (JSON `[{class_name, x1, y1, x2, y2}]`, normalized corners) for a detection dataset, `polygons` (JSON `[{class_name, points: [[x, y], …], instance}]`, normalized on the uploaded image; `instance`, optional, groups the rings of one object; a ring without one is an object of its own) for a segmentation dataset, or `image_class` (a class name) for a classification dataset — the dataset's task decides which kind it accepts (`400` for the other). Stored like a capture; class names are resolved/created. Used by the hub's record-to-dataset flow and the device screen's image upload |
 | `GET` | `/api/v1/training/datasets/<dataset_id>/images` | List images (+ label state, replica flag, and `image_class` for a classification dataset) |
 | `GET` | `/api/v1/training/datasets/<dataset_id>/images/<image_id>` | Fetch an image (JPEG) |
 | `DELETE` | `/api/v1/training/datasets/<dataset_id>/images/<image_id>` | Delete an image (and its labels) |
@@ -335,15 +341,15 @@ dataset-scoped route carries the `dataset_id` explicitly.
 | `PUT` | `/api/v1/training/datasets/<dataset_id>/classes/<index>` | Rename the class at `index` |
 | `DELETE` | `/api/v1/training/datasets/<dataset_id>/classes/<index>` | Remove the class at `index` |
 | `GET` | `/api/v1/training/sam` | SAM3 worker status: `{"available", "loaded", "message"}` (`available` is `false`, with the reason in `message`, when the package or checkpoint is missing) |
-| `POST` | `/api/v1/training/sam/load` | Load the SAM3 segmentation worker |
+| `POST` | `/api/v1/training/sam/load` | Load the SAM3 segmentation worker after freeing the GPU (the labeling engine and idle TensorRT workers go). `409` while detection runs, a training job or a model conversion holds the GPU (`gpu_busy` names which) |
 | `POST` | `/api/v1/training/sam/unload` | Unload the SAM3 worker (free GPU memory) |
 | `POST` | `/api/v1/training/sam/segment` | SAM3-assisted segmentation for a text or point prompt — body `{"dataset_id", "image_id", "text_prompt", "points": [{"x", "y", "positive"}], "threshold"}` (`dataset_id` and `image_id` required; `positive` defaults to `true`). Returns `boxes` (normalized center/size), `scores` and, parallel to them, `polygons` — each object's mask as normalized rings (`[]` for an object without one) |
 | `GET` | `/api/v1/training/label-model` | Model-assisted labeling status (`loaded`, `model_name`, `class_names`, `task`): an existing engine on the inference-service's private TensorRT worker |
-| `POST` | `/api/v1/training/label-model/load` | Load an existing engine (`{"model_name": "X.engine"}`, any `.engine`/`.plan` of `GET /api/v1/models`) as the labeling assistant, on the same TensorRT runtime and `TILING_MODE` preprocessing as live detection |
+| `POST` | `/api/v1/training/label-model/load` | Load an existing engine (`{"model_name": "X.engine"}`, any `.engine`/`.plan` of `GET /api/v1/models`) as the labeling assistant, on the same TensorRT runtime and `TILING_MODE` preprocessing as live detection, after freeing the GPU (SAM3 and idle TensorRT workers go). `409` while detection runs, a training job or a model conversion holds the GPU (`gpu_busy` names which) |
 | `POST` | `/api/v1/training/label-model/unload` | Unload the labeling engine (terminates its private worker) |
 | `POST` | `/api/v1/training/label-model/detect` | Run the loaded engine on a dataset image (`{"dataset_id", "image_id", "threshold"}`); returns `boxes` (normalized center/size, `class_id` = the engine's index), `scores` the parallel `class_names` the dataset resolves them by and, for a segmentation engine, the parallel `polygons` (each object's mask as normalized rings). Every response also carries `image_class` and `candidates`: a classification engine fills `image_class` (`{class_id, class_name, score}` above the threshold) and the top-k `candidates`, with `boxes`, `scores`, `class_names` and `polygons` empty; other engines answer `image_class: null` and `candidates: []`. `409` when the engine's task is not the dataset's |
 | `POST` | `/api/v1/training/train` | Start a training job. The dataset's task picks the stock weights (YOLO26s; YOLO26s-seg for segmentation, on the same tile crops; YOLO26s-cls at `TRAIN_IMG_SIZE_CLS` for classification). `base_model` (`"X.engine"`, a `GET /api/v1/models` entry with `has_weights`) fine-tunes from that model's training checkpoint (its last `best.pt`) instead; it must be a model of the dataset's task. Federated round: `{"federated": true, "initial_weights_id": ...}` trains from a stashed checkpoint and retains the resulting `last.pt` (`model_name` optional); exclusive with `base_model`, refused when the checkpoint was stashed for another task |
-| `GET` | `/api/v1/training/train/status` | Current job status / progress. `geometry` is the effective training geometry once the split is built (`frames`, `tiles:auto` or `tiles:<px>`, see `TRAIN_TILE`); federated jobs expose `result_weights_id` when done |
+| `GET` | `/api/v1/training/train/status` | Current job status / progress. `geometry` is the effective training geometry once the split is built (`frames`, `tiles:auto` or `tiles:<px>`, see `TRAIN_TILE`); federated jobs expose `result_weights_id` when done. `metrics` is the last epoch's ultralytics metrics and `history` one object per finished epoch (`epoch` plus the `train/*`, `val/*` losses and `metrics/mAP50-95(B)`/`(M)` or `metrics/accuracy_top1`), oldest first |
 | `POST` | `/api/v1/training/train/cancel` | Cancel the running job |
 | `POST` | `/api/v1/training/train/finish` | Finish: hand `best.pt` to the model-upload route (pt→onnx→engine) |
 | `POST` | `/api/v1/training/weights` | Stash a checkpoint (multipart `file`, optional `task` = the task it was trained for, so a job started from it refuses a dataset of another task) for federated training; answers `201` with `{"weights_id", "size"}` |

@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 import requests
 from conecsa_shm.camera_ring import CameraRingReader
+from conecsa_shm.mosaic import CameraFrameSource
 from conecsa_shm.stereo import combine_stereo
 
 from .config import Config
@@ -45,7 +46,9 @@ class CaptureService:
 
     def __init__(self, config: Config):
         self._config = config
-        self._reader = CameraRingReader(config.SHM_NAME)
+        # The camera as one picture: with IP cameras, their mosaic (v1 stores
+        # the whole mosaic; a per-camera capture is a later step).
+        self._reader = CameraFrameSource(config.SHM_NAME, CameraRingReader(config.SHM_NAME))
         self._last_seq = 0
 
     def _live_stereo(self) -> Tuple[bool, float, float, float]:
@@ -91,6 +94,8 @@ class CaptureService:
             frame = cv2.imdecode(np.frombuffer(frame, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             return None
+        if self._reader.ip_camera_count() > 0:
+            return frame  # a mosaic of IP cameras is never a stereo pair
         enabled, alpha, offset, offset_y = self._live_stereo()
         if enabled:
             frame = combine_stereo(frame, alpha=alpha, offset=offset, offset_y=offset_y)

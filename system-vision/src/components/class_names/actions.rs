@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use crate::components::common::toolbar_icon::ToolbarIcon;
 use crate::i18n::*;
 use leptos::prelude::*;
 
@@ -29,15 +30,16 @@ pub(super) fn ClassActions(
                 view! {
                     <>
                         <button
-                            class="ui-button ui-button-neutral ui-button-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                            type="button"
+                            class="ui-icon-button ui-icon-button-md"
                             disabled=!privileged
-                            title=restricted_title
+                            title=move || if privileged { t_string!(i18n, models::edit) } else { restricted_title() }
+                            aria-label=move || t_string!(i18n, models::edit)
                             on:click=move |_| on_start_edit.run(())
                         >
-                            <svg class="w-4 h-4 stroke-current" viewBox="0 0 24 24" fill="none">
+                            <ToolbarIcon>
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                            </svg>
-                            {t!(i18n, models::edit)}
+                            </ToolbarIcon>
                         </button>
                         <button
                             class="ui-button ui-button-primary ui-button-sm disabled:opacity-50 disabled:cursor-not-allowed"
@@ -56,23 +58,28 @@ pub(super) fn ClassActions(
                 view! {
                     <>
                         <button
-                            class="ui-button ui-button-danger ui-button-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                            type="button"
+                            class="ui-icon-button ui-icon-button-md ui-icon-button-danger"
                             disabled=!privileged
-                            title=restricted_title
+                            title=move || if privileged { t_string!(i18n, common::cancel) } else { restricted_title() }
+                            aria-label=move || t_string!(i18n, common::cancel)
                             on:click=move |_| on_cancel.run(())
                         >
-                            {t!(i18n, common::cancel)}
+                            <ToolbarIcon>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                            </ToolbarIcon>
                         </button>
                         <button
-                            class="ui-button ui-button-success ui-button-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                            type="button"
+                            class="ui-icon-button ui-icon-button-md ui-icon-button-success"
                             disabled=!privileged
-                            title=restricted_title
+                            title=move || if privileged { t_string!(i18n, common::save) } else { restricted_title() }
+                            aria-label=move || t_string!(i18n, common::save)
                             on:click=move |_| on_save.run(())
                         >
-                            <svg class="w-4 h-4 stroke-current" viewBox="0 0 24 24" fill="none">
+                            <ToolbarIcon>
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                            </svg>
-                            {t!(i18n, common::save)}
+                            </ToolbarIcon>
                         </button>
                     </>
                 }.into_any()

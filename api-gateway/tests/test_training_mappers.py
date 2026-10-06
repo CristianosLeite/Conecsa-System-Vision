@@ -61,6 +61,20 @@ class TestJobDict:
         # Older stubs (or a job still preparing) carry no geometry.
         assert _job_dict(_job())["geometry"] == ""
 
+    def test_history_is_parsed(self):
+        rows = '[{"epoch": 1, "train/box_loss": 1.5}, {"epoch": 2, "train/box_loss": 1.2}]'
+        d = _job_dict(_job(metrics_history_json=rows))
+        assert [r["epoch"] for r in d["history"]] == [1, 2]
+        assert d["history"][1]["train/box_loss"] == 1.2
+
+    def test_missing_history_is_empty(self):
+        # Older training-service stubs carry no history field.
+        assert _job_dict(_job())["history"] == []
+
+    @pytest.mark.parametrize("raw", ["[not json", '{"epoch": 1}'])
+    def test_malformed_history_is_empty(self, raw):
+        assert _job_dict(_job(metrics_history_json=raw))["history"] == []
+
 
 class TestMetaDict:
     def test_full_meta(self):

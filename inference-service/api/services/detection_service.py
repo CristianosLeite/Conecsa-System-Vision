@@ -7,7 +7,7 @@ Detection service - Manages detection operations.
 """
 import logging
 from threading import Lock
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 # noinspection PyPackageRequirements
 import numpy as np  # ships in conecsa-os-base:base
@@ -17,7 +17,7 @@ from .. import postprocess
 from ..config import Config
 from ..model_manager import ModelManager
 from ..models.detection_models import DetectionResult
-from ..postprocess.base import Postprocessor
+from ..postprocess.base import Postprocessor, PostprocessResult
 from ..postprocess.classify import probabilities_output
 from ..postprocess.contract import ContractError, check, check_probabilities
 from ..utils import load_class_labels
@@ -117,6 +117,10 @@ class DetectionService:
         self._detection_count: int = 0
         self._count_lock: Lock = Lock()
         self.last_detection_result: Optional[DetectionResult] = None
+        # The IP camera ids, in mosaic order, of the last finished frame
+        # (None for a single camera). Per-stream task state is keyed by input
+        # position, so it is reset whenever this changes.
+        self._camera_layout_ids: Optional[tuple] = None
         # Runtime generation — advanced by every initialize(); see StaleGeneration.
         self.generation: int = 0
         # The processing pipeline, once it registers itself (attach_pipeline):
@@ -225,6 +229,7 @@ class DetectionService:
 
             logger.info("Initializing %s postprocess...", task)
             previous = self.postprocessor
+            postprocessor: Postprocessor
             if (task == "face" and isinstance(previous, postprocess.FacePostprocessor)
                     and "face" in postprocess.supported_tasks()):
                 # Face to face: the SFace worker is one per device on one
@@ -361,13 +366,15 @@ class DetectionService:
 
     # ── Pipeline stages: prepare / infer / finish, run on separate pipeline threads ──
 
-    def prepare(self, frame: np.ndarray):
+    def prepare(self, frame: np.ndarray, regions=None):
         """Stage A: snapshot detection areas + preprocess.
 
         Returns ``(generation, inputs, metas)`` — the runtime generation this
         frame was prepared against plus parallel lists holding one preprocessed
         tensor and one ``TileMeta`` per tile (a single full-frame entry when
         ``TILING_MODE=off``) — or ``None`` if detection is not ready.
+        ``regions`` (an IP camera mosaic's camera rectangles) makes each camera
+        its own inference input; see ``ModelManager.preprocess_tiles``.
         """
         # Snapshot the generation before touching the runtime: a swap that
         # lands during preprocessing is then caught by infer/finish.
@@ -382,7 +389,7 @@ class DetectionService:
         if self.area_service is not None:
             postprocessor.set_areas(self.area_service.list())
 
-        inputs, metas = model_manager.preprocess_tiles(frame)
+        inputs, metas = model_manager.preprocess_tiles(frame, regions)
         return generation, inputs, metas
 
     def _check_generation(self, generation: Optional[int]) -> None:
@@ -417,7 +424,8 @@ class DetectionService:
         return outputs, total_time
 
     def finish(self, outputs, frame: np.ndarray, metas, inference_time: float = 0.0,
-               generation: Optional[int] = None) -> Optional[DetectionResult]:
+               generation: Optional[int] = None,
+               cameras: Optional[List[dict]] = None) -> Optional[DetectionResult]:
         """Stage C: postprocess detections + draw overlay. Returns DetectionResult.
 
         ``outputs``/``metas`` are the parallel lists produced by ``infer`` and
@@ -431,8 +439,26 @@ class DetectionService:
         postprocessor = self.postprocessor
         if not postprocessor:
             return None
-        tiled = self.model_manager is not None and self.model_manager.tiling_active
-        decoded = postprocessor.process(outputs, frame, metas, tiled)
+        # Several inputs, or one offset into the frame (a mosaic camera), go
+        # through the tiled decode: it maps every input back into frame space.
+        tiled = ((self.model_manager is not None and self.model_manager.tiling_active)
+                 or len(metas) > 1
+                 or any(getattr(m, "ox", 0) or getattr(m, "oy", 0) for m in metas))
+        # Entering or leaving the IP source, or a changed camera list (added,
+        # removed, reordered): per-stream state such as a classification's
+        # current class per camera position belongs to the old layout.
+        layout_ids = tuple(c["id"] for c in cameras) if cameras else None
+        if layout_ids != getattr(self, "_camera_layout_ids", None):
+            self._camera_layout_ids = layout_ids
+            postprocessor.reset_state()
+        if metas:
+            decoded = postprocessor.process(outputs, frame, metas, tiled)
+        else:
+            # An IP camera mosaic with every camera offline: nothing to decode,
+            # and nobody is present any more — a camera that comes back with
+            # the same class or person counts again, as after a partial outage.
+            postprocessor.reset_state()
+            decoded = PostprocessResult(frame, 0, [])
         result = DetectionResult(
             detections=decoded.items,
             processed_image=decoded.image,
@@ -441,6 +467,8 @@ class DetectionService:
             raw_image=frame,
             count_increment=decoded.count_increment,
             candidates=decoded.candidates,
+            region_candidates=decoded.region_candidates,
+            cameras=cameras,
         )
         self.last_detection_result = result
         if self.buffer_service is not None:
@@ -552,14 +580,19 @@ class DetectionService:
         the per-frame offline-buffer signature does not read them.
         """
         height, width = result.processed_image.shape[:2]
+        cameras = result.cameras
         items = []
         for d in result.detections:
-            item = {
+            item: Dict[str, Any] = {
                 "class_name": d.class_name,
                 "color": d.color,
                 "confidence": round(float(d.confidence), 4),
                 "area": d.area,
             }
+            if cameras:
+                camera = DetectionService._camera_of(d, cameras)
+                item["camera"] = camera["id"] if camera else None
+                item["camera_name"] = camera["name"] if camera else None
             if d.bbox is not None:
                 item["bbox"] = normalized_bbox(d.bbox, width, height)
             rings = d.resolve_polygons() if with_polygons else None
@@ -573,6 +606,21 @@ class DetectionService:
             return items, False
         return items, DetectionService._cap_polygons(
             items, DetectionService.SNAPSHOT_POLYGON_BYTES)
+
+    @staticmethod
+    def _camera_of(detection, cameras: List[dict]) -> Optional[dict]:
+        """The IP camera a result belongs to: the cell of its center or input origin."""
+        point = detection.center if detection.center is not None else detection.origin
+        return DetectionService._camera_at(point, cameras)
+
+    @staticmethod
+    def _camera_at(point, cameras: List[dict]) -> Optional[dict]:
+        if point is None:
+            return None
+        for camera in cameras:
+            if camera["rect"].contains(*point):
+                return camera
+        return None
 
     @staticmethod
     def _cap_polygons(items: List[dict], limit: int) -> bool:
@@ -604,6 +652,35 @@ class DetectionService:
                 item["polygons"] = [ring for j, ring in enumerate(item["polygons"])
                                     if (i, j) not in dropped]
         return True
+
+    @staticmethod
+    def _per_camera_candidates(result: DetectionResult) -> List[dict]:
+        """Classification top-k of every configured IP camera, in mosaic order.
+
+        A camera with no frame (offline) is listed with no candidates, so a
+        client keeps one row per camera.
+        """
+        cameras = result.cameras or []
+        by_camera: Dict[str, List[dict]] = {}
+        for entry in result.region_candidates or []:
+            camera = DetectionService._camera_at(entry["origin"], cameras)
+            if camera is not None:
+                by_camera[camera["id"]] = entry["candidates"]
+        return [{"camera": camera["id"], "camera_name": camera["name"],
+                 "candidates": by_camera.get(camera["id"], [])} for camera in cameras]
+
+    @staticmethod
+    def _camera_layout(result: DetectionResult) -> List[dict]:
+        height, width = result.processed_image.shape[:2]
+        layout = []
+        for camera in result.cameras or []:
+            rect = camera["rect"]
+            layout.append({
+                "id": camera["id"], "name": camera["name"],
+                "rect": [round(rect.x0 / width, 4), round(rect.y0 / height, 4),
+                         round(rect.x1 / width, 4), round(rect.y1 / height, 4)],
+            })
+        return layout
 
     def _pending_backlog(self) -> int:
         """Buffered offline records awaiting a hub drain (0 without a buffer)."""
@@ -657,6 +734,12 @@ class DetectionService:
         # unchanged. Neither the offline buffer nor the hub reads it.
         if result.candidates is not None:
             snapshot["candidates"] = result.candidates
+        # IP cameras: the mosaic layout, so a client can tell the cells apart
+        # (rect normalized to the frame). Absent for a single camera.
+        if result.cameras:
+            snapshot["cameras"] = self._camera_layout(result)
+            if result.region_candidates is not None:
+                snapshot["per_camera"] = self._per_camera_candidates(result)
         # Only present when the polygon payload cap dropped rings.
         if polygons_truncated:
             snapshot["polygons_truncated"] = True

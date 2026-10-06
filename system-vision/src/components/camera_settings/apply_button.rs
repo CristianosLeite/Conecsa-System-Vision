@@ -13,15 +13,10 @@ pub(super) fn ApplyCameraSettingsButton(
     let i18n = use_i18n();
 
     view! {
-        <div class="ui-section-rule-sm">
+        <div class="camera-apply-action">
             <button
-                class={move || {
-                    if saving.get() {
-                        "ui-button ui-button-primary ui-button-md w-full"
-                    } else {
-                        "ui-button ui-button-primary ui-button-md w-full"
-                    }
-                }}
+                type="button"
+                class="ui-button ui-button-primary ui-button-md camera-apply-button"
                 on:click=move |_| on_apply.run(())
                 disabled=move || saving.get()
             >

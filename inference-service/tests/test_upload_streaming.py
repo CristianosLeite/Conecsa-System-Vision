@@ -42,6 +42,9 @@ class StubConversionService:
                               "imgsz_from_checkpoint": imgsz_from_checkpoint})
         return SimpleNamespace(job_id="job-1")
 
+    def get_active_jobs(self):
+        return []
+
 
 @pytest.fixture
 def servicer(tmp_path):

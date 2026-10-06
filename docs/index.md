@@ -13,7 +13,10 @@ desktop app is the authenticated entry point to a fleet of devices. See
 
 Operators (rather than integrators) should start with the **user manual** — an
 interactive, trilingual guide that embeds a simulation of the hub and device
-screens: <https://conecsa.com.br/system-vision/2026-6/manual/>.
+screens: <https://conecsa.com.br/system-vision/2026-7/manual/>. Start with the
+guided sequence of daily tasks, then use the sample-data exercises to explore
+setup and training. The simulator follows reading; exploring its screens keeps
+the text in place and offers a link to the relevant explanation.
 
 ## Documentation map
 

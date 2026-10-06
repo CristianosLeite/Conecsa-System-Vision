@@ -2,11 +2,12 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::ip_cameras_form::ip_detail_text;
 use crate::i18n::*;
 use leptos::prelude::*;
 
-/// The camera health the webcam-server reports, and — for a remote camera —
-/// why it is not capturing.
+/// The camera health the webcam-server reports, and — for a remote camera or
+/// the IP cameras — why it is not capturing.
 ///
 /// The health always describes the *applied* source, so the row names it; when
 /// the selector points elsewhere, it says so, or a "Capturing" from the local
@@ -20,10 +21,10 @@ pub(super) fn CameraStatusRow(
 ) -> impl IntoView {
     let i18n = use_i18n();
 
-    let applied_label = move || if applied_source.get() == crate::api::SOURCE_NETWORK {
-        t_string!(i18n, camera::source_network)
-    } else {
-        t_string!(i18n, camera::source_local)
+    let applied_label = move || match applied_source.get().as_str() {
+        crate::api::SOURCE_NETWORK => t_string!(i18n, camera::source_network),
+        crate::api::SOURCE_IP => t_string!(i18n, camera::source_ip),
+        _ => t_string!(i18n, camera::source_local),
     };
     let pending_switch = move || selected_source.get() != applied_source.get();
 
@@ -37,8 +38,10 @@ pub(super) fn CameraStatusRow(
         "starting" => t_string!(i18n, camera::status_starting),
         _ => t_string!(i18n, camera::status_no_camera),
     };
-    // An unknown or unspecified detail adds nothing to the status.
+    // An unknown or unspecified detail adds nothing to the status. The IP
+    // cameras have no token, so their details are worded for an RTSP camera.
     let detail_text = move || match detail.get().as_str() {
+        _ if applied_source.get() == crate::api::SOURCE_IP => ip_detail_text(i18n, &detail.get()),
         "connecting" => Some(t_string!(i18n, camera::detail_connecting)),
         "unauthorized" => Some(t_string!(i18n, camera::detail_unauthorized)),
         "rate_limited" => Some(t_string!(i18n, camera::detail_rate_limited)),
@@ -50,7 +53,7 @@ pub(super) fn CameraStatusRow(
 
     view! {
         <div class="camera-status">
-            <div class="ui-row ui-row-wrap">
+            <div class="camera-inline-row">
                 <span class="ui-label-xs">{t!(i18n, camera::status)}</span>
                 <span class=badge>{status_text}</span>
                 <span class="ui-muted camera-status-detail">

@@ -176,6 +176,18 @@ class TestSeqlockReader:
         finally:
             writer.close()
 
+    def test_a_rejected_segment_is_logged_once_however_often_it_is_polled(self, caplog):
+        name = f"conecsa-test-cam-{uuid.uuid4().hex[:8]}"
+        writer = StubCameraWriter(name, version=2)
+        try:
+            with caplog.at_level("WARNING"):
+                reader = CameraRingReader(name)
+                for _ in range(50):
+                    assert reader.get_latest_frame(0) is None
+            assert sum("magic/version" in r.message for r in caplog.records) == 1
+        finally:
+            writer.close()
+
     def test_checksummed_stress_run_yields_no_corrupt_frame(self, ring):
         writer, reader = ring
         payload_len = 64

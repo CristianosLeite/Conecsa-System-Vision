@@ -2,12 +2,14 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""The Wi-Fi access point: start, rollback, stop, deadline, reconcile.
+"""The Wi-Fi access point: start, rollback, stop, reconcile, restore.
 
 Runs the real ``ApAgent`` against a fake wpa control, a fake networkd whose
 ``DescribeLink`` returns the real lease shapes, a temp ``/run``
-directory and a controlled clock. No sockets, no D-Bus.
+directory, a temp state file, a synchronous restore and a controlled clock.
+No sockets, no D-Bus.
 """
+import json
 import logging
 import threading
 from typing import Any
@@ -198,16 +200,20 @@ def rig(monkeypatch, tmp_path):
     monkeypatch.setattr(mod.networkd, "reload", networkd.reload)
     monkeypatch.setattr(mod.networkd, "reconfigure_link", networkd.reconfigure_link)
     monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(mod, "_STATION_POLL_S", 0.01)
     clock = Clock()
     agent = ApAgent(lambda: {"wired": WIRED, "wifi": WIFI}, run_dir=str(tmp_path), now=clock,
-                    wpa_factory=make_wpa)
+                    wpa_factory=make_wpa, state_path=str(state_file(tmp_path)),
+                    spawn=lambda fn: fn())
     yield agent, networkd, holder, clock, tmp_path
     agent._teardown()
 
 
 def ap_file(tmp_path):
     return tmp_path / f"05-conecsa-ap-{WIFI[1]}.network"
+
+
+def state_file(tmp_path):
+    return tmp_path / "state" / "access-point.json"
 
 
 class TestStart:
@@ -225,13 +231,15 @@ class TestStart:
         assert block["mode"] == "2" and block["frequency"] == "5180"
         assert block["key_mgmt"] == "WPA-PSK" and block["pairwise"] == "CCMP"
         assert block["ssid"] == "conecsa-000001".encode().hex()
+        # The derived key, not the passphrase: the same key the state file keeps.
+        assert block["psk"] == mod._derive_psk("conecsa-000001", PASS)
         assert wpa.saved == 0, "an access point block never reaches the saved config"
         assert networkd.calls[0] == "reload"
 
         st = agent.status()
         assert st["active"] and st["ssid"] == "conecsa-000001" and st["frequency_mhz"] == 5180
         assert (st["address"], st["prefix"]) == ("10.98.76.1", 24)
-        assert st["join_deadline_remaining_secs"] == 300
+        assert "join_deadline_remaining_secs" not in st, "nothing counts down to a stop"
         assert st["stations"] == [] and st["wired_ready"]
 
     @pytest.mark.parametrize("ssid,passphrase,channel,fragment", [
@@ -581,7 +589,7 @@ class TestStop:
         assert not ap_file(tmp_path).exists() and wpa.reconfigured == 1
         assert all(n.get("mode") != "2" for n in wpa.networks.values())
         st = agent.status()
-        assert not st["active"] and st["ssid"] == "" and st["join_deadline_remaining_secs"] == 0
+        assert not st["active"] and st["ssid"] == ""
         assert agent.stop()["success"], "a second stop is a no-op, not an error"
         assert wpa.saved == 0
 
@@ -609,59 +617,294 @@ class TestStations:
         ]
         assert "02:00:5e" not in str(st)
 
-    def test_a_joined_station_cancels_the_join_deadline_for_good(self, rig):
-        agent, networkd, holder, clock, _tmp = rig
-        assert agent.start("dev", PASS, 36)["success"]
-        clock.t += 120
-        assert agent.status()["join_deadline_remaining_secs"] == 180
-        agent.note_station()
-        assert agent.status()["join_deadline_remaining_secs"] == 0
-        agent._deadline_fired()  # the timer fires anyway: nothing happens
-        assert agent.status()["active"]
-        holder[0].stations = []
-        agent._deadline_fired()
-        assert agent.status()["active"], "a later disconnect does not stop the access point"
-
-    def test_the_watcher_notices_a_station(self, rig):
-        agent, networkd, holder, _clock, _tmp = rig
+    def test_nothing_stops_a_running_access_point_by_itself(self, rig):
+        agent, networkd, holder, clock, tmp_path = rig
         assert agent.start("dev", PASS, 36)["success"]
         holder[0].stations = [STA_MAC]
-        deadline = threading.Event()
-        for _ in range(200):
-            if agent.status()["join_deadline_remaining_secs"] == 0:
-                deadline.set()
-                break
-            threading.Event().wait(0.01)
-        assert deadline.is_set()
-
-    def test_the_deadline_stops_an_access_point_nobody_joined(self, rig):
-        agent, networkd, holder, clock, tmp_path = rig
-        assert agent.start("dev", PASS, 36)["success"]
-        clock.t += mod.JOIN_DEADLINE_S + 1
-        agent._deadline_fired()
+        clock.t += 3600  # an hour with a remote camera, then it leaves
+        holder[0].stations = []
+        networkd.wired_carrier = "no-carrier"  # and the cable is pulled
         st = agent.status()
-        assert not st["active"] and "No remote camera joined" in st["message"]
-        assert not ap_file(tmp_path).exists()
+        assert st["active"] and not st["wired_ready"]
+        assert ap_file(tmp_path).exists() and state_file(tmp_path).exists()
+        assert not any(isinstance(t, threading.Timer) for t in threading.enumerate())
 
-    def test_a_station_joining_as_the_deadline_fires_keeps_the_access_point(self, rig, monkeypatch):
-        agent, networkd, holder, clock, tmp_path = rig
+
+def write_state(tmp_path, **overrides):
+    state = {"ssid": "conecsa-000001", "psk": mod._derive_psk("conecsa-000001", PASS), "channel": 0}
+    state.update(overrides)
+    path = state_file(tmp_path)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(state))
+
+
+def ticking(agent, clock, step=5.0):
+    """Every read of the clock moves it on, so the restore window runs out."""
+    ticks = iter(range(1, 10_000))
+    agent._now = lambda: clock.t + next(ticks) * step
+
+
+class TestPersistedIntent:
+    def test_a_start_records_the_intent_without_the_passphrase(self, rig, caplog):
+        agent, _networkd, _holder, _clock, tmp_path = rig
+        with caplog.at_level(logging.DEBUG):
+            assert agent.start("conecsa-000001", PASS, 0)["success"]
+        path = state_file(tmp_path)
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert json.loads(path.read_text()) == {
+            "ssid": "conecsa-000001", "psk": mod._derive_psk("conecsa-000001", PASS), "channel": 0}
+        assert PASS not in path.read_text() and PASS not in caplog.text
+        assert mod._derive_psk("conecsa-000001", PASS) not in caplog.text
+
+    def test_removing_the_intent_is_flushed_to_disk(self, rig, monkeypatch):
+        agent, _networkd, _holder, _clock, tmp_path = rig
         assert agent.start("dev", PASS, 36)["success"]
-        reconfigured_before = holder[0].reconfigured
-        real_claim = agent._claim_stop
+        flushed = []
+        monkeypatch.setattr(mod, "fsync_dir", lambda directory: flushed.append(
+            (directory, state_file(tmp_path).exists())))
+        assert agent.stop()["success"]
+        assert flushed == [(str(state_file(tmp_path).parent), False)], "flushed after the unlink"
+        assert agent.stop()["success"] and len(flushed) == 1, "nothing to flush without a file"
 
-        def joins_first(only_if_unjoined=False):
-            # The station associates in the window between the timer firing
-            # and the stop being claimed: the claim must see it.
-            agent.note_station()
-            return real_claim(only_if_unjoined)
+    def test_the_requested_channel_is_kept_not_the_picked_one(self, rig):
+        agent, _networkd, holder, _clock, tmp_path = rig
+        assert agent.start("dev", PASS, 0)["success"]
+        assert holder[0].networks[holder[0].selected]["frequency"] == "5220"
+        assert json.loads(state_file(tmp_path).read_text())["channel"] == 0
 
-        monkeypatch.setattr(agent, "_claim_stop", joins_first)
-        clock.t += mod.JOIN_DEADLINE_S + 1
-        agent._deadline_fired()
+    def test_the_key_is_the_standard_wpa2_derivation(self):
+        # IEEE 802.11i-2004, H.4.1 test vector.
+        assert mod._derive_psk("IEEE", "password") == \
+            "f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e"
+
+    def test_an_admin_stop_forgets_the_intent(self, rig):
+        agent, _networkd, _holder, _clock, tmp_path = rig
+        assert agent.start("dev", PASS, 36)["success"]
+        assert agent.stop()["success"]
+        assert not state_file(tmp_path).exists()
+
+    def test_a_failed_start_records_nothing(self, rig):
+        agent, networkd, _holder, _clock, tmp_path = rig
+        networkd.wired_carrier = "no-carrier"
+        assert not agent.start("dev", PASS, 36)["success"]
+        assert not state_file(tmp_path).exists()
+
+    def test_an_unsaved_intent_still_starts_and_says_so(self, rig, monkeypatch):
+        agent, _networkd, _holder, _clock, tmp_path = rig
+
+        def refuse(path, value, mode=0o600):
+            raise OSError(30, "Read-only file system")
+
+        monkeypatch.setattr(mod, "atomic_write_json", refuse)
+        result = agent.start("dev", PASS, 36)
+        assert result["success"] and "will not come back after a restart" in result["message"]
+        assert agent.status()["active"]
+
+    def test_an_unsaved_intent_does_not_leave_an_older_one_behind(self, rig, monkeypatch):
+        agent, _networkd, _holder, _clock, tmp_path = rig
+        write_state(tmp_path, ssid="old-network")
+
+        def refuse(path, value, mode=0o600):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(mod, "atomic_write_json", refuse)
+        assert agent.start("dev", PASS, 36)["success"]
+        assert not state_file(tmp_path).exists(), "a restart would bring back the old network"
+
+    def test_an_intent_that_can_be_neither_saved_nor_cleared_is_reported(self, rig, monkeypatch):
+        agent, _networkd, _holder, _clock, _tmp = rig
+
+        def refuse(path, value, mode=0o600):
+            raise OSError(30, "Read-only file system")
+
+        monkeypatch.setattr(mod, "atomic_write_json", refuse)
+        monkeypatch.setattr(agent, "_clear_state", lambda: False)
+        result = agent.start("dev", PASS, 36)
+        assert result["success"] and "may bring back an earlier access point" in result["message"]
+
+    def test_a_stop_whose_intent_cannot_be_removed_says_so(self, rig, monkeypatch):
+        agent, _networkd, _holder, _clock, _tmp = rig
+        assert agent.start("dev", PASS, 36)["success"]
+        monkeypatch.setattr(agent, "_clear_state", lambda: False)
+        result = agent.stop()
+        assert result["success"] and "may come back after a restart" in result["message"]
+        assert not agent.status()["active"]
+
+
+class TestRestore:
+    def test_a_restart_brings_back_an_access_point_that_was_on(self, rig):
+        agent, _networkd, holder, _clock, tmp_path = rig
+        assert agent.start("conecsa-000001", PASS, 0)["success"]
+        agent.reconcile()  # what the next agent start does
         st = agent.status()
-        assert st["active"] and st["join_deadline_remaining_secs"] == 0
-        assert holder[0].reconfigured == reconfigured_before and ap_file(tmp_path).exists()
-        assert not agent._transition, "the refused claim left nothing held"
+        assert st["active"] and st["ssid"] == "conecsa-000001" and st["frequency_mhz"] == 5220
+        assert "restored" in st["message"]
+        assert state_file(tmp_path).exists()
+        blocks = [n for n in holder[0].networks.values() if n.get("mode") == "2"]
+        assert len(blocks) == 1 and blocks[0]["psk"] == mod._derive_psk("conecsa-000001", PASS)
+        assert holder[0].saved == 0
+
+    def test_without_a_wired_link_the_access_point_still_comes_back(self, rig):
+        agent, networkd, _holder, _clock, tmp_path = rig
+        networkd.wired_carrier = "no-carrier"
+        networkd.wired_addresses = []
+        write_state(tmp_path)
+        agent.reconcile()
+        st = agent.status()
+        assert st["active"] and not st["wired_ready"]
+        assert state_file(tmp_path).exists()
+
+    def test_an_admin_start_still_needs_the_wired_link(self, rig):
+        agent, networkd, holder, _clock, _tmp = rig
+        networkd.wired_carrier = "no-carrier"
+        result = agent.start("dev", PASS, 36)
+        assert not result["success"] and "wired port" in result["message"]
+
+    def test_a_transient_failure_is_retried(self, rig, monkeypatch):
+        agent, _networkd, holder, clock, tmp_path = rig
+        monkeypatch.setattr(mod, "_RESTORE_RETRY_S", 0)
+        wpa = holder[0] = FakeWpa(WIFI[1])
+        real_add, attempts = wpa.add_network, []
+
+        def flaky():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise WpaError("control socket not found")
+            return real_add()
+
+        monkeypatch.setattr(wpa, "add_network", flaky)
+        write_state(tmp_path)
+        agent.reconcile()
+        assert len(attempts) == 2 and agent.status()["active"]
+
+    def test_a_restore_never_gives_up_and_slows_down_after_the_boot_window(self, rig, monkeypatch):
+        agent, _networkd, holder, clock, tmp_path = rig
+        pending, waits = [], []
+        monkeypatch.setattr(agent, "_spawn", pending.append)
+        holder[0] = FakeWpa(WIFI[1])
+        holder[0].country = ""  # a precondition that holds only much later
+        write_state(tmp_path)
+        ticking(agent, clock)
+        agent.reconcile()
+        cancel = agent._restore_cancel
+        assert cancel is not None
+
+        def wait(timeout=None):
+            waits.append(timeout)
+            if len(waits) == 40:
+                holder[0].country = "BR"
+            return False
+
+        monkeypatch.setattr(cancel, "wait", wait)
+        pending[0]()
+        st = agent.status()
+        assert st["active"] and len(waits) == 40
+        assert waits[0] == mod._RESTORE_RETRY_S and waits[-1] == mod._RESTORE_SLOW_RETRY_S
+        assert state_file(tmp_path).exists()
+
+    def test_while_retrying_the_status_says_why(self, rig, monkeypatch):
+        agent, _networkd, holder, _clock, tmp_path = rig
+        pending = []
+        monkeypatch.setattr(agent, "_spawn", pending.append)
+        holder[0] = FakeWpa(WIFI[1])
+        holder[0].country = ""
+        write_state(tmp_path)
+        agent.reconcile()
+        cancel = agent._restore_cancel
+        assert cancel is not None
+        monkeypatch.setattr(cancel, "wait", lambda timeout=None: True)  # end after one attempt
+        pending[0]()
+        st = agent.status()
+        assert not st["active"]
+        assert st["message"].startswith(mod._RESTORING) and "regulatory country" in st["message"]
+
+    def test_an_admin_stop_during_the_restore_wins(self, rig, monkeypatch):
+        agent, networkd, holder, _clock, tmp_path = rig
+        pending = []
+        monkeypatch.setattr(agent, "_spawn", pending.append)
+        write_state(tmp_path)
+        agent.reconcile()
+        assert agent.status()["message"] == mod._RESTORING
+        assert agent.stop()["success"]
+        assert not state_file(tmp_path).exists()
+        pending[0]()  # the restore thread gets its turn only now
+        st = agent.status()
+        assert not st["active"] and st["message"] == "Access point stopped"
+        assert all(n.get("mode") != "2" for n in holder[0].networks.values())
+
+    def test_an_admin_start_during_the_restore_supersedes_it(self, rig, monkeypatch):
+        agent, networkd, holder, _clock, tmp_path = rig
+        pending = []
+        monkeypatch.setattr(agent, "_spawn", pending.append)
+        write_state(tmp_path, channel=36)
+        agent.reconcile()
+        assert agent.start("conecsa-000001", "another-passphrase", 40)["success"]
+        pending[0]()
+        assert agent.status()["frequency_mhz"] == 5200
+        assert len([n for n in holder[0].networks.values() if n.get("mode") == "2"]) == 1
+        assert json.loads(state_file(tmp_path).read_text())["channel"] == 40
+
+    def test_no_intent_means_a_station_as_before(self, rig):
+        agent, networkd, holder, _clock, _tmp_path = rig
+        agent.reconcile()
+        st = agent.status()
+        assert not st["active"] and st["message"] == ""
+        assert holder[0].commands == []
+
+    def test_a_null_intent_is_removed_not_taken_for_a_missing_file(self, rig):
+        agent, _networkd, holder, _clock, tmp_path = rig
+        path = state_file(tmp_path)
+        path.parent.mkdir()
+        path.write_text("null")
+        agent.reconcile()
+        assert not agent.status()["active"] and holder[0].commands == []
+        assert not path.exists()
+
+    def test_a_stop_that_lands_right_after_the_restore_loop_check_still_wins(self, rig, monkeypatch):
+        agent, _networkd, holder, _clock, tmp_path = rig
+        pending = []
+        monkeypatch.setattr(agent, "_spawn", pending.append)
+        write_state(tmp_path)
+        agent.reconcile()
+        cancel = agent._restore_cancel
+        assert cancel is not None
+        real_is_set, reads = cancel.is_set, []
+
+        def stale_first_read():
+            reads.append(1)
+            if len(reads) == 1:
+                # The loop has just read "not cancelled"; the admin stop
+                # completes before the restore claims the radio.
+                assert agent.stop()["success"]
+                return False
+            return real_is_set()
+
+        monkeypatch.setattr(cancel, "is_set", stale_first_read)
+        pending[0]()
+        st = agent.status()
+        assert not st["active"] and st["message"] == "Access point stopped"
+        assert all(n.get("mode") != "2" for n in holder[0].networks.values())
+        assert not state_file(tmp_path).exists()
+
+    def test_an_unreadable_intent_is_quarantined_and_ignored(self, rig):
+        agent, _networkd, holder, _clock, tmp_path = rig
+        path = state_file(tmp_path)
+        path.parent.mkdir()
+        path.write_text("{not json")
+        agent.reconcile()
+        assert not agent.status()["active"] and holder[0].commands == []
+        assert not path.exists() and path.with_name(path.name + ".corrupt").exists()
+
+    @pytest.mark.parametrize("overrides", [
+        {"psk": PASS}, {"psk": "zz" * 32}, {"channel": 52}, {"channel": True}, {"ssid": ""},
+        {"ssid": "\ud800"},  # valid JSON, but no UTF-8 form
+    ])
+    def test_a_malformed_intent_is_removed_and_ignored(self, rig, overrides):
+        agent, _networkd, holder, _clock, tmp_path = rig
+        write_state(tmp_path, **overrides)
+        agent.reconcile()
+        assert not agent.status()["active"] and holder[0].commands == []
+        assert not state_file(tmp_path).exists()
 
 
 class TestWifiConflict:

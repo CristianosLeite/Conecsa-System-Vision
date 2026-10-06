@@ -9,16 +9,13 @@ The response/error primitives live in ``gateway.helpers``; this module keeps
 only the training-specific serializers and a service-tagged error wrapper.
 """
 import json
-import logging
 
 import grpc
 from flask import Response
 
-from ..grpc_clients import clients, inf, trn
+from ..grpc_clients import trn
 from ..helpers import _grpc_error as _shared_grpc_error
 from ..helpers import _json, _json_error  # noqa: F401  (re-exported for routes)
-
-logger = logging.getLogger(__name__)
 
 
 def _grpc_error(exc: grpc.RpcError) -> Response:
@@ -39,6 +36,12 @@ def _job_dict(job) -> dict:
         metrics = json.loads(job.metrics_json) if job.metrics_json else {}
     except ValueError:
         metrics = {}
+    try:
+        history = json.loads(getattr(job, "metrics_history_json", "") or "[]")
+    except ValueError:
+        history = []
+    if not isinstance(history, list):
+        history = []
     return {
         "job_id": job.job_id,
         "status": job.status or "idle",
@@ -50,6 +53,7 @@ def _job_dict(job) -> dict:
         "model_name": job.model_name,
         "conversion_job_id": job.conversion_job_id,
         "metrics": metrics,
+        "history": history,
         "started_at": job.started_at,
         "dataset_id": job.dataset_id,
         "federated": job.federated,
@@ -250,53 +254,3 @@ def _labels_message(dataset_id: str, image_id: str, body) -> "trn.Labels":
     if image_class is not None:
         msg.image_class = image_class
     return msg
-
-
-def _release_runtime() -> "inf.Result":
-    """Release the inference GPU runtime (GPU handover to training)."""
-    return clients.management.ReleaseRuntime(inf.Empty())
-
-
-#: Training job statuses that own the GPU (the trainer subprocess is alive).
-ACTIVE_JOB_STATUSES = ("preparing", "training", "uploading")
-#: Conversion statuses meaning a TensorRT build may hold the GPU.
-ACTIVE_CONVERSION_STATUSES = ("pending", "converting_to_onnx", "converting_to_engine")
-
-
-class GpuProbeError(RuntimeError):
-    """A strict GPU-busy probe could not reach the service it asks."""
-
-
-def training_job_active(strict: bool = False) -> bool:
-    """True while a training job holds the GPU (``ACTIVE_JOB_STATUSES``).
-
-    An unreachable training-service cannot be training, so by default a gRPC
-    failure answers False (logged): the callers gate detection on this and
-    must not be blocked by a service that is merely down. ``strict`` callers
-    (the application switch) refuse on an unanswered probe instead and get
-    :class:`GpuProbeError`.
-    """
-    try:
-        job = clients.training.GetTraining(trn.Empty())
-    except grpc.RpcError as exc:
-        if strict:
-            raise GpuProbeError(f"training job probe failed: {exc.code()}") from exc
-        logger.warning("Training job probe failed; assuming idle: %s", exc)
-        return False
-    return job.status in ACTIVE_JOB_STATUSES
-
-
-def conversion_active(strict: bool = False) -> bool:
-    """True while a model conversion (TensorRT build) may hold the GPU.
-
-    Fail-open by default like :func:`training_job_active`; ``strict`` raises
-    :class:`GpuProbeError` when the inference-service does not answer.
-    """
-    try:
-        cl = clients.model.ListConversions(inf.Empty())
-    except grpc.RpcError as exc:
-        if strict:
-            raise GpuProbeError(f"conversion probe failed: {exc.code()}") from exc
-        logger.warning("Conversion probe failed; assuming idle: %s", exc)
-        return False
-    return any(j.status in ACTIVE_CONVERSION_STATUSES for j in cl.jobs)

@@ -72,9 +72,11 @@ frequencies at all, the status reports no `channels`, automatic falls back to
 printable ASCII (8–63 characters) or a 64-digit hex PSK.
 
 !!! warning "The access point takes the device off its Wi-Fi network"
-    A start is refused unless the wired port has a link and an IPv4 address,
-    because the hub will reach the device through it alone while the access
-    point is up. A link-local address (169.254/16) counts: a hub on a direct
+    An admin start is refused unless the wired port has a link and an IPv4
+    address, because the hub will reach the device through it alone while the
+    access point is up. This is a safeguard for the moment of starting, not a
+    condition of the access point: unplugging the cable later does not stop
+    it, and a restore after a restart does not check it. A link-local address (169.254/16) counts: a hub on a direct
     cable, with no DHCP server between them, reaches the device by exactly
     that. Wi-Fi connect, forget and Wi-Fi IP changes are refused meanwhile
     with `FAILED_PRECONDITION` (a `409` through the gateway), and a Wi-Fi
@@ -82,7 +84,7 @@ printable ASCII (8–63 characters) or a 64-digit hex PSK.
     that arrives meanwhile waits for it instead of reconfiguring the radio
     at the same time.
 
-Nothing about the access point is persisted. The wpa block is created unsaved
+The radio configuration of the access point is never persisted. The wpa block is created unsaved
 (`save_config()` drops every `mode=2` block before `SAVE_CONFIG`, and
 `enable_all()` skips them) and the networkd file,
 `/run/systemd/network/05-conecsa-ap-<iface>.network`, is matched on
@@ -111,11 +113,26 @@ each, a networkd or wpa error — removes every `mode=2` block and every
 start reports success, so a remote camera that joins will get a lease, which
 means a start can take over half a minute to answer; the gateway waits 60 s
 for it. Stop does the same and is idempotent; the
-agent does it again at start-up, so an agent restart or a reboot always returns
-the radio to station mode. An access point no remote camera joins within five minutes
-stops by itself; once a remote camera has joined, a later disconnect does not.
-The agent polls the associated stations (`ALL_STA`) every 5 s, which is the
-granularity of the join deadline and of the station list in the status.
+agent does it again at start-up, so an agent restart or a reboot always begins
+with the radio in station mode. Nothing stops a running access point by
+itself: no join deadline, no station leaving, no cable unplugged — only an
+admin stop.
+
+What survives a restart is the intent. A successful start writes
+`/var/lib/conecsa/access-point.json` (mode 0600, on the persistent
+`/var/lib/conecsa` mount): the SSID, the requested channel (usually automatic,
+since the usable set moves) and the WPA2 pre-shared key derived from the
+passphrase — the radio is configured with that key, and the passphrase itself
+is never stored. Only an admin stop removes the file.
+When the agent starts and finds it, it tears the radio down as above and then,
+in the background, starts the access point again through the same checks as
+an admin start except the wired one. It retries until the access point is up
+— every 10 s for the first 2 minutes, while the wpa_supplicant socket or a
+usable channel is still missing at boot, then every minute, since each
+attempt that reached the radio bounces its station link — with the status
+`message` naming the last failure. An admin start or stop meanwhile ends the
+restore. A file that cannot be parsed is set aside as `access-point.json.corrupt`.
+The station list in the status is read live (`ALL_STA`) on every call.
 
 `GetApStatus` reports the joined remote cameras by the address the DHCP server leased
 them (matched to the association through the lease's client id) and never

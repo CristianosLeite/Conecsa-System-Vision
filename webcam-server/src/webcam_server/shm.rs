@@ -6,7 +6,7 @@
 //! protobuf-encoded config/health regions in the header (the camera SHM ring
 //! consumed by the inference-service and api-gateway).
 //!
-//! # Publication protocol (header version 2) — must match
+//! # Publication protocol (header version 3) — must match
 //! `os-base/conecsa_shm/camera_ring.py`
 //!
 //! `FRAME_WRITE_SEQ` is an odd/even generation counter (a seqlock):
@@ -29,12 +29,13 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
 /// Magic number identifying a valid conecsa SHM segment.
 const SHM_MAGIC: u32 = 0xC04E_5A01;
-/// Version 2 = seqlock publication protocol (see the module docs). Readers
-/// reject a mismatched version, so mixed old/new services fail loudly
-/// instead of tearing frames.
-const SHM_VERSION: u32 = 2;
-const HEADER_SIZE: usize = 256;
-const CONFIG_PAYLOAD_MAX: usize = 128;
+/// Version 2 introduced the seqlock publication protocol (see the module
+/// docs); version 3 grew the config region to 4 KiB for the IP camera list
+/// and added `FORMAT_RAW_BGR`. Readers reject a mismatched version, so mixed
+/// old/new services fail loudly instead of tearing frames.
+const SHM_VERSION: u32 = 3;
+const HEADER_SIZE: usize = 4352;
+const CONFIG_PAYLOAD_MAX: usize = 4096;
 const HEALTH_PAYLOAD_MAX: usize = 64;
 const SHM_SLOT_MIN_BYTES_DEFAULT: usize = 8 * 1024 * 1024;
 
@@ -54,10 +55,10 @@ mod off {
     pub const CONFIG_WRITE_SEQ: usize = 44;
     pub const CONFIG_SIZE: usize = 48;
     pub const CONFIG_PAYLOAD: usize = 52;
-    // Health region (52 + 128 = 180)
-    pub const HEALTH_WRITE_SEQ: usize = 180;
-    pub const HEALTH_SIZE: usize = 184;
-    pub const HEALTH_PAYLOAD: usize = 188;
+    // Health region (52 + 4096 = 4148)
+    pub const HEALTH_WRITE_SEQ: usize = 4148;
+    pub const HEALTH_SIZE: usize = 4152;
+    pub const HEALTH_PAYLOAD: usize = 4156;
 }
 
 /// Include prost-generated protobuf types.
@@ -68,6 +69,8 @@ pub mod proto {
 /// Format flags written to the SHM header.
 pub const FORMAT_RAW_RGB: u32 = 0;
 pub const FORMAT_JPEG: u32 = 1;
+/// Raw BGR24, the byte order OpenCV consumers use, so they skip a conversion.
+pub const FORMAT_RAW_BGR: u32 = 2;
 
 /// POSIX shared-memory producer.
 ///
@@ -104,8 +107,21 @@ impl ShmProducer {
             .unwrap_or(SHM_SLOT_MIN_BYTES_DEFAULT)
     }
 
-    /// Create (or re-create) the named shared-memory segment.
+    /// Create (or re-create) the named shared-memory segment. The slot is at
+    /// least `SHM_SLOT_MIN_BYTES`, so a local camera's larger fallback modes fit.
     pub fn new(name: &str, width: u32, height: u32) -> Result<Self, String> {
+        Self::with_slot_min(name, width, height, Self::read_slot_min_bytes())
+    }
+
+    /// Create a segment whose slot holds exactly one `width`×`height` RAW
+    /// frame: an IP camera's ring, whose frames are always scaled to that
+    /// size. Four of them must fit the container's `/dev/shm` next to the
+    /// main ring, so they take no `SHM_SLOT_MIN_BYTES` floor.
+    pub fn new_exact(name: &str, width: u32, height: u32) -> Result<Self, String> {
+        Self::with_slot_min(name, width, height, 0)
+    }
+
+    fn with_slot_min(name: &str, width: u32, height: u32, slot_min: usize) -> Result<Self, String> {
         // Compute frame size in bytes using usize and checked arithmetic to avoid overflow.
         let pixels = (width as usize)
             .checked_mul(height as usize)
@@ -113,8 +129,7 @@ impl ShmProducer {
         let frame_bytes = pixels
             .checked_mul(3)
             .ok_or_else(|| "frame size too large".to_string())?;
-        let slot_size =
-            std::cmp::max(frame_bytes, Self::read_slot_min_bytes());
+        let slot_size = std::cmp::max(frame_bytes, slot_min);
         let total_size = slot_size
             .checked_mul(2)
             .and_then(|v| HEADER_SIZE.checked_add(v))
@@ -145,6 +160,19 @@ impl ShmProducer {
                 return Err(format!(
                     "ftruncate failed: {}",
                     std::io::Error::last_os_error()
+                ));
+            }
+            // Reserve the pages now. A tmpfs segment is sparse after
+            // ftruncate; when /dev/shm is full the first write to a missing
+            // page raises SIGBUS and kills the whole process (the stranded
+            // IPC namespace follows). Reserving turns that into an error.
+            let reserved = libc::posix_fallocate(fd, 0, total_size as libc::off_t);
+            if reserved != 0 {
+                libc::close(fd);
+                libc::shm_unlink(shm_name.as_ptr());
+                return Err(format!(
+                    "cannot reserve {total_size} bytes in /dev/shm: {} (raise the container's shm_size)",
+                    std::io::Error::from_raw_os_error(reserved)
                 ));
             }
 
@@ -230,6 +258,14 @@ impl ShmProducer {
         // Dimensions are written inside the publication window (see
         // publish_frame) so a reader can never pair them with another frame.
         self.publish_frame(data, FORMAT_RAW_RGB, Some((w, h)));
+    }
+
+    /// Publish a raw BGR frame (format_flag = 2).
+    pub fn publish_frame_bgr(&self, data: &[u8], w: u32, h: u32) {
+        if !self.fits_slot(data.len(), "RAW", Some((w, h))) {
+            return;
+        }
+        self.publish_frame(data, FORMAT_RAW_BGR, Some((w, h)));
     }
 
     /// Publish a JPEG frame (format_flag = 1).
@@ -488,36 +524,60 @@ mod tests {
         assert_eq!(cfg.encode_to_vec().len(), 119);
     }
 
+    /// Four IP cameras with every string at its validated maximum.
+    fn four_ip_cameras_at_their_maxima() -> Vec<proto::IpCamera> {
+        (0..4)
+            .map(|_| proto::IpCamera {
+                url: format!("rtsp://{}", "h".repeat(249)),
+                username: "u".repeat(64),
+                password: "p".repeat(64),
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_config_with_every_number_at_u32_max_still_fits_the_region() {
-        // The worst case a writer can produce leaves 3 bytes, and tag 16
-        // onward costs a two-byte tag: the next CameraConfig field does not
-        // fit. It needs a larger region — a layout change and an SHM_VERSION
-        // bump, deployed to all four SHM-sharing containers together.
+    fn the_worst_case_config_fits_the_region_with_room_to_spare() {
+        // Mirrored by inference-service/tests/test_shm_config_payload.py.
+        // Every number at u32::MAX, the network fields at their maxima and
+        // four IP cameras at theirs: under half of the 4 KiB region.
         let cfg = proto::CameraConfig {
             source: Some(i32::MAX),
             network_host: "255.255.255.255".to_string(),
             network_port: u32::MAX,
             network_token: "Z".repeat(32),
+            ip_cameras: four_ip_cameras_at_their_maxima(),
             ..config_with_numbers_at(u32::MAX)
         };
-        assert_eq!(cfg.encode_to_vec().len(), 125);
-        assert!(cfg.encode_to_vec().len() <= CONFIG_PAYLOAD_MAX);
+        assert_eq!(cfg.encode_to_vec().len(), 1705);
+        assert!(cfg.encode_to_vec().len() <= CONFIG_PAYLOAD_MAX / 2);
     }
 
     #[test]
-    fn a_negative_source_value_would_not_fit_so_writers_must_validate_it() {
-        // A negative enum is a 10-byte varint. poll_config drops the message;
-        // the size check is the backstop, enum validation is the rule.
+    fn a_config_written_with_ip_cameras_is_polled_intact() {
+        let name = format!("conecsa-shm-ip-config-test-{}", std::process::id());
+        let shm = ShmProducer::new(&name, 64, 64).expect("create segment");
         let cfg = proto::CameraConfig {
-            source: Some(-1),
-            network_host: "255.255.255.255".to_string(),
-            network_port: u32::MAX,
-            network_token: "Z".repeat(32),
-            ..config_with_numbers_at(u32::MAX)
+            source: Some(proto::CameraSource::Ip as i32),
+            ip_cameras: four_ip_cameras_at_their_maxima(),
+            ..Default::default()
         };
-        assert_eq!(cfg.encode_to_vec().len(), 130);
-        assert!(cfg.encode_to_vec().len() > CONFIG_PAYLOAD_MAX);
+        shm.write_config_for_test(&cfg);
+        assert_eq!(shm.poll_config(), Some(cfg));
+    }
+
+    #[test]
+    fn a_bgr_frame_records_its_format_and_dimensions() {
+        let name = format!("conecsa-shm-bgr-test-{}", std::process::id());
+        let shm = ShmProducer::new(&name, 64, 64).expect("create segment");
+        shm.publish_frame_bgr(&[0u8; 32 * 16 * 3], 32, 16);
+        let (fmt, w, h) = unsafe {
+            (
+                ShmProducer::read_u32(shm.ptr, off::FORMAT_FLAG),
+                ShmProducer::read_u32(shm.ptr, off::WIDTH),
+                ShmProducer::read_u32(shm.ptr, off::HEIGHT),
+            )
+        };
+        assert_eq!((fmt, w, h), (FORMAT_RAW_BGR, 32, 16));
     }
 
     #[test]
@@ -525,15 +585,41 @@ mod tests {
         let health = proto::HealthStatus {
             status: "no_camera".to_string(),
             detail: proto::CameraHealthDetail::BadStream as i32,
+            ..Default::default()
         };
         assert!(health.encode_to_vec().len() <= HEALTH_PAYLOAD_MAX);
     }
 
     #[test]
-    fn the_header_declares_protocol_version_2() {
+    fn the_ip_aggregate_health_fits_its_region() {
+        // The main ring's IP-mode health: the longest status, the highest
+        // detail and four cameras — and, as a margin, any count at all.
+        for count in [4, u32::MAX] {
+            for status in ["starting", "capturing", "no_camera"] {
+                let health = proto::HealthStatus {
+                    status: status.to_string(),
+                    detail: proto::CameraHealthDetail::BadStream as i32,
+                    ip_camera_count: count,
+                };
+                assert!(health.encode_to_vec().len() <= HEALTH_PAYLOAD_MAX);
+            }
+        }
+    }
+
+    #[test]
+    fn an_exact_segment_takes_no_slot_floor() {
+        let name = format!("conecsa-shm-exact-test-{}", std::process::id());
+        let shm = ShmProducer::new_exact(&name, 32, 16).expect("create segment");
+        assert_eq!(shm.slot_size(), 32 * 16 * 3);
+        let floored = ShmProducer::new(&format!("{name}-floor"), 32, 16).expect("create segment");
+        assert!(floored.slot_size() >= 1_500_000);
+    }
+
+    #[test]
+    fn the_header_declares_protocol_version_3() {
         let name = format!("conecsa-shm-ver-test-{}", std::process::id());
         let shm = ShmProducer::new(&name, 64, 64).expect("create segment");
         let version = unsafe { ShmProducer::read_u32(shm.ptr, off::VERSION) };
-        assert_eq!(version, 2, "readers key mixed-version rejection on this");
+        assert_eq!(version, 3, "readers key mixed-version rejection on this");
     }
 }

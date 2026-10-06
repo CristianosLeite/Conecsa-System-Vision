@@ -131,7 +131,6 @@ def get_ap_status() -> dict:
             {"address": s.address, "hostname": s.hostname, "signal": s.signal}
             for s in resp.stations
         ],
-        "join_deadline_remaining_secs": resp.join_deadline_remaining_secs,
         "wired_ready": resp.wired_ready,
         "message": resp.message,
         "channels": [int(c) for c in resp.channels],

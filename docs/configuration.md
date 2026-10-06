@@ -15,10 +15,12 @@ the code (what applies when the variable is unset); where the production
 | `SHM_NAME` | `conecsa_frame_shm` | — | Shared memory segment name |
 | `SHM_SLOT_MIN_BYTES` | `8388608` (8 MB) | `16777216` (16 MB) | Minimum SHM slot size — must fit the largest possible frame (the slot is the larger of this and `width × height × 3`); values below `1500000` or unparseable are ignored and the 8 MB default applies. Compose raises it so the stereo camera's native 3840×1080 RAW fallback (12.44 MB/frame) fits |
 | `RUST_LOG` | `info` (image `ENV`) | `info` | `env_logger` log level (`error`, `warn`, `info`, `debug`, `trace`) |
-| `CAMERA_SOURCE` | `local` | — | Start-up capture source: `local` (V4L2) or `network` (a remote camera, see the [remote camera protocol](services/remote-camera-protocol.md)). Any other value stops the server at start-up rather than falling back to `local`. **Development/bootstrap only**: a source published over shared memory replaces it |
+| `CAMERA_SOURCE` | `local` | — | Start-up capture source: `local` (V4L2), `network` (a remote camera, see the [remote camera protocol](services/remote-camera-protocol.md)) or `ip` ([IP cameras](ip-cameras.md)). Any other value stops the server at start-up rather than falling back to `local`. **Development/bootstrap only**: a source published over shared memory replaces it |
 | `CAMERA_NETWORK_HOST` | — | — | Remote camera address for `CAMERA_SOURCE=network`: an IPv4 literal. Development/bootstrap only |
 | `CAMERA_NETWORK_PORT` | — | — | Remote camera TCP port, `1`–`65535`. Development/bootstrap only |
 | `CAMERA_NETWORK_TOKEN` | — | — | Stream token: 8–32 Crockford base32 characters, hyphens and case ignored. A secret — never logged. Development/bootstrap only; production compose does not set it |
+| `IPCAM_MAX_WIDTH` / `IPCAM_MAX_HEIGHT` | `1920` / `1080` | — | Largest size an [IP camera](ip-cameras.md) is decoded at (aspect kept, rounded to even); a larger stream is scaled down by `ffmpeg` |
+| `CAMERA_IP_URL_<n>` / `CAMERA_IP_USER_<n>` / `CAMERA_IP_PASSWORD_<n>` | — | — | IP cameras 1–4 for `CAMERA_SOURCE=ip` (`rtsp://` address without credentials, user name, password). The password is a secret — never logged. Development/bootstrap only; production compose does not set them |
 
 ## `inference-service`
 
@@ -26,8 +28,10 @@ the code (what applies when the variable is unset); where the production
 |---|---|---|---|
 | `SHM_NAME` | `conecsa_frame_shm` | — | Camera SHM segment name (must match webcam-server) |
 | `PROCESSED_SHM_NAME` | `conecsa_processed_shm` | — | Processed SHM ring the encode stage publishes to (must match api-gateway) |
-| `PROCESSED_SHM_SLOT_BYTES` | `1048576` (1 MiB) | — | Per-slot size of the processed SHM ring (`os-base/conecsa_shm/processed_ring.py`); must fit one overlaid JPEG |
+| `PROCESSED_SHM_SLOT_BYTES` | `4194304` (4 MiB) | — | Per-slot size of the processed SHM ring (`os-base/conecsa_shm/processed_ring.py`); must fit one overlaid JPEG — a larger frame is dropped. The default fits a 2×2 [IP camera](ip-cameras.md) mosaic (2560×1440) |
+| `MOSAIC_CELL_WIDTH` / `MOSAIC_CELL_HEIGHT` | `1280` / `720` | — | Cell size of the [IP camera](ip-cameras.md) mosaic: each camera is letterboxed into one cell and inferred at that size. Values under 64 fall back to the default; odd values round down. The api-gateway and training-service read the same variables for their previews |
 | `INFERENCE_GRPC_LISTEN` | `0.0.0.0:50061` | — | gRPC control server bind address |
+| `TRAINING_GRPC_ADDR` | `training-service:50071` | — | Training-service gRPC address, asked once at boot whether a training job holds the GPU (then nothing is loaded and detection waits for the end of training mode); an unreachable service counts as no job |
 | `CONFIDENCE_THRESHOLD` | `0.75` | — | Initial confidence threshold (a model's settings sidecar overrides it on activation) |
 | `OVERLAY_THRESHOLD` | `0.45` | — | Initial overlay threshold: the IoU above which overlapping boxes are suppressed (NMS); a model's settings sidecar overrides it on activation |
 | `MODELS_DIR` | `/data/models` | — | Model directory; when unset and `/data/models` is not writable, a repo-local directory is used (host runs) |
@@ -63,7 +67,7 @@ the code (what applies when the variable is unset); where the production
 | `AREA_MOVE_DELTA` | `0.02` | — | Normalized step for moving a detection area with the move commands |
 | `AREA_RESIZE_DELTA` | `0.02` | — | Normalized step for resizing a detection area with the resize commands |
 | `GPIO_SHM_PATH` | `/run/conecsa-gpio/state` | — | GPIO SHM channel the trigger gate reads every frame (must match the hardware agent) |
-| `STEREO_COMBINE` | `none` | `none` | Stereo combine mode — split the side-by-side frame and blend both eyes into one image. Starts off: it would tear an ordinary camera's picture in half, so the Camera Settings toggle (shown only for a 3D camera) enables it and the per-model settings snapshot restores it |
+| `STEREO_COMBINE` | `none` | `none` | Stereo combine mode — split the side-by-side frame and blend both eyes into one image. Starts off: it would tear an ordinary camera's picture in half, so the Camera Settings toggle (offered for any local camera; enable it only for a 3D camera) enables it and the per-model settings snapshot restores it |
 | `STEREO_BLEND_ALPHA` | `0.5` | — | Blend factor for `STEREO_COMBINE=blend` |
 | `STEREO_OFFSET` / `STEREO_OFFSET_Y` | `0.0` | — | Initial horizontal / vertical shift of the right eye over the left before blending, as a fraction of the eye's width / height (clamped to `-0.5`–`0.5`) |
 | `CAPTURE_AUTO_EXPOSURE` | `false` | — | Camera auto-exposure |
@@ -102,7 +106,7 @@ the code (what applies when the variable is unset); where the production
 | `HARDWARE_AGENT_ADDR` | `os-base:50051` | `os-base:50051` | `os-base` hardware agent (network/Wi-Fi/GPIO) |
 | `SHM_NAME` | `conecsa_frame_shm` | — | Camera SHM ring (raw feed) |
 | `PROCESSED_SHM_NAME` | `conecsa_processed_shm` | — | Processed SHM ring (overlaid feed) |
-| `PROCESSED_SHM_SLOT_BYTES` | `1048576` (1 MiB) | — | Per-slot size of the processed SHM ring (must match inference-service) |
+| `PROCESSED_SHM_SLOT_BYTES` | `4194304` (4 MiB) | — | Per-slot size of the processed SHM ring (must match inference-service) |
 | `GATEWAY_PORT` | `5000` | — | Internal HTTP port |
 | `GATEWAY_DEBUG_ERRORS` | _(off)_ | — | `1`/`true` includes the exception class and text in `500` bodies (development only) |
 | `MAX_IMAGE_UPLOAD_BYTES` | `20971520` (20 MB) | — | Cap on a single labeled-image upload relayed to the training-service |
@@ -115,7 +119,7 @@ the code (what applies when the variable is unset); where the production
 | `STEREO_COMBINE` | `none` | `none` | Stereo combine for the training preview (matches inference-service); fallback only — the live inference config wins when reachable |
 | `STEREO_BLEND_ALPHA` | `0.5` | — | Blend factor for the training preview |
 | `STEREO_OFFSET` / `STEREO_OFFSET_Y` | `0.0` | — | Eye shift for the training preview (matches inference-service) |
-| `DEVICE_VERSION` | `unknown` | `2026.6-LTS` | Device software version, surfaced on `/api/v1/status` + `/api/v1/health` for the hub (the in-container mDNS record advertises it empty when unset) |
+| `DEVICE_VERSION` | `unknown` | `2026.7-LTS` | Device software version, surfaced on `/api/v1/status` + `/api/v1/health` for the hub (the in-container mDNS record advertises it empty when unset) |
 | `DEVICE_ID` | _(see description)_ | — | Device identity used by enrollment, the cert SAN and mDNS. Resolved in order: this variable, the hostname read from `CONECSA_HOST_HOSTNAME`, the container's hostname |
 | `CONECSA_HOST_HOSTNAME` | `/etc/conecsa/host_hostname` | — | File holding the host's hostname (compose bind-mounts the host's `/etc/hostname` there); the `DEVICE_ID` fallback, equal to the host avahi instance name |
 | `CONECSA_CERT_DIR` | `/etc/conecsa/certs` | — | Device key/CSR + hub-signed cert/CA (volume shared with the nginx TLS terminator) |

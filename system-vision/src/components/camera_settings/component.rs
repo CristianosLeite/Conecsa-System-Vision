@@ -11,6 +11,7 @@ use leptos::task::spawn_local;
 use super::ap_confirm_modal::AccessPointConfirmModal;
 use super::apply_button::ApplyCameraSettingsButton;
 use super::device_select::CaptureDeviceSelect;
+use super::ip_cameras_form::IpCamerasForm;
 use super::loading_state::CameraSettingsLoadingState;
 use super::network_source_form::NetworkSourceForm;
 use super::resolution_controls::ResolutionControls;
@@ -18,13 +19,18 @@ use super::source_select::CaptureSourceSelect;
 use super::status_row::CameraStatusRow;
 use super::stereo_toggle::StereoOverlayToggle;
 use super::{
-    is_stereo_camera, offers_access_point, parse_network_form, station_suggestion,
-    AddressSuggestion, CameraFormat, NetworkFormError, Resolution,
+    mosaic_changes, offers_access_point, parse_ip_form, parse_network_form,
+    station_suggestion, AddressSuggestion, CameraFormat, IpCameraDraft, IpFieldError, IpFormError,
+    NetworkFormError, Resolution,
 };
 
 /// How often the access point is re-read while the remote camera form is on
 /// screen: a remote camera joining it raises no event.
 const AP_POLL_MS: u64 = 3_000;
+
+/// How often the IP cameras' statuses are re-read while their form is on
+/// screen: a per-camera status change raises no event of its own.
+const IP_STATUS_POLL_MS: u64 = 3_000;
 
 /// Push only the stereo combine settings. Applied immediately (no camera
 /// restart, since stereo lives in the inference-service, not the SHM config).
@@ -54,10 +60,8 @@ pub fn CameraSettings(
     let (formats, set_formats) = signal(Vec::<CameraFormat>::new());
     let (selected_framerate, set_selected_framerate) = signal(30u32);
     let (selected_stereo_enabled, set_selected_stereo_enabled) = signal(false);
-    // Indices of the enumerated devices that are 3D cameras, and whether the
-    // list has been read at all — an empty list before the first fetch means
-    // "unknown", not "no 3D camera".
-    let (stereo_devices, set_stereo_devices) = signal(Vec::<u32>::new());
+    // Whether the camera config has been read at all — before the first fetch
+    // the applied source is "unknown", not "local".
     let (devices_loaded, set_devices_loaded) = signal(false);
     let (loading, set_loading) = signal(true);
     let (saving, set_saving) = signal(false);
@@ -74,6 +78,14 @@ pub fn CameraSettings(
     let (token_set, set_token_set) = signal(false);
     let (camera_status, set_camera_status) = signal(String::new());
     let (camera_detail, set_camera_detail) = signal(String::new());
+    // IP cameras: the rows being edited, the page-local key for the next added
+    // row, the device's limit and the stored ids in mosaic order (what the
+    // detection areas were drawn over when the IP cameras are applied).
+    let ip_rows = RwSignal::new(Vec::<IpCameraDraft>::new());
+    let ip_next_key = StoredValue::new(0u32);
+    let (ip_max, set_ip_max) = signal(api::IP_CAMERAS_MAX_DEFAULT);
+    // The stored IP cameras as (id, url), in mosaic order.
+    let (saved_ip_cameras, set_saved_ip_cameras) = signal(Vec::<(String, String)>::new());
     // Wi-Fi gateway: on a remote camera's hotspot that is the remote camera itself.
     let (wifi_gateway, set_wifi_gateway) = signal(None::<String>);
     // The address the device's access point leased to the remote camera that joined.
@@ -117,6 +129,75 @@ pub fn CameraSettings(
     });
     on_cleanup(stop_ap_poll);
 
+    // The IP cameras' statuses, re-read while their form is on screen. Only
+    // the status and detail of the stored cameras change: the rows keep
+    // whatever the operator is typing.
+    let reload_ip_status = move || {
+        spawn_local(async move {
+            let Ok(resp) = api::get_camera_devices().await else {
+                return;
+            };
+            // The interval is cleared on unmount, but a request already in
+            // flight still completes: stop if the panel's signals are gone.
+            // Nothing below awaits, so they stay alive for the rest of it.
+            if ip_rows.try_with_untracked(|_| ()).is_none() {
+                return;
+            }
+            set_camera_status.set(resp.camera_status);
+            set_camera_detail.set(resp.camera_detail);
+            set_saved_source.set(resp.current_source);
+            let stale = ip_rows.with_untracked(|rows| {
+                rows.iter().any(|row| {
+                    resp.ip_cameras.iter().any(|cam| {
+                        row.id.as_deref() == Some(cam.id.as_str())
+                            && (row.status != cam.status || row.detail != cam.detail)
+                    })
+                })
+            });
+            if stale {
+                ip_rows.update(|rows| {
+                    for row in rows.iter_mut() {
+                        if let Some(cam) = resp
+                            .ip_cameras
+                            .iter()
+                            .find(|cam| row.id.as_deref() == Some(cam.id.as_str()))
+                        {
+                            row.status = cam.status.clone();
+                            row.detail = cam.detail.clone();
+                        }
+                    }
+                });
+            }
+        });
+    };
+    let ip_poll = StoredValue::new(None::<IntervalHandle>);
+    let stop_ip_poll = move || {
+        ip_poll.update_value(|slot| {
+            if let Some(handle) = slot.take() {
+                handle.clear();
+            }
+        });
+    };
+    Effect::new(move |_| {
+        stop_ip_poll();
+        if source.get() == api::SOURCE_IP {
+            let handle = set_interval_with_handle(
+                reload_ip_status,
+                std::time::Duration::from_millis(IP_STATUS_POLL_MS),
+            );
+            ip_poll.set_value(handle.ok());
+        }
+    });
+    on_cleanup(stop_ip_poll);
+
+    // Whether applying the list rearranges the mosaic under the detection areas.
+    let ip_layout_changes = Signal::derive(move || {
+        let applied = saved_ip_cameras.get();
+        let applied = (saved_source.get() == api::SOURCE_IP).then_some(applied.as_slice());
+        ip_rows.with(|rows| mosaic_changes(applied, rows))
+    });
+    let ip_applied = Signal::derive(move || saved_source.get() == api::SOURCE_IP);
+
     // Shown while the address field still holds an unconfirmed suggestion.
     let suggestion = Signal::derive(move || {
         let host = network_host.get();
@@ -151,20 +232,19 @@ pub fn CameraSettings(
         }
     });
 
-    // The stereo overlay only makes sense on a 3D camera: it splits one frame
-    // into its left|right halves and blends them, which would tear an ordinary
-    // picture in two. Resolution cannot tell a side-by-side frame from a merely
-    // wide one, so the camera model decides. Follows the dropdown selection,
-    // like the other settings, rather than the applied device.
-    // A remote camera's frame is never side by side either, so a network source
-    // counts as "not a 3D camera" once it is the applied source.
+    // The stereo overlay splits one frame into its left|right halves and blends
+    // them. Nothing the device reports identifies a side-by-side camera — the
+    // V4L2 name is whatever the vendor wrote and resolution cannot tell such a
+    // frame from a merely wide one — so every local camera gets the toggle and
+    // the operator decides.
+    // A remote camera's frame is never side by side, nor is the IP cameras'
+    // mosaic, so the overlay is offered only while the local camera is the
+    // applied source.
     let stereo_supported = Signal::derive(move || {
-        devices_loaded.get()
-            && saved_source.get() != api::SOURCE_NETWORK
-            && stereo_devices.get().contains(&selected_index.get())
+        devices_loaded.get() && saved_source.get() == api::SOURCE_LOCAL
     });
 
-    // Never leave the overlay enabled on a camera that is not a 3D camera.
+    // Never leave the overlay enabled on a remote or IP camera source.
     // Gated on `devices_loaded` so a pending or failed fetch counts as unknown
     // and cannot clobber a working 3D configuration.
     Effect::new(move |_| {
@@ -178,10 +258,20 @@ pub fn CameraSettings(
     });
 
     let reload_camera = move || {
-        set_loading.set(true);
+        // Disposal-safe: callers run it after an await, when the panel may
+        // already be closed.
+        if set_loading.try_set(true).is_some() {
+            return;
+        }
         let locale = i18n.get_locale_untracked();
         spawn_local(async move {
-            match api::get_camera_devices().await {
+            let result = api::get_camera_devices().await;
+            // The panel may have closed during the request; nothing below
+            // awaits, so a live signal here stays live to the end.
+            if set_loading.try_set(true).is_some() {
+                return;
+            }
+            match result {
                 Ok(resp) => {
                     let list: Vec<(u32, String)> = resp
                         .devices
@@ -196,14 +286,7 @@ pub fn CameraSettings(
                             (idx, label)
                         })
                         .collect();
-                    let stereo: Vec<u32> = resp
-                        .devices
-                        .iter()
-                        .filter(|d| d.index >= 0 && is_stereo_camera(&d.name))
-                        .map(|d| d.index as u32)
-                        .collect();
                     set_devices.set(list);
-                    set_stereo_devices.set(stereo);
                     set_selected_index.set(resp.current_index);
                     set_selected_res.set(Resolution {
                         w: resp.current_width,
@@ -255,6 +338,24 @@ pub fn CameraSettings(
                     });
                     set_network_token.set(String::new());
                     set_token_set.set(resp.network_token_set);
+                    let mut key = ip_next_key.get_value();
+                    let rows: Vec<IpCameraDraft> = resp
+                        .ip_cameras
+                        .iter()
+                        .map(|cam| {
+                            key = key.wrapping_add(1);
+                            IpCameraDraft::from_stored(key, cam)
+                        })
+                        .collect();
+                    ip_next_key.set_value(key.wrapping_add(1));
+                    set_saved_ip_cameras.set(
+                        resp.ip_cameras
+                            .iter()
+                            .map(|cam| (cam.id.clone(), cam.url.clone()))
+                            .collect(),
+                    );
+                    ip_rows.set(rows);
+                    set_ip_max.set(resp.ip_cameras_max.max(1));
                     set_camera_status.set(resp.camera_status);
                     set_camera_detail.set(resp.camera_detail);
 
@@ -338,6 +439,57 @@ pub fn CameraSettings(
         });
     };
 
+    // Validates the IP camera list and makes it the device's source.
+    let save_ip_source = move || {
+        let locale = i18n.get_locale_untracked();
+        let max = ip_max.get_untracked();
+        let cameras = match ip_rows.with_untracked(|rows| parse_ip_form(rows, max as usize)) {
+            Ok(cameras) => cameras,
+            Err(err) => {
+                let msg = match err {
+                    IpFormError::Empty => td_string!(locale, camera::ip_required).to_string(),
+                    IpFormError::TooMany => td_string!(locale, camera::ip_too_many, max = max),
+                    IpFormError::Field(row, field) => {
+                        let n = row + 1;
+                        match field {
+                            IpFieldError::UrlScheme => td_string!(locale, camera::ip_url_invalid, n = n),
+                            IpFieldError::UrlCredentials => {
+                                td_string!(locale, camera::ip_url_credentials, n = n)
+                            }
+                            IpFieldError::UrlTooLong => td_string!(locale, camera::ip_url_too_long, n = n),
+                            IpFieldError::NameTooLong => {
+                                td_string!(locale, camera::ip_name_too_long, n = n)
+                            }
+                            IpFieldError::UsernameTooLong => {
+                                td_string!(locale, camera::ip_username_too_long, n = n)
+                            }
+                            IpFieldError::PasswordTooLong => {
+                                td_string!(locale, camera::ip_password_too_long, n = n)
+                            }
+                        }
+                    }
+                };
+                return set_error_msg.set(msg);
+            }
+        };
+        set_saving.set(true);
+        spawn_local(async move {
+            let result = api::update_ip_cameras(&cameras).await;
+            // Closed while saving: the device took (or refused) the list,
+            // and there is no panel left to report it in.
+            if set_saving.try_set(false).is_some() {
+                return;
+            }
+            match result {
+                Ok(_) => {
+                    set_success_msg.set(td_string!(locale, camera::source_applied).to_string());
+                    reload_camera();
+                }
+                Err(e) => set_error_msg.set(td_string!(locale, camera::failed_to_apply, err = e)),
+            }
+        });
+    };
+
     // The confirmation's choices. "Turn on" starts the access point first;
     // the source is then saved only with an address the operator entered or
     // confirmed — an empty field, or a suggestion still standing, means the
@@ -394,16 +546,20 @@ pub fn CameraSettings(
             }
             return;
         }
+        if source.get() == api::SOURCE_IP {
+            save_ip_source();
+            return;
+        }
 
         let idx = selected_index.get();
         let res = selected_res.get();
         let framerate = selected_framerate.get();
-        let leaving_network = saved_source.get() == api::SOURCE_NETWORK;
+        let leaving_remote = saved_source.get() != api::SOURCE_LOCAL;
         set_saving.set(true);
         spawn_local(async move {
             // Back to the local camera first; the stored remote camera address and
-            // token stay on the device for the next switch.
-            if leaving_network
+            // token, and the IP camera list, stay on the device for the next switch.
+            if leaving_remote
                 && let Err(e) =
                     api::update_camera_source(api::SOURCE_LOCAL, None, None, None).await
             {
@@ -442,7 +598,7 @@ pub fn CameraSettings(
     let push_stereo = Callback::new(move |enabled: bool| push_stereo_enabled(enabled));
 
     view! {
-        <div class="ui-card ui-card-pad ui-card-scroll h-full">
+        <div class="ui-card ui-card-pad ui-card-scroll h-full camera-panel">
             <PanelHeader title=move || t_string!(i18n, camera::title)>
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
@@ -453,52 +609,65 @@ pub fn CameraSettings(
             } else {
                 view! {
                     <div class="camera-settings">
-                        <CameraStatusRow
-                            status=camera_status
-                            detail=camera_detail
-                            applied_source=saved_source
-                            selected_source=source
-                        />
                         <CaptureSourceSelect source=source set_source=set_source />
-                        // Device, resolution, framerate and stereo describe a
-                        // V4L2 camera; a remote camera has none of them.
-                        {move || if source.get() == api::SOURCE_NETWORK {
-                            view! {
-                                <NetworkSourceForm
-                                    host=network_host
-                                    set_host=set_network_host
-                                    port=network_port
-                                    set_port=set_network_port
-                                    token=network_token
-                                    set_token=set_network_token
-                                    token_set=token_set
-                                    suggestion=suggestion
-                                    ap_status=ap_status
-                                />
-                            }.into_any()
-                        } else {
-                            view! {
-                                <CaptureDeviceSelect
-                                    devices=devices
-                                    selected_index=selected_index
-                                    set_selected_index=set_selected_index
-                                />
-                                <ResolutionControls
-                                    formats=formats
-                                    selected_res=selected_res
-                                    set_selected_res=set_selected_res
-                                    selected_framerate=selected_framerate
-                                    set_selected_framerate=set_selected_framerate
-                                />
-                                <StereoOverlayToggle
-                                    stereo_supported=stereo_supported
-                                    selected_stereo_enabled=selected_stereo_enabled
-                                    set_selected_stereo_enabled=set_selected_stereo_enabled
-                                    on_push=push_stereo
-                                />
-                            }.into_any()
-                        }}
-                        <ApplyCameraSettingsButton saving=saving on_apply=apply />
+                        <section class="camera-setup" aria-label=move || t_string!(i18n, camera::setup)>
+                            <h3 class="ui-section-title">{t!(i18n, camera::setup)}</h3>
+                            // Device, resolution, framerate and stereo describe a
+                            // V4L2 camera; a remote or IP camera has none of them.
+                            {move || match source.get().as_str() {
+                                api::SOURCE_NETWORK => view! {
+                                    <NetworkSourceForm
+                                        host=network_host
+                                        set_host=set_network_host
+                                        port=network_port
+                                        set_port=set_network_port
+                                        token=network_token
+                                        set_token=set_network_token
+                                        token_set=token_set
+                                        suggestion=suggestion
+                                        ap_status=ap_status
+                                    />
+                                }.into_any(),
+                                api::SOURCE_IP => view! {
+                                    <IpCamerasForm
+                                        rows=ip_rows
+                                        next_key=ip_next_key
+                                        max=ip_max
+                                        applied=ip_applied
+                                        layout_changes=ip_layout_changes
+                                    />
+                                }.into_any(),
+                                _ => view! {
+                                    <CaptureDeviceSelect
+                                        devices=devices
+                                        selected_index=selected_index
+                                        set_selected_index=set_selected_index
+                                    />
+                                    <ResolutionControls
+                                        formats=formats
+                                        selected_res=selected_res
+                                        set_selected_res=set_selected_res
+                                        selected_framerate=selected_framerate
+                                        set_selected_framerate=set_selected_framerate
+                                    />
+                                    <StereoOverlayToggle
+                                        stereo_supported=stereo_supported
+                                        selected_stereo_enabled=selected_stereo_enabled
+                                        set_selected_stereo_enabled=set_selected_stereo_enabled
+                                        on_push=push_stereo
+                                    />
+                                }.into_any(),
+                            }}
+                        </section>
+                        <div class="camera-apply-bar">
+                            <CameraStatusRow
+                                status=camera_status
+                                detail=camera_detail
+                                applied_source=saved_source
+                                selected_source=source
+                            />
+                            <ApplyCameraSettingsButton saving=saving on_apply=apply />
+                        </div>
                     </div>
                 }.into_any()
             }}

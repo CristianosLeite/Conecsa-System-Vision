@@ -129,6 +129,7 @@ def _job_pb(job) -> "pb.TrainingJob":
         model_name=job.model_name,
         conversion_job_id=job.conversion_job_id,
         metrics_json=json.dumps(job.metrics or {}),
+        metrics_history_json=json.dumps(getattr(job, "history", None) or []),
         started_at=float(job.started_at),
         dataset_id=job.dataset_id,
         result_weights_id=job.result_weights_id,

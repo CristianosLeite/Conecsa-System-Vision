@@ -47,15 +47,36 @@ them. In production the source is set from the device screen and persisted by
 the inference-service (see the [remote camera guide](../remote-camera.md)). The token never appears in a log line, in `Debug` output or in serialized
 configuration.
 
+## IP camera source (RTSP)
+
+With `source` set to IP, the server decodes up to four RTSP cameras, each through
+its own `ffmpeg` subprocess (TCP transport, software decoding, scaled down to at
+most `IPCAM_MAX_WIDTH`×`IPCAM_MAX_HEIGHT`, default 1920×1080) into raw BGR
+frames. Camera *N* (its 0-based position in `ip_cameras`) publishes into its own
+segment, `<SHM_NAME>_ip<N>`, with its own health. The main segment carries no
+frames in this mode: it keeps the config region and an aggregate health —
+`capturing` while any camera captures, otherwise the first camera's status —
+whose `ip_camera_count` gives the number of configured cameras. Editing the list
+restarts only the cameras whose entry changed; leaving the IP source stops every
+camera and unlinks their segments. Invalid lists are ignored and logged, as for
+the network source. Credentials travel only in the URL handed to `ffmpeg`
+(visible to processes inside the container); everything `ffmpeg` prints is
+redacted before it is kept or logged. `CAMERA_IP_URL_<n>`, `CAMERA_IP_USER_<n>`
+and `CAMERA_IP_PASSWORD_<n>` (n = 1..4) bootstrap the source in development.
+
 ## Shared memory
 
 Captured frames are published to a POSIX shared memory segment (`SHM_NAME`):
-a 256-byte header followed by two frame slots. The frame metadata (magic,
+a 4352-byte header followed by two frame slots. The frame metadata (magic,
 version, width, height, format, frame size, active slot, write sequence) is
 a raw fixed-offset header; Protocol Buffers are used only for the camera
-config and health regions inside that header (`proto/shm.proto`).
+config and health regions inside that header (`proto/shm.proto`); the config
+region holds 4 KiB, room for the IP camera list. With the IP camera source each
+camera gets a segment of the same layout, `<SHM_NAME>_ip<N>`, holding RAW BGR
+frames, and the main segment carries no frames.
 
-The segment carries **SHM protocol version 2**, a seqlock publication: the
+The segment carries **SHM protocol version 3** — the seqlock publication of
+version 2 with the larger config region and the RAW BGR format: the
 writer makes the frame sequence odd, writes the payload into the inactive slot
 and then all its metadata, and makes the sequence even again; readers copy the
 frame only on an even sequence and accept it only when the sequence is

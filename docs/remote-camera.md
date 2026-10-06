@@ -99,9 +99,12 @@ another network; **Stop and leave** returns the phone to its own Wi-Fi.
 The device has one radio, so while the access point is on it is **off its
 Wi-Fi network** and the hub reaches it only over the wired port; the button is
 disabled until the wired port has a link and an IPv4 address (a link-local one
-counts). The access point is never persisted: it
-turns itself off if no remote camera joins within five minutes, on an agent
-restart and on a reboot, and a failed start rolls the radio back to station mode.
+counts). That check is a safeguard for starting only. Once on, the access
+point stays on until it is turned off — nothing switches it off by itself, a
+cable unplugged or plugged in later changes nothing, and after an agent
+restart or a reboot it comes back on its own, with or without the cable. A
+failed start rolls the radio back to station mode. The phone app has to be
+started again after a device restart.
 The address range is `AP_ADDRESS_CIDR` (see [configuration](configuration.md));
 the mechanics are in the [os-base hardware agent](services/os-hardware-agent.md#wi-fi-access-point)
 page.
@@ -142,4 +145,4 @@ itself.
 
 Audio, recording, remote control of the remote camera from the device, more than
 one remote camera at a time, discovery, iOS, streaming over the Internet, and
-H.264/RTSP/WebRTC.
+H.264/WebRTC. RTSP cameras are a separate source: see [IP cameras](ip-cameras.md).

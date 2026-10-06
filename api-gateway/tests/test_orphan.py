@@ -74,6 +74,16 @@ class TestArming:
 
 
 class TestCheckOnce:
+    def test_a_gpu_operation_in_progress_skips_the_tick(self, monkeypatch, exits):
+        from gateway import gpu
+
+        t = _expired_tracker(monkeypatch)
+        with gpu.gpu_lock():
+            t.check_once()
+        assert exits == [] and t.armed
+        t.check_once()
+        assert exits == [True]
+
     def test_fires_once_and_disarms(self, monkeypatch, exits):
         t = _expired_tracker(monkeypatch)
         t.check_once()

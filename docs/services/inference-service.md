@@ -90,7 +90,12 @@ compares the geometry with the live `TILING_MODE`/`TILING_TILE` and logs a
 warning when they disagree — a whole-frame model under grid tiling loses
 confidence inside the tiles, and a tile-trained model is blind on the whole
 letterboxed frame. The sidecar also records the model's `task` (see
-[Application type](#application-type)), which no threshold edit erases. A
+[Application type](#application-type)), which no threshold edit erases, and
+`metrics` (`map50_95_box`, `map50_95_mask`, `accuracy_top1`): the validation
+scores ultralytics saved in the converted checkpoint (`train_metrics`, the best
+epoch's for a training run's `best.pt`). They reach the model list as
+`ModelInfo.map50_95` / `accuracy_top1`; a prebuilt `.engine`/`.onnx` upload
+drops them, since nothing vouches for the new engine's accuracy. A
 segmentation model can carry `segment.max_instances`, the instance limit the
 operator set: it replaces both `SEGMENT_MAX_MASKS` caps while that model is
 active.
@@ -157,14 +162,17 @@ the postprocess strategies the build registers: the first three always, and
   back to the previous model. A model of another task than the device's is
   refused outright (`FAILED_PRECONDITION`, `409` at the gateway).
 - **Switching** is serialized with model activation and with the GPU
-  handover: it is refused while the GPU is handed over (from `ReleaseRuntime`
-  until `ResumeRuntime` or an explicit Start) and while a conversion runs. It
-  stops detection, stores the choice, deselects an active model of another
-  task (its files are kept), drops the runtime and the last result, and
-  publishes `application_changed`. Detection is not restarted. The handover
-  itself is announced with `runtime_changed` (keys `status`, data
-  `runtime_released`): `true` from a successful `ReleaseRuntime`, `false` from
-  `ResumeRuntime` and from a `Start` that started detection.
+  handover, and frees the GPU exactly as `FreeGpu` does (see
+  [GPU sharing](training-service.md#gpu-sharing)): it is refused while
+  detection runs — detection is never stopped for it — and while a conversion
+  runs. It then stores the choice, deselects an active model of another task
+  (its files are kept), drops the last result, and publishes
+  `application_changed`. Detection is not restarted. A training handover left
+  behind (a training page closed without exiting) no longer blocks it: the
+  release ends it. The handover itself is announced with `runtime_changed`
+  (keys `status`, data `runtime_released`): `true` from a successful
+  `ReleaseRuntime`, `false` from `ResumeRuntime`, from a `FreeGpu` that ended
+  it and from a `Start` that started detection.
 - **Restart**: a boot-default model (`.current_model`) that is missing or of
   another task is cleared with a warning before the TensorRT warm-up reads it.
 

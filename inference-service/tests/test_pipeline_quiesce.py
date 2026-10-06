@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from api.services.consumer_service import CapturedFrame
 from api.services.detection_service import DetectionService, StaleGeneration
 from api.services.processing_pipeline import ProcessingPipelineService
 
@@ -33,14 +34,14 @@ class FakeConsumer:
         with self._lock:
             self.frames.append((seq, None, _FRAME.copy()))
 
-    def wait_for(self, last_seq, timeout=1.0):
+    def wait_for_frame(self, last_seq, timeout=1.0):
         with self._lock:
             for i, (seq, jpg, npy) in enumerate(self.frames):
                 if seq > last_seq:
                     del self.frames[i]
-                    return seq, jpg, npy
+                    return CapturedFrame(seq, jpg, npy)
         time.sleep(0.01)
-        return last_seq, None, None
+        return CapturedFrame(last_seq)
 
 
 class FakeCodec:
@@ -77,7 +78,7 @@ class FakeDetection:
     def is_model_loaded(self):
         return True
 
-    def prepare(self, frame):
+    def prepare(self, frame, regions=None):
         return self.generation, [frame], [SimpleNamespace()]
 
     def infer(self, inputs, generation=None):
@@ -87,7 +88,7 @@ class FakeDetection:
             raise StaleGeneration("stale")
         return [np.zeros(1)], 0.01
 
-    def finish(self, outputs, frame, metas, inference_time=0.0, generation=None):
+    def finish(self, outputs, frame, metas, inference_time=0.0, generation=None, cameras=None):
         if generation != self.generation:
             raise StaleGeneration("stale")
         self.finished += 1

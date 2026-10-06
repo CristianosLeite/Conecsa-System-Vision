@@ -9,7 +9,9 @@ The inference pipeline produces ONE encoded JPEG per processed camera frame
 fans it out to MJPEG clients without the frames crossing gRPC. Single producer
 (the encode stage), many readers (the gateway's processed feed), latest-wins.
 
-Mirrors the camera ring's seqlock protocol (header version 2): ``write_seq``
+Mirrors the camera ring's seqlock protocol (header version 3; the processed
+layout is unchanged since version 2, the number moves with the camera ring so
+one deploy carries both): ``write_seq``
 is an odd/even generation counter — the writer bumps it odd, writes the
 inactive slot and its metadata, then bumps it even; readers copy under an
 even seq and accept only when a re-read shows it unchanged, retrying a torn
@@ -34,14 +36,22 @@ def _default_name() -> str:
 
 
 def _default_slot_bytes() -> int:
-    """Per-slot size from ``PROCESSED_SHM_SLOT_BYTES`` (default 1 MiB)."""
-    return int(os.environ.get("PROCESSED_SHM_SLOT_BYTES", str(1 << 20)))  # 1 MiB/slot
+    """Per-slot size from ``PROCESSED_SHM_SLOT_BYTES`` (default 4 MiB).
+
+    A frame larger than a slot is dropped, which freezes the processed feed.
+    4 MiB holds a quality-85 JPEG of a busy 2560x1440 IP camera mosaic (the
+    2x2 grid at the default cell size) with room to spare; the reader takes
+    the size from the header, so only the writer reads this.
+    """
+    return int(os.environ.get("PROCESSED_SHM_SLOT_BYTES", str(4 << 20)))  # 4 MiB/slot
 
 
 SLOTS = 2
 MAGIC = 0xC04E5A02
-# Version 2 = the seqlock publication protocol (see the module docstring).
-VERSION = 2
+# Version 2 = the seqlock publication protocol (see the module docstring). The
+# layout is unchanged since, but the version moves with the camera ring (3) so
+# one deploy carries both.
+VERSION = 3
 HEADER_SIZE = 64
 
 # Torn reads are rare (the writer's window is one slice assignment); a few

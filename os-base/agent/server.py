@@ -77,7 +77,8 @@ class HardwareServicer(pb_grpc.HardwareServiceServicer):
         self.network = NetworkAgent(ap=self.ap)
         self.gpio = gpio
         # Whatever the radio was doing before this process started, it is a
-        # station now: the access point is never meant to outlive its agent.
+        # station now; an access point that was on before the restart then
+        # comes back in the background, whatever the wired port's state.
         self.ap.reconcile()
 
     # ── Network / IP ────────────────────────────────────────────────────────────
@@ -152,7 +153,6 @@ class HardwareServicer(pb_grpc.HardwareServiceServicer):
             address=st["address"], prefix=int(st["prefix"]),
             stations=[pb.ApStation(address=s["address"], hostname=s["hostname"], signal=int(s["signal"]))
                       for s in st["stations"]],
-            join_deadline_remaining_secs=int(st["join_deadline_remaining_secs"]),
             wired_ready=st["wired_ready"], message=st["message"],
             channels=[int(c) for c in st.get("channels", [])],
         )

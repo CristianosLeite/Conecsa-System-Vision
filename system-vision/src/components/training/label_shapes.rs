@@ -29,11 +29,12 @@ use crate::class_color::{class_color_for, class_display_name};
 /// up via the callbacks with the normalized click position; in SAM mode the
 /// boxes are pointer-transparent so clicks become point prompts.
 ///
-/// `canvas` is the rendered canvas size in px — the overlay's coordinate
-/// space — so every stroke/handle/text keeps its on-screen size.
+/// `canvas` is the on-screen size of the (zoomed) image in px — the
+/// overlay's coordinate space — so every stroke/handle/text keeps its
+/// on-screen size.
 pub(super) fn committed_boxes_layer(
     i18n: leptos_i18n::I18nContext<Locale>,
-    canvas: RwSignal<(f32, f32)>,
+    canvas: Signal<(f32, f32)>,
     boxes: RwSignal<Vec<LabelBox>>,
     selected_box: RwSignal<Option<usize>>,
     sam_mode: Signal<bool>,
@@ -115,7 +116,7 @@ pub(super) fn committed_boxes_layer(
 /// reactive closure over the whole list (not a keyed `<For>`): a re-run with
 /// the same number of boxes must redraw them, and index keys would not.
 pub(super) fn suggestions_layer(
-    canvas: RwSignal<(f32, f32)>,
+    canvas: Signal<(f32, f32)>,
     suggestions: ReadSignal<Vec<LabelBox>>,
     names: ReadSignal<Vec<String>>,
 ) -> impl IntoView {
@@ -145,7 +146,7 @@ pub(super) fn suggestions_layer(
 
 /// SAM point prompts — green (positive) / red (negative) dots.
 pub(super) fn points_layer(
-    canvas: RwSignal<(f32, f32)>,
+    canvas: Signal<(f32, f32)>,
     sam_points: RwSignal<Vec<(f32, f32, bool)>>,
 ) -> impl IntoView {
     view! {
@@ -170,7 +171,7 @@ pub(super) fn points_layer(
 
 /// The dashed rectangle drawn while dragging a new box on the background.
 pub(super) fn draft_layer(
-    canvas: RwSignal<(f32, f32)>,
+    canvas: Signal<(f32, f32)>,
     draft: RwSignal<Option<(f32, f32, f32, f32)>>,
     classes: ReadSignal<Vec<String>>,
     active_class: ReadSignal<usize>,
@@ -235,7 +236,7 @@ fn svg_points(points: &[Pt], (cw, ch): (f32, f32)) -> String {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn committed_polygons_layer(
     i18n: leptos_i18n::I18nContext<Locale>,
-    canvas: RwSignal<(f32, f32)>,
+    canvas: Signal<(f32, f32)>,
     polygons: RwSignal<Vec<LabelPolygon>>,
     selected: RwSignal<Option<usize>>,
     selected_vertex: RwSignal<Option<usize>>,
@@ -317,7 +318,7 @@ pub(super) fn committed_polygons_layer(
 /// dashed until accepted; a suggestion without a mask shows as its dashed box
 /// (it is accepted as that rectangle). Model suggestions carry their class name.
 pub(super) fn polygon_suggestions_layer(
-    canvas: RwSignal<(f32, f32)>,
+    canvas: Signal<(f32, f32)>,
     suggestions: ReadSignal<Vec<LabelBox>>,
     rings: ReadSignal<Vec<Vec<Vec<Pt>>>>,
     names: ReadSignal<Vec<String>>,
@@ -353,7 +354,7 @@ pub(super) fn polygon_suggestions_layer(
 /// placed vertex to the pointer (click mode) and the first vertex marked as
 /// the target that closes it once there are three.
 pub(super) fn polygon_draft_layer(
-    canvas: RwSignal<(f32, f32)>,
+    canvas: Signal<(f32, f32)>,
     draft: RwSignal<Option<PolyDraft>>,
     classes: ReadSignal<Vec<String>>,
     active_class: ReadSignal<usize>,

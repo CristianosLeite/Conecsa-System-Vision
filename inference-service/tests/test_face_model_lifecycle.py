@@ -95,31 +95,22 @@ def test_a_package_is_listed_with_its_job_task_while_it_builds(service, tmp_path
     assert [(m.name, m.task) for m in service.list_models()] == [("staff.faces", "face")]
 
 
-def test_leaving_face_frees_the_embedder_worker(service, monkeypatch):
-    closed = []
-    monkeypatch.setattr("api.postprocess._face_embedder.close_worker", closed.append)
+def test_an_application_change_frees_every_worker_the_face_embedder_included(
+        service, monkeypatch):
+    released = []
+    monkeypatch.setattr("api.runtime_management.worker_client.release_all_workers",
+                        lambda: released.append(True))
     app = SimpleNamespace(task="face", validate=lambda t: None,
                           persist=lambda t: setattr(app, "task", t))
     service.attach_application_service(app)
     service.attach_detection_service(SimpleNamespace(
-        stop=lambda: False, unload_runtime=lambda: None, reset_results=lambda: None))
+        is_running=False, stop=lambda: False, unload_runtime=lambda: None,
+        reset_results=lambda: None))
 
     assert service.set_task("detect") is True
-    from api.postprocess import _face_assets
-    assert closed == [_face_assets.embed_worker_port()]
-
-
-def test_switching_between_other_tasks_leaves_the_worker_alone(service, monkeypatch):
-    closed = []
-    monkeypatch.setattr("api.postprocess._face_embedder.close_worker", closed.append)
-    app = SimpleNamespace(task="detect", validate=lambda t: None,
-                          persist=lambda t: setattr(app, "task", t))
-    service.attach_application_service(app)
-    service.attach_detection_service(SimpleNamespace(
-        stop=lambda: False, unload_runtime=lambda: None, reset_results=lambda: None))
-
-    assert service.set_task("classify") is True
-    assert closed == []
+    # The embedder's private worker is cached with the others, so the shared
+    # GPU release terminates it too.
+    assert released == [True]
 
 
 # ── per-model face settings ──

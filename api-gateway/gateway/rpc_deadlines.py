@@ -34,7 +34,7 @@ from .config import settings
 # SAM unload.
 LONG_UNARY_METHODS = frozenset({
     "SelectModel", "ReloadModel", "DeleteModel",
-    "Start", "ReleaseRuntime", "ResumeRuntime", "SetApplication",
+    "Start", "FreeGpu", "ReleaseRuntime", "ResumeRuntime", "SetApplication",
     "StartTraining", "CancelTraining", "FinishTraining",
     "DeleteDataset", "CaptureImage", "ReplicateImage", "UnloadSam",
 })

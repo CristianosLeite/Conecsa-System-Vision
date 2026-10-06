@@ -22,7 +22,8 @@ class PostprocessResult:
     when that differs from ``count`` (classification counts class
     transitions); ``None`` means ``count``. ``candidates`` is the
     classification top-k (``[{class_id, class_name, confidence}]``), ``None``
-    for tasks without one.
+    for tasks without one or when several inputs (IP cameras) each have their
+    own, in ``region_candidates``.
     """
 
     image: np.ndarray
@@ -30,6 +31,9 @@ class PostprocessResult:
     items: List[Detection]
     count_increment: Optional[int] = None
     candidates: Optional[List[dict]] = None
+    #: Classification over several inputs (IP cameras): per input, its origin
+    #: in frame pixels and its top-k. ``None`` for a single input.
+    region_candidates: Optional[List[dict]] = None
 
 
 class Postprocessor(Protocol):

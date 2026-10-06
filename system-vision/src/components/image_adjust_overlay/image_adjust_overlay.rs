@@ -108,7 +108,8 @@ pub fn ImageAdjustOverlay(
     let (rgb_blue, set_rgb_blue) = signal(128u16);
     let (gamma, set_gamma) = signal(100u32);
     let (gain, set_gain) = signal(0u32);
-    // Exposure, RGB, gamma and gain are V4L2 controls: a remote camera has none.
+    // Exposure, RGB, gamma and gain are V4L2 controls: a remote camera and the
+    // IP cameras have none.
     let (network_source, set_network_source) = signal(false);
 
     // Fetch state on mount and on model change.
@@ -117,7 +118,7 @@ pub fn ImageAdjustOverlay(
         let _ = camera_refresh.get();
         spawn_local(async move {
             if let Ok(resp) = api::get_camera_devices().await {
-                set_network_source.set(resp.current_source == api::SOURCE_NETWORK);
+                set_network_source.set(resp.current_source != api::SOURCE_LOCAL);
                 set_auto_exposure.set(resp.current_auto_exposure);
                 set_exposure_time.set(resp.current_exposure_time);
                 set_exp_min.set(resp.exposure_time_min);

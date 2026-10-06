@@ -140,6 +140,8 @@ mod tests {
             color: Some(color.into()),
             bbox: Some([0.1, 0.1, 0.2, 0.2]),
             polygons: Some(vec![vec![[0.1, 0.1], [0.2, 0.1], [0.2, 0.2]]]),
+            camera: None,
+            camera_name: None,
         }
     }
 

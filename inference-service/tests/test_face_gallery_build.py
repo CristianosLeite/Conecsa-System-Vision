@@ -413,7 +413,9 @@ def test_the_job_publishes_inside_the_guard_and_reports_done_after_it(tmp_path, 
     job = _job(tmp_path, service)
 
     @contextmanager
-    def guard(engine_filename):
+    def guard(engine_filename, job_id):
+        # The job names itself: only it is exempt from the reload's gate.
+        assert job_id == job.job_id
         order.append(f"publish {engine_filename}")
         yield
         order.append("reloaded")
@@ -442,7 +444,7 @@ def test_a_reload_that_fails_fails_the_job(tmp_path, monkeypatch):
     job = _job(tmp_path, service)
 
     @contextmanager
-    def guard(engine_filename):
+    def guard(engine_filename, job_id):
         yield
         raise RuntimeError("'staff.engine' was rebuilt but could not be reloaded")
 

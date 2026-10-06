@@ -13,6 +13,8 @@ of the camera and processed-frame ring layouts.
   inference→gateway processed-JPEG ring.
 - ``stereo.combine_stereo``           — side-by-side stereo blend (pure
   function), so dataset capture / previews match the live detector's view.
+- ``mosaic``                          — the IP camera rings (``<SHM_NAME>_ip<N>``)
+  and the one layout every consumer composes them into.
 
 Pure struct + numpy/cv2; no protobuf dependency (the camera config/health
 payloads cross as opaque bytes — the caller owns the schema).

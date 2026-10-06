@@ -39,6 +39,7 @@ class ConverterOutput(NamedTuple):
     task: Optional[str] = None                       # ultralytics ``model.task``
     output_shapes: Optional[List[List[int]]] = None  # the exported graph's outputs
     imgsz: Optional[int] = None                      # the size the export used
+    metrics: Dict[str, float] = {}                   # the checkpoint's validation scores
 
 
 def _output_stem(original_filename: str) -> str:
@@ -173,6 +174,8 @@ def _convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640,
     task = parsed.get("task") if isinstance(parsed.get("task"), str) else None
     size = parsed.get("imgsz")
     exported_imgsz = size if type(size) is int and size > 0 else None
+    from api.services.model_settings_service import parse_metrics
+    metrics = parse_metrics(parsed.get("metrics"))
 
     if not os.path.exists(onnx_path):
         raise RuntimeError(
@@ -182,7 +185,7 @@ def _convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640,
     logger.info(f"ONNX conversion complete: {onnx_path} ({len(class_names)} class names, "
                 f"task {task or 'unknown'}, imgsz {exported_imgsz or imgsz})")
     return ConverterOutput(class_names, task, _shapes(parsed.get("output_shapes")),
-                           exported_imgsz)
+                           exported_imgsz, metrics)
 
 
 def _last_json_line(stdout: str) -> Optional[dict]:
@@ -300,7 +303,8 @@ class ConversionService:
         self._jobs: Dict[str, ConversionJob] = {}
         self._lock = threading.Lock()
         self._event_service = event_service
-        self._publication_guard = lambda _engine_filename: contextlib.nullcontext()
+        self._publication_guard = (
+            lambda _engine_filename, _job_id=None: contextlib.nullcontext())
 
     # ── Public API ──
 
@@ -539,6 +543,7 @@ class ConversionService:
         if job is None:
             return
         imgsz = job.imgsz
+        metrics: Dict[str, float] = {}
 
         try:
             # ── Step 1 (PT path only): .pt → .onnx ────────────────────
@@ -554,6 +559,7 @@ class ConversionService:
                     imgsz = exported.imgsz
                     with self._lock:
                         job.imgsz = imgsz
+                metrics = exported.metrics
                 discovered = _discovered_task(exported.task, exported.output_shapes)
                 self._check_declared_task(job, discovered)
                 class_names = exported.class_names
@@ -589,16 +595,19 @@ class ConversionService:
                              message="Building TensorRT .engine (this may take several minutes)…")
             _build_engine_from_onnx(job.onnx_path, job.engine_path)
 
-            # Record the export size, the training geometry and the task next
-            # to the engine (the settings file is otherwise created on first
-            # activation, which is also where geometry and task are checked).
+            # Record the export size, the training geometry, the task and the
+            # checkpoint's validation scores next to the engine (the settings
+            # file is otherwise created on first activation, which is also
+            # where geometry and task are checked). The scores are always
+            # replaced: an engine rebuilt from a .pt without them, or from an
+            # .onnx, must not keep the previous engine's.
             task = job.task or discovered
-            if imgsz is not None or task:
-                from api.services.model_service import ModelService
-                from api.services.model_settings_service import ModelSettingsService
+            from api.services.model_service import ModelService
+            from api.services.model_settings_service import ModelSettingsService
+            settings_path = ModelService.settings_file_for_model(job.engine_path)
+            if imgsz is not None or task or metrics or os.path.exists(settings_path):
                 ModelSettingsService.record_training(
-                    ModelService.settings_file_for_model(job.engine_path), imgsz,
-                    job.train_geometry, task=task)
+                    settings_path, imgsz, job.train_geometry, task=task, metrics=metrics)
 
             # ── Keep the checkpoint, drop the intermediates ────────────
             # The .pt becomes the model's weights sidecar (fine-tune base /
@@ -648,7 +657,8 @@ class ConversionService:
             progress(2, "Reading the enrollment photos…")
             builder = FaceGalleryBuilder(Config(), os.path.dirname(job.engine_path),
                                          _build_engine_from_onnx, progress,
-                                         publish_guard=self._publication_guard)
+                                         publish_guard=lambda name: self._publication_guard(
+                                             name, job_id))
             # The builder publishes the engine, the gallery, the names and the
             # settings sidecar (task "face") as one set; when that model is the
             # active one the guard reloads it, so "done" below means live.

@@ -13,6 +13,8 @@ fn only_a_faces_package_is_an_enrollment_package() {
         modified: 0.0,
         is_active: false,
         task: "face".into(),
+        map50_95: None,
+        accuracy_top1: None,
     };
     assert!(model("staff.faces").is_enrollment_package());
     assert!(model("staff.FACES").is_enrollment_package());
@@ -122,10 +124,13 @@ fn model_info_round_trip() {
         modified: 1_700_000_000.0,
         is_active: true,
         task: "detect".into(),
+        map50_95: Some(0.62),
+        accuracy_top1: None,
     };
     let back: ModelInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
     assert_eq!(back.name, "weights.engine");
     assert!(back.is_active);
+    assert_eq!(back.map50_95, Some(0.62));
 }
 
 #[wasm_bindgen_test]
@@ -133,6 +138,25 @@ fn model_info_without_task_is_a_detection_model() {
     let json = r#"{"name": "old.engine", "size": 1, "modified": 0.0, "is_active": false}"#;
     let info: ModelInfo = serde_json::from_str(json).unwrap();
     assert_eq!(info.task, "detect");
+    // Older firmware records no score: the row shows none.
+    assert_eq!(info.score(), None);
+}
+
+#[wasm_bindgen_test]
+fn model_score_is_the_recorded_metric_as_a_percentage() {
+    let parse = |json: &str| serde_json::from_str::<ModelInfo>(json).unwrap().score();
+    let base = r#""name": "m.engine", "size": 1, "modified": 0.0, "is_active": false"#;
+    let (kind, pct) = parse(&format!(r#"{{{base}, "map50_95": 0.624}}"#)).unwrap();
+    assert_eq!(kind, ModelScore::Map50_95);
+    assert!((pct - 62.4).abs() < 1e-9);
+    let (kind, pct) = parse(&format!(
+        r#"{{{base}, "task": "classify", "map50_95": null, "accuracy_top1": 0.9}}"#
+    ))
+    .unwrap();
+    assert_eq!(kind, ModelScore::AccuracyTop1);
+    assert!((pct - 90.0).abs() < 1e-9);
+    assert_eq!(parse(&format!(r#"{{{base}, "map50_95": 1.5}}"#)), None);
+    assert_eq!(parse(&format!(r#"{{{base}, "map50_95": null}}"#)), None);
 }
 
 #[wasm_bindgen_test]
@@ -241,4 +265,35 @@ fn system_metrics_optional_gpu_fields_default_to_none() {
     assert_eq!(m.temperature, Some(45.0));
     assert!(m.gpu_usage.is_none());
     assert!(m.gpu_temperature.is_none());
+}
+
+#[wasm_bindgen_test]
+fn an_ip_camera_snapshot_classifies_per_camera() {
+    let json = r##"{
+        "task": "classify", "total": 1,
+        "cameras": [{"id": "cam-0001", "name": "Dock 1", "rect": [0.0, 0.0, 0.5, 1.0]},
+                    {"id": "cam-0002", "name": "Dock 2", "rect": [0.5, 0.0, 1.0, 1.0]}],
+        "detections": [{"class_name": "dog", "confidence": 0.8, "camera": "cam-0001", "camera_name": "Dock 1"}],
+        "per_camera": [
+            {"camera": "cam-0001", "camera_name": "Dock 1",
+             "candidates": [{"class_id": 1, "class_name": "dog", "confidence": 0.8}]},
+            {"camera": null, "camera_name": null, "candidates": []}
+        ]
+    }"##;
+    let snapshot: Snapshot = serde_json::from_str(json).unwrap();
+    assert!(snapshot.candidates.is_none());
+    assert_eq!(snapshot.cameras[1].rect, Some([0.5, 0.0, 1.0, 1.0]));
+    assert_eq!(snapshot.detections[0].camera.as_deref(), Some("cam-0001"));
+    let per_camera = snapshot.per_camera().unwrap();
+    assert_eq!(per_camera.len(), 2);
+    assert_eq!(per_camera[0].candidates[0].class_name, "dog");
+    assert_eq!(per_camera[1].camera, None);
+}
+
+#[wasm_bindgen_test]
+fn a_single_frame_snapshot_has_no_per_camera_view() {
+    let snapshot: Snapshot = serde_json::from_str(r#"{"task": "classify", "per_camera": []}"#).unwrap();
+    assert!(snapshot.per_camera().is_none(), "an empty list keeps the single-frame view");
+    let snapshot: Snapshot = serde_json::from_str(r#"{"task": "classify"}"#).unwrap();
+    assert!(snapshot.per_camera().is_none() && snapshot.cameras.is_empty());
 }

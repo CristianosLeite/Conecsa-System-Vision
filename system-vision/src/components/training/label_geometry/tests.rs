@@ -317,3 +317,48 @@ fn closing_merges_near_duplicate_vertices() {
     );
     assert_eq!(dedupe_ring(&SQUARE, canvas, MIN_VERTEX_GAP_PX), SQUARE.to_vec());
 }
+
+#[wasm_bindgen_test]
+fn a_nudged_box_translates_and_keeps_its_size() {
+    let (cx, cy, w, h) = nudge_box((0.5, 0.5, 0.2, 0.4), 0.01, -0.02);
+    approx(cx, 0.51);
+    approx(cy, 0.48);
+    approx(w, 0.2);
+    approx(h, 0.4);
+}
+
+#[wasm_bindgen_test]
+fn a_nudged_box_stops_at_the_image_edge() {
+    // Flush with the right edge: right is a no-op, left still moves.
+    let at_edge = (0.9, 0.5, 0.2, 0.4);
+    let (cx, _, w, _) = nudge_box(at_edge, 0.05, 0.0);
+    approx(cx, 0.9);
+    approx(w, 0.2);
+    let (cx, _, _, _) = nudge_box(at_edge, -0.05, 0.0);
+    approx(cx, 0.85);
+    // A nudge past the top edge is clamped, not lost.
+    let (_, cy, _, _) = nudge_box((0.5, 0.25, 0.2, 0.4), 0.0, -0.3);
+    approx(cy, 0.2);
+}
+
+#[wasm_bindgen_test]
+fn a_nudged_vertex_moves_alone_and_stays_inside() {
+    let ring = nudge_vertex(&SQUARE, 2, 0.05, 0.05);
+    approx(ring[2][0], SQUARE[2][0] + 0.05);
+    approx(ring[2][1], SQUARE[2][1] + 0.05);
+    assert_eq!(ring[0], SQUARE[0]);
+    assert_eq!(ring[1], SQUARE[1]);
+    assert_eq!(ring[3], SQUARE[3]);
+    let clamped = nudge_vertex(&SQUARE, 1, 0.9, -0.9);
+    assert_eq!(clamped[1], [1.0, 0.0]);
+    assert_eq!(nudge_vertex(&SQUARE, 9, 0.1, 0.1), SQUARE.to_vec());
+}
+
+#[wasm_bindgen_test]
+fn arrow_keys_map_to_screen_px_deltas() {
+    assert_eq!(arrow_delta_px("ArrowLeft", false), Some((-NUDGE_PX, 0.0)));
+    assert_eq!(arrow_delta_px("ArrowRight", false), Some((NUDGE_PX, 0.0)));
+    assert_eq!(arrow_delta_px("ArrowUp", false), Some((0.0, -NUDGE_PX)));
+    assert_eq!(arrow_delta_px("ArrowDown", true), Some((0.0, NUDGE_FAST_PX)));
+    assert_eq!(arrow_delta_px("Delete", false), None);
+}

@@ -9,7 +9,7 @@ import logging
 import os
 from contextlib import contextmanager
 from threading import Lock, RLock
-from typing import Callable, Generator, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Callable, Generator, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from conecsa_common import atomic_write_bytes
 
@@ -17,7 +17,7 @@ from ..config import Config
 from ..model_paths import ALLOWED_MODEL_EXTENSIONS, validate_model_filename
 from ..models.detection_models import ModelInfo
 from ..runtime_management import RuntimeFactory
-from .errors import PreconditionFailed
+from .errors import GPU_HOLDER_CONVERSION, GPU_HOLDER_DETECTION, GpuBusy, PreconditionFailed
 from .model_settings_service import ModelSettingsService
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,23 @@ _ONNX_EXTENSIONS = {'.onnx'}
 # A face enrollment package (training-service): built into a face model.
 _FACES_EXTENSIONS = {'.faces'}
 FACE_TASK = "face"
+
+
+def model_scores(task: str, metrics: Mapping[str, float]
+                 ) -> Tuple[Optional[float], Optional[float]]:
+    """The ``(map50_95, accuracy_top1)`` a model of ``task`` reports in the list.
+
+    A segment model's mAP is its mask mAP (box when only that was recorded);
+    a detect model's is its box mAP; a classify model has only top-1 accuracy.
+    Face models and models without recorded scores report neither.
+    """
+    if task == "classify":
+        return None, metrics.get("accuracy_top1")
+    if task == "segment":
+        return metrics.get("map50_95_mask", metrics.get("map50_95_box")), None
+    if task == "detect":
+        return metrics.get("map50_95_box"), None
+    return None, None
 
 
 class ModelService:
@@ -68,10 +85,12 @@ class ModelService:
         self._event_service = None      # Wired via attach_event_service()
         # True between a successful release_runtime() and the end of the
         # handover — resume_runtime(), with or without restarting detection,
-        # or an explicit start_detection(): the GPU belongs to the
-        # training-service, so the application type cannot change. Read and
-        # written under _op_lock, which also serializes the release against
-        # set_task() and the start.
+        # free_gpu() or an explicit start_detection(): training mode stopped
+        # detection and a start must initialize a fresh runtime. It never
+        # locks anything: a handover left behind by a closed training page is
+        # simply ended by the next free_gpu(). Read and written under
+        # _op_lock, which also serializes the release against set_task() and
+        # the start.
         self._runtime_released = False
         self._state_file = os.path.join(model_directory, self.STATE_FILENAME)
 
@@ -231,14 +250,17 @@ class ModelService:
         self._conversion_service = conversion_service
 
     @contextmanager
-    def publication(self, engine_filename: str) -> Generator[None, None, None]:
+    def publication(self, engine_filename: str,
+                    job_id: Optional[str] = None) -> Generator[None, None, None]:
         """Publish a model's files as one lifecycle operation.
 
         The body replaces ``engine_filename`` and its sidecars on disk. It
         runs under ``_op_lock``, and when that model is the active one it is
         reloaded before the lock is released: the running strategy would
         otherwise keep the previous gallery and names while a class rename
-        already wrote to the new files.
+        already wrote to the new files. ``job_id`` is the conversion job
+        publishing it: only that job is exempt from the reload's conversion
+        check, so another build still running refuses it.
 
         Raises:
             RuntimeError: the rebuilt active model could not be reloaded
@@ -248,7 +270,8 @@ class ModelService:
             yield
             if engine_filename != self.current_model or self._detection_service is None:
                 return
-            success, result, _was_running = self.activate_model(engine_filename)
+            success, result, _was_running = self.activate_model(engine_filename,
+                                                                own_conversion=job_id)
             if not success:
                 raise RuntimeError(
                     f"'{engine_filename}' was rebuilt but could not be reloaded: {result}")
@@ -359,6 +382,10 @@ class ModelService:
             if filename.lower().endswith(ALLOWED_MODEL_EXTENSIONS):
                 try:
                     file_path = os.path.join(self.model_directory, filename)
+                    task = converting.get(filename) or self.task_of(filename)
+                    map50_95, accuracy_top1 = model_scores(
+                        task, ModelSettingsService.metrics_of(
+                            self.settings_file_for_model(file_path)))
                     models.append(ModelInfo(
                         name=filename,
                         path=file_path,
@@ -368,7 +395,9 @@ class ModelService:
                         has_weights=(
                             not filename.lower().endswith(tuple(_FACES_EXTENSIONS))
                             and os.path.isfile(self.weights_file_for_model(file_path))),
-                        task=converting.get(filename) or self.task_of(filename),
+                        task=task,
+                        map50_95=map50_95,
+                        accuracy_top1=accuracy_top1,
                     ))
                 except Exception as ex:
                     logger.warning(f"Error reading model file {filename}: {ex}")
@@ -675,9 +704,11 @@ class ModelService:
             # A prebuilt engine cannot be inspected before it loads: record
             # the declared task now, and let activation verify the engine's
             # outputs against it.
-            if task:
+            # Its scores are unknown: drop any a replaced engine recorded.
+            settings_path = self.settings_file_for_model(model_path)
+            if task or os.path.exists(settings_path):
                 ModelSettingsService.record_training(
-                    self.settings_file_for_model(model_path), None, task=task)
+                    settings_path, None, task=task, metrics={})
             try:
                 success, result, _was_running = self.activate_model(filename)
             except PreconditionFailed as ex:
@@ -752,7 +783,8 @@ class ModelService:
         model_path: str
         classes_path: str
 
-    def activate_model(self, model_name: str) -> Tuple[bool, str, bool]:
+    def activate_model(self, model_name: str, *,
+                       own_conversion: Optional[str] = None) -> Tuple[bool, str, bool]:
         """
         Full lifecycle to switch the active model in a live system —
         transactional: on any failure the previous model, its scoped stores,
@@ -774,10 +806,18 @@ class ModelService:
             path and ``was_running`` says whether the loop was running
             beforehand (and has now been restarted).
 
+        Refused (``GpuBusy``) while a conversion runs — the engine build owns
+        the GPU — except by ``own_conversion``, the id of the job whose
+        publication of a rebuilt active model activates it from inside that
+        job; any other running conversion still refuses. The check holds
+        ``_op_lock``, which a conversion enqueue takes too, so no build can
+        start between it and the load.
+
         Raises:
             RuntimeError: if attach_detection_service() was not called.
             PreconditionFailed: the model's task is not the device's
                 application task (nothing was stopped or switched).
+            GpuBusy: a model conversion runs (nothing was stopped or switched).
         """
         if self._detection_service is None:
             raise RuntimeError(
@@ -787,6 +827,7 @@ class ModelService:
 
         with self._op_lock:
             self._check_task(model_name)
+            self._refuse_during_conversion(except_job=own_conversion)
             with self.lock:
                 snapshot = self._Snapshot(
                     current_model=self.current_model,
@@ -855,19 +896,19 @@ class ModelService:
         handover by ``_op_lock``, in this order:
 
         1. the current task again → nothing changes (the gateway still audits);
-        2. refused while the GPU is handed over to training or a conversion
-           runs (``PreconditionFailed``);
-        3. detection stops — a failure aborts with the previous state intact;
-        4. ``application.json`` is written — a failure restarts detection if
-           it was running and aborts;
-        5. an active model of another task is deselected (its files stay: they
+        2. the GPU is freed with :meth:`free_gpu`, which refuses (``GpuBusy``)
+           while detection runs or a conversion does — detection is never
+           stopped implicitly — and otherwise ends a leftover training
+           handover;
+        3. ``application.json`` is written — a failure aborts with the
+           previous state intact;
+        4. an active model of another task is deselected (its files stay: they
            belong to the model, not to the application);
-        6. the detection runtime, a labeling engine of another task and the
-           last result are dropped, so nobody reads a stale result of the
+        5. the last result is dropped, so nobody reads a stale result of the
            previous task;
-        7. ``application_changed`` is published. Detection is not restarted.
+        6. ``application_changed`` is published. Detection is not restarted.
 
-        Steps 5–7 only drop in-memory state and a marker file whose absence
+        Steps 4–6 only drop in-memory state and a marker file whose absence
         is valid, so they cannot leave the persisted state inconsistent.
         """
         app = self._application_service
@@ -878,40 +919,14 @@ class ModelService:
         with self._op_lock:
             if app.task == task:
                 return False
-            if self._runtime_released:
-                raise PreconditionFailed(
-                    "The GPU is handed over to model training; change the application "
-                    "type after training finishes")
-            if self._conversion_service is not None and self._conversion_service.get_active_jobs():
-                raise PreconditionFailed(
-                    "A model conversion is in progress; change the application type "
-                    "after it finishes")
+            self.free_gpu()
             previous = app.task
-            detection = self._detection_service
-            was_running = detection.stop() if detection is not None else False
-            try:
-                app.persist(task)
-            except Exception:
-                if was_running and detection is not None:
-                    try:
-                        detection.start()
-                    except Exception:  # noqa: BLE001 - the write failure is surfaced
-                        logger.exception("Could not restart detection after a failed "
-                                         "application change")
-                raise
+            app.persist(task)
             if self.current_model and self.task_of(self.current_model) != task:
                 self._clear_selection()
+            detection = self._detection_service
             if detection is not None:
-                detection.unload_runtime()
                 detection.reset_results()
-            labeling = self._labeling_service
-            if labeling is not None and labeling.loaded_task() not in (None, task):
-                labeling.unload()
-            if previous == FACE_TASK:
-                # The face embedder's private worker goes with the runtime.
-                from ..postprocess import _face_assets
-                from ..postprocess._face_embedder import close_worker
-                close_worker(_face_assets.embed_worker_port())
             self._publish("application_changed", ["application", "models", "status"],
                           {"task": task})
         logger.info("Application type changed: %s → %s", previous or "(none)", task)
@@ -945,27 +960,123 @@ class ModelService:
 
     # ── GPU handover (training-service) ──
 
-    def release_runtime(self) -> Tuple[bool, str]:
-        """Stop detection and free every TensorRT worker for the training-service.
+    def free_gpu(self, *, stop_detection: bool = False,
+                 begin_handover: bool = False) -> bool:
+        """Free every idle GPU holder of this service — the shared GPU release.
 
-        Refused while a conversion runs (the engine build needs the worker).
-        Holding ``_op_lock`` serializes the release against ``set_task`` and
-        model activation: whichever runs first makes the other refuse or wait.
+        The one way the inference-service gives the GPU up, for whichever
+        consumer needs it next (an application change, training mode, a
+        labeling assistant). It refuses with :class:`GpuBusy` only while a
+        model conversion runs or — unless ``stop_detection`` — while detection
+        runs; anything else is evicted: the labeling engine, the detection
+        runtime and every TensorRT worker.
+        A leftover training handover ends here too, so a closed training page
+        never locks the device — unless ``begin_handover``, which marks a new
+        one in the same critical section (entering training mode), so no start
+        or conversion can slip in between the release and the mark. Returns
+        the previous handover flag (the caller publishes ``runtime_changed``
+        when it changed). Holds ``_op_lock``, so a model activation, a
+        conversion enqueue or an application change never interleaves with
+        it. A holder that does not go (a worker that does not exit, see
+        ``release_all_workers``) raises; detection this call stopped is then
+        restarted, so a refused release leaves the device as it found it —
+        unless the labeling engine or any TensorRT worker is still resident,
+        beside which detection stays stopped.
         """
         with self._op_lock:
-            if self._conversion_service is not None and self._conversion_service.get_active_jobs():
-                logger.warning("Runtime release refused: a model conversion is in progress")
-                return False, "A model conversion is in progress; try again when it finishes"
-            if self._detection_service is not None:
-                self._detection_service.stop()
-            # The labeling engine goes with the runtime: reset its state so a
-            # stale "loaded" never survives the worker teardown below.
-            if self._labeling_service is not None:
-                self._labeling_service.unload()
-            from ..runtime_management.worker_client import release_all_workers
-            release_all_workers()
+            self._refuse_during_conversion()
+            detection = self._detection_service
+            stopped = False
+            if detection is not None and detection.is_running:
+                if not stop_detection:
+                    raise GpuBusy(GPU_HOLDER_DETECTION,
+                                  "Detection is running; stop it first")
+                stopped = detection.stop()
+            try:
+                if self._labeling_service is not None:
+                    self._labeling_service.unload()
+                if detection is not None:
+                    # Idempotent drain: it closes the detection path before the
+                    # workers go, and the next start initializes a fresh runtime.
+                    detection.stop()
+                    detection.unload_runtime()
+                from ..runtime_management.worker_client import release_all_workers
+                release_all_workers()
+            except Exception:
+                if stopped:
+                    self._restart_detection_after_failed_release()
+                raise
+            was_released, self._runtime_released = self._runtime_released, begin_handover
+            return was_released
+
+    def _restart_detection_after_failed_release(self) -> None:
+        """Best-effort: bring back the detection a failed GPU release stopped.
+
+        Without it the caller's error (entering training mode, say) would leave
+        detection stopped with no handover to resume it. The runtime is rebuilt
+        from the configured model, as a resume does; a restart that fails too is
+        only logged — the release's own error is what the caller reports.
+        """
+        detection = self._detection_service
+        if detection is None:
+            return
+        labeling = self._labeling_service
+        if labeling is not None and labeling.is_loaded:
+            # Its worker still holds CUDA memory: no live detection beside it.
+            logger.error("GPU release failed with the labeling engine resident; "
+                         "detection left stopped")
+            return
+        from ..runtime_management.worker_client import live_worker_ports
+        survivors = live_worker_ports()
+        if survivors:
+            # Any cached worker (the face embedder's included) that outlived
+            # the release still holds CUDA memory.
+            logger.error("GPU release failed with TensorRT workers alive on ports %s; "
+                         "detection left stopped", ", ".join(map(str, survivors)))
+            return
+        try:
+            detection.unload_runtime()
+            detection.start()
+            logger.warning("GPU release failed; detection restarted")
+        except Exception:  # noqa: BLE001 - the release error is re-raised
+            logger.exception("GPU release failed and detection could not restart")
+
+    def _refuse_during_conversion(self, except_job: Optional[str] = None) -> None:
+        """Raise ``GpuBusy`` while a model conversion (TensorRT build) runs.
+
+        ``except_job`` is not counted (a job publishing its own result).
+        Callers hold ``_op_lock``: a conversion is enqueued under it, so the
+        answer holds until they release it.
+        """
+        if self._conversion_service is None:
+            return
+        if any(job.job_id != except_job for job in self._conversion_service.get_active_jobs()):
+            raise GpuBusy(GPU_HOLDER_CONVERSION,
+                          "A model conversion is in progress; try again when it finishes")
+
+    def hold_for_training(self) -> None:
+        """Boot inside a training job: mark the handover, load nothing.
+
+        Leaving training mode (or the gateway's orphan watchdog) then resumes
+        detection with the selected model, as after any handover.
+        """
+        with self._op_lock:
             self._runtime_released = True
-            return True, "Runtime released"
+
+    def release_runtime(self) -> Tuple[bool, str]:
+        """Hand the GPU over to training: free it, stopping detection.
+
+        :meth:`free_gpu` with ``stop_detection`` (entering training mode is a
+        confirmed stop), then the handover is marked so that leaving training
+        mode can resume detection. Refused only while a conversion runs (the
+        engine build needs the worker).
+        """
+        try:
+            self.free_gpu(stop_detection=True, begin_handover=True)
+        except GpuBusy as exc:
+            logger.warning("Runtime release refused: %s", exc)
+            return False, str(exc)
+        return True, "Runtime released"
 
     def resume_runtime(self, restart_detection: bool = True) -> Tuple[bool, str]:
         """End the GPU handover after training.
@@ -973,8 +1084,7 @@ class ModelService:
         With ``restart_detection`` (the default) the current model is
         re-activated and detection restarts. Without it only the handover ends:
         the runtime stays unloaded, so the model conversion that follows a
-        training keeps the GPU, and detection waits for an explicit start. The
-        application type can change again either way.
+        training keeps the GPU, and detection waits for an explicit start.
         """
         with self._op_lock:
             # Cleared first: a failed resume must not lock the application
@@ -990,6 +1100,12 @@ class ModelService:
                 # which a device of another task refuses, and training mode
                 # could then never be left.
                 return True, "Runtime resumed (no model selected)"
+            try:
+                self._refuse_during_conversion()
+            except GpuBusy:
+                # The build owns the GPU: leave training mode, but do not load
+                # the engine on top of it; detection waits for an explicit start.
+                return True, "GPU handover ended; detection left stopped during a model conversion"
             detection = self._detection_service
             if detection is not None and not detection.is_running:
                 detection.initialize()
@@ -1003,7 +1119,9 @@ class ModelService:
         can publish ``runtime_changed``. The flag is cleared only after the
         start succeeded, and both happen under ``_op_lock``: a training that
         releases the GPU afterwards stops detection and marks the handover
-        again, so the two never interleave.
+        again, so the two never interleave. Refused (``GpuBusy``) while a
+        conversion runs, checked under the same lock a conversion enqueue
+        takes.
         """
         if self._detection_service is None:
             raise RuntimeError(
@@ -1011,6 +1129,8 @@ class ModelService:
                 "to be called during application wiring."
             )
         with self._op_lock:
+            if not self._detection_service.is_running:
+                self._refuse_during_conversion()
             if self._runtime_released and not self._detection_service.is_running:
                 # The released workers are gone and a conversion may have
                 # replaced the selected engine meanwhile: drop the old runtime

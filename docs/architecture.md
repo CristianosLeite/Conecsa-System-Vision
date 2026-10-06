@@ -11,7 +11,7 @@ apart:
   in the table below.
 
 `system-vision` in code font always means that container (and the crate, compose
-service, Docker context, `i18n/system-vision/` catalog and device hostname that share
+service, Docker context, `shared/i18n/system-vision/` catalog and device hostname that share
 its name), never the product.
 
 ## Services
@@ -121,17 +121,21 @@ HTTP/SSE/MJPEG on the same origin it was loaded from.
 
 The native **Tauri 2** desktop app in this repo is the separate
 [`hub-vision`](services/hub-vision.md) fleet hub — a different application, not a
-desktop build of `system-vision`.
+desktop build of `system-vision`. What both frontends share lives outside them:
+the design system (`shared/styles/`), the translation catalogs (`shared/i18n/`) and the
+`ui-view` crate (Apache-2.0) — the zoomable image view (transform math, pointer
+and wheel gestures, viewport glue) behind the device label editor and the hub's
+image viewer, plus the guard that keeps either page from being zoomed as a whole.
 
 ### Localization
 
 Both frontends are localized (**en** default, **pt-BR**, **es**) with
 [`leptos_i18n`](https://crates.io/crates/leptos_i18n). Translations are
 compiled in: each crate's `build.rs` generates the i18n module from the shared
-catalogs under the `i18n/` directory at the monorepo root
-(`i18n/system-vision/<locale>/<namespace>.json`,
-`i18n/hub-vision/<locale>.json` — layout, parity rules and the cross-app
-terminology glossary are documented in `i18n/README.md`).
+catalogs under the `shared/i18n/` directory at the monorepo root
+(`shared/i18n/system-vision/<locale>/<namespace>.json`,
+`shared/i18n/hub-vision/<locale>.json` — layout, parity rules and the cross-app
+terminology glossary are documented in `shared/i18n/README.md`).
 
 The device UI has **no language selector**. The only selector lives in the
 hub's **Settings** page; the hub persists the choice (`hub-settings.json`) and
@@ -152,7 +156,7 @@ stream, with a 5-second status poll as the fallback.
     - **`▦`** (top-right): creates a new detection area centered in the frame
       and enters editing mode.
     - **Area chips** (top-left): one chip per area. The `□`/`○` glyph shows
-      the shape; clicking the number enters editing; clicking the `✗` deletes
+      the shape; clicking the number enters editing; clicking the trash icon deletes
       the area. The chip of the area being edited is highlighted amber.
     - **Editing toolbar** (bottom, only while an area is being edited):
       movement (`↑ ↓ ← →`), axis resize (`W+`/`W−` width, `H+`/`H−` height),
@@ -164,6 +168,24 @@ stream, with a 5-second status poll as the fallback.
 - **Control panel**: view navigation (including training), Start/Stop with the
   detection status, performance statistics
 - **Status row** (full width): system metrics
+
+Camera settings group local, remote and IP capture into source cards. Only the
+selected source's setup fields are shown. IP cameras include a numbered mosaic
+preview that follows the list order, with separate fields for stream credentials.
+The Apply bar remains visible while scrolling and identifies the currently applied
+source and its health; choosing another source takes effect only after applying.
+
+Contextual edit, rename, remove, and inline save/cancel controls use the existing
+outline icons. Primary form actions, menu items, and confirmations retain their
+text. Icon-only controls have translated tooltips and accessible names, visible
+keyboard focus, and a minimum 32 px hit area (44 px for touch input). Two
+compact variants keep small elements usable on a touch screen: the thumbnail
+actions of the gallery and of the dataset cards stay 32 px in one row along the
+top edge, so the picture itself remains the tap target, and the class-row
+buttons are 36 px. Thumbnail
+actions also appear on keyboard focus and remain visible for touch input.
+Deleting an image or removing a class asks for confirmation in the app's own
+dialog, with Cancel focused first; a single tap never destroys data.
 
 ## Protocol Buffers
 
@@ -196,7 +218,7 @@ message and service.
 | Frontend UI | Leptos 0.8 (Rust WASM, served by Nginx) |
 | Fleet hub | `hub-vision` — Leptos + Tauri 2 (native desktop, off-device) |
 | Frontend build | Trunk, TailwindCSS |
-| Localization | leptos_i18n — compile-time catalogs (en / pt-BR / es) under `i18n/` |
+| Localization | leptos_i18n — compile-time catalogs (en / pt-BR / es) under `shared/i18n/` |
 | Protobuf client | prost |
 | Webcam server | Rust — nokhwa (+ v4l / rscam on aarch64), synchronous capture |
 | Frame transport | POSIX Shared Memory (zero-copy IPC) — camera + processed rings |

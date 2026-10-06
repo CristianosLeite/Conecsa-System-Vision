@@ -9,8 +9,8 @@ use crate::i18n::*;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-/// How often the panel re-reads the access point while it is on screen: the
-/// join deadline counts down and remote cameras come and go without any event.
+/// How often the panel re-reads the access point while it is on screen:
+/// remote cameras come and go without any event.
 const POLL_MS: i32 = 3_000;
 
 /// The device's own Wi-Fi access point, for a remote camera with no router.
@@ -32,15 +32,10 @@ pub(super) fn AccessPointPanel(
     // 0 = automatic: the device picks a channel it may start on right now.
     let (channel, set_channel) = signal(0u32);
     let (busy, set_busy) = signal(false);
-    // The deadline the device reported, and how long ago it did: the panel
-    // adds only its own elapsed time, never a difference between two clocks.
-    let (deadline, set_deadline) = signal(None::<(u32, f64)>);
 
     let reload = move || {
         spawn_local(async move {
             if let Ok(st) = api::get_ap_status().await {
-                let remaining = st.join_deadline_remaining_secs;
-                set_deadline.set((st.active && remaining > 0).then(|| (remaining, now_secs())));
                 status.set(Some(st));
             }
         });
@@ -93,8 +88,6 @@ pub(super) fn AccessPointPanel(
         });
     };
 
-    let countdown = move || deadline.get().map(|(remaining, at)| remaining_secs(remaining, at, now_secs()));
-
     view! {
         <div class="flex flex-col gap-3">
             {move || match status.get() {
@@ -110,9 +103,6 @@ pub(super) fn AccessPointPanel(
                         <span class="ui-value text-xs font-mono">{format!("{}/{}", st.address, st.prefix)}</span>
                         <span class="ui-muted text-xs">{format!("{} MHz", st.frequency_mhz)}</span>
                     </div>
-                    {move || countdown().map(|secs| view! {
-                        <p class="ui-help">{t_string!(i18n, settings::ap_join_deadline, secs = secs)}</p>
-                    })}
                     <div class="flex flex-col gap-1">
                         <span class="ui-label-xs">{t!(i18n, settings::ap_stations)}</span>
                         {if st.stations.is_empty() {
@@ -210,21 +200,4 @@ pub(super) fn AccessPointPanel(
             }}
         </div>
     }
-}
-
-/// Seconds left of a join deadline the device reported as `reported` at the
-/// browser time `reported_at`: only this browser's own elapsed time is
-/// subtracted, never a difference between the device clock and ours, and a
-/// clock that goes backwards leaves the value where it was.
-pub(super) fn remaining_secs(reported: u32, reported_at: f64, now: f64) -> u32 {
-    let elapsed = (now - reported_at).max(0.0) as u32;
-    reported.saturating_sub(elapsed)
-}
-
-/// The browser's monotonic clock, in seconds.
-fn now_secs() -> f64 {
-    web_sys::window()
-        .and_then(|w| w.performance())
-        .map(|p| p.now() / 1000.0)
-        .unwrap_or(0.0)
 }

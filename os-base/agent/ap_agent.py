@@ -6,16 +6,22 @@
 ApAgent — the device's Wi-Fi access point for the remote camera.
 
 The device has one radio. As an access point it leaves its Wi-Fi network, so
-the hub reaches it over the wired port only: starting requires a wired link
-with an IPv4 address — a link-local one counts, since a hub on a direct cable
+the hub reaches it over the wired port only: an admin start requires a wired
+link with an IPv4 address — a link-local one counts, since a hub on a direct cable
 with no DHCP server reaches the device by exactly that — and every step that
 fails is undone (the volatile
 network file removed, the wpa block removed, networkd reloaded, wpa_supplicant
 ``RECONFIGURE``d) so the radio returns to the persisted station configuration.
 
-Nothing here is ever persisted: the access-point block never passes through
-``SAVE_CONFIG`` and the networkd file lives under ``/run``. An agent restart
-reconciles the radio back to station mode; a reboot does the same by itself.
+The radio configuration is never persisted: the access-point block never
+passes through ``SAVE_CONFIG`` and the networkd file lives under ``/run``, so
+an agent restart reconciles the radio back to station mode and a reboot does
+the same by itself. What is persisted is the *intent*: a started access point
+leaves ``AP_STATE_PATH`` (SSID, the derived WPA2 key — never the passphrase —
+and the requested channel), only an admin stop removes it, and an agent start
+that finds it brings the access point back whatever the wired port's state,
+retrying until it succeeds or an admin start or stop takes over. Nothing turns
+the access point off by itself.
 
 ``DescribeLink`` reports DHCP leases as
 ``DHCPServer.Leases[] = {ClientId: bytes, Address: bytes, Hostname: str,
@@ -23,14 +29,16 @@ ExpirationUSec: int}``. Client ids beginning with ``0x01`` carry the station's
 MAC, which is how a lease is matched to an ``ALL_STA`` entry — and the MAC is
 the one thing this module never returns or logs.
 """
+import hashlib
 import ipaddress
 import logging
 import os
+import string
 import threading
 import time
 from typing import Callable
 
-from conecsa_common.atomic import atomic_write_bytes
+from conecsa_common.atomic import atomic_write_bytes, atomic_write_json, fsync_dir, read_json
 
 from . import networkd
 from .wpa import WpaCtrl, WpaError, encode_psk, encode_ssid
@@ -39,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 RUN_NETWORKD_DIR = "/run/systemd/network"
 AP_FILE_PREFIX = "05-conecsa-ap-"
+# Survives a reboot: the directory also holds the clock floor (time_agent).
+AP_STATE_PATH = "/var/lib/conecsa/access-point.json"
 # Documented default; a site whose wired network overlaps it sets the variable.
 AP_ADDRESS_CIDR = os.environ.get("AP_ADDRESS_CIDR", "10.98.76.1/24")
 # Channel → centre frequency, the non-DFS block of 5 GHz only. Whether a given
@@ -49,13 +59,52 @@ AP_ADDRESS_CIDR = os.environ.get("AP_ADDRESS_CIDR", "10.98.76.1/24")
 # ``AUTO_CHANNEL`` lets the agent choose.
 CHANNELS = {36: 5180, 40: 5200, 44: 5220, 48: 5240}
 AUTO_CHANNEL = 0
-JOIN_DEADLINE_S = 300.0
 _AP_TIMEOUT_S = 15.0
 _ADDRESS_TIMEOUT_S = 10.0
 _POLL_S = 0.5
-_STATION_POLL_S = 5.0
 _DHCP_POOL_OFFSET = 10
 _DHCP_POOL_SIZE = 20
+# After a restart the access point is retried until it comes back: every
+# _RESTORE_RETRY_S while boot settles (the wpa socket and a usable channel
+# arrive late), then every _RESTORE_SLOW_RETRY_S, since each failed attempt
+# that reached the radio bounces its station link.
+_RESTORE_WINDOW_S = 120.0
+_RESTORE_RETRY_S = 10.0
+_RESTORE_SLOW_RETRY_S = 60.0
+_RESTORING = "Restoring the access point after a restart"
+# ``read_json``'s answer for a missing file: a file holding JSON ``null`` must
+# still reach validation (and removal) rather than pass for an absent one.
+_MISSING = object()
+
+
+def _derive_psk(ssid: str, passphrase: str) -> str:
+    """The WPA2 pre-shared key (IEEE 802.11i PBKDF2), as 64 hex digits.
+
+    The radio is configured with it rather than the passphrase, so the state
+    file can hold the key a restart needs without the passphrase itself."""
+    return hashlib.pbkdf2_hmac("sha1", passphrase.encode("utf-8"), ssid.encode("utf-8"), 4096, 32).hex()
+
+
+def _valid_state(state: object) -> dict | None:
+    """The persisted intent if it is well formed, else ``None``."""
+    if not isinstance(state, dict):
+        return None
+    ssid, psk, channel = state.get("ssid"), state.get("psk"), state.get("channel")
+    if not isinstance(ssid, str):
+        return None
+    try:
+        # Valid JSON can still carry a lone surrogate, which has no UTF-8 form.
+        ssid_bytes = len(ssid.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+    if not 1 <= ssid_bytes <= 32:
+        return None
+    if not isinstance(psk, str) or len(psk) != 64 or any(c not in string.hexdigits for c in psk):
+        return None
+    if isinstance(channel, bool) or not isinstance(channel, int) or \
+            (channel != AUTO_CHANNEL and channel not in CHANNELS):
+        return None
+    return {"ssid": ssid, "psk": psk, "channel": channel}
 
 
 def _validate_request(ssid: str, passphrase: str, channel: int) -> str | None:
@@ -97,9 +146,14 @@ class ApAgent:
     def __init__(self, discover: Callable[[], dict[str, tuple[int, str]]],
                  run_dir: str = RUN_NETWORKD_DIR, cidr: str = AP_ADDRESS_CIDR,
                  now: Callable[[], float] = time.monotonic,
-                 wpa_factory: Callable[[str], WpaCtrl] = WpaCtrl):
+                 wpa_factory: Callable[[str], WpaCtrl] = WpaCtrl,
+                 state_path: str = AP_STATE_PATH,
+                 spawn: Callable[[Callable[[], None]], None] | None = None):
         self._discover = discover
         self._run_dir = run_dir
+        self._state_path = state_path
+        self._spawn = spawn or (lambda fn: threading.Thread(target=fn, name="ap-restore", daemon=True).start())
+        self._restore_cancel: threading.Event | None = None
         self._cidr = cidr
         self._now = now
         self._wpa = wpa_factory
@@ -112,10 +166,6 @@ class ApAgent:
         self._ssid = ""
         self._frequency = 0
         self._net_id: str | None = None
-        self._joined = False
-        self._deadline: float | None = None
-        self._timer: threading.Timer | None = None
-        self._watch_stop = threading.Event()
         self._message = ""
 
     # ── read ────────────────────────────────────────────────────────────────
@@ -130,13 +180,10 @@ class ApAgent:
         with self._lock:
             active = self._active
             ssid, frequency, message = self._ssid, self._frequency, self._message
-            remaining = 0
-            if active and not self._joined and self._deadline is not None:
-                remaining = max(0, int(self._deadline - self._now() + 0.999))
         links = self._discover()
         out = {
             "active": active, "ssid": ssid if active else "", "frequency_mhz": frequency if active else 0,
-            "address": "", "prefix": 0, "stations": [], "join_deadline_remaining_secs": remaining,
+            "address": "", "prefix": 0, "stations": [],
             "wired_ready": self._wired_ready(links), "message": message, "channels": [],
         }
         wifi = links.get("wifi")
@@ -201,45 +248,66 @@ class ApAgent:
         error = _validate_request(ssid, passphrase, channel)
         if error:
             return {"success": False, "message": error}
+        try:
+            encode_psk(passphrase)
+        except WpaError as exc:
+            return self._fail(str(exc))
+        # An admin start supersedes a restore still waiting after a restart.
+        self._cancel_restore()
+        return self._locked_start(ssid, _derive_psk(ssid, passphrase), channel, restored=False)
+
+    def _locked_start(self, ssid: str, psk: str, channel: int, restored: bool,
+                      cancel: threading.Event | None = None) -> dict:
         # Refuse at once while a transition runs, instead of queueing behind
         # it on the radio; the check is repeated once the radio is held.
         with self._lock:
-            refused = self._start_refusal()
+            refused = self._start_refusal(cancel)
         if refused:
             return {"success": False, "message": refused}
         with self.radio:
             with self._lock:
-                refused = self._start_refusal()
+                refused = self._start_refusal(cancel)
                 if refused:
                     return {"success": False, "message": refused}
                 self._transition = True
             try:
-                return self._start(ssid, passphrase, channel)
+                return self._start(ssid, psk, channel, restored)
             finally:
                 with self._lock:
                     self._transition = False
 
-    def _start_refusal(self) -> str | None:
-        """Why a start cannot claim the transition now; called under ``_lock``."""
+    def _start_refusal(self, cancel: threading.Event | None = None) -> str | None:
+        """Why a start cannot claim the transition now; called under ``_lock``.
+
+        A restore passes its ``cancel`` event: an admin start or stop sets it
+        under this same lock, so a restore that lost the race to one of them
+        never claims the radio after it, even if it passed its own loop check
+        just before."""
+        if cancel is not None and cancel.is_set():
+            return "An admin start or stop superseded the restore"
         if self._transition:
             return "An access point transition is in progress"
         if self._active:
             return "The access point is already active"
         return None
 
-    def _start(self, ssid: str, passphrase: str, channel: int) -> dict:
+    def _start(self, ssid: str, psk: str, channel: int, restored: bool) -> dict:
+        requested = channel
         links = self._discover()
         wifi = links.get("wifi")
         if not wifi:
             return self._fail("No wireless interface")
-        if not self._wired_ready(links):
+        # An admin start needs the wired port, the hub's only way in once the
+        # radio leaves the Wi-Fi network. A restore does not wait for it: the
+        # access point comes back whatever the cable's state.
+        if not restored and not self._wired_ready(links):
             return self._fail("The wired port needs a link and an address first: the access point "
                               "takes the radio off the Wi-Fi network")
         overlap = self._overlap(links)
         if overlap:
             return self._fail(overlap)
         try:
-            ssid_arg, psk_arg = encode_ssid(ssid), encode_psk(passphrase)
+            ssid_arg, psk_arg = encode_ssid(ssid), encode_psk(psk)
         except WpaError as exc:
             return self._fail(str(exc))
         if not os.path.isdir(self._run_dir):
@@ -288,17 +356,23 @@ class ApAgent:
             self._rollback(wpa, ifindex, iface, net_id)
             return self._fail(f"{exc}; the radio is back in station mode")
 
+        message = "Access point restored after a restart" if restored else "Access point started"
+        # A fresh start records the intent; a restore found it already there.
+        # An intent that cannot be written must not leave an older one behind
+        # for the next restart to bring back instead.
+        if not restored and not self._save_state(ssid, psk, requested):
+            if self._clear_state():
+                message = ("Access point started, but it will not come back after a restart: "
+                           "its state could not be saved")
+            else:
+                message = ("Access point started, but its state could not be saved or cleared: "
+                           "a restart may bring back an earlier access point")
         with self._lock:
             self._active, self._ssid, self._frequency, self._net_id = True, ssid, CHANNELS[channel], net_id
-            self._joined = False
-            self._deadline = self._now() + JOIN_DEADLINE_S
-            self._message = "Access point started"
-            self._arm_deadline()
-            self._watch_stop = threading.Event()
-            threading.Thread(target=self._watch_stations, args=(iface, self._watch_stop),
-                             name="ap-stations", daemon=True).start()
-        logger.info("access point %s up on %d MHz (country %s)", ssid, CHANNELS[channel], country)
-        return {"success": True, "message": "Access point started"}
+            self._message = message
+        logger.info("access point %s %s on %d MHz (country %s)", ssid, "restored" if restored else "up",
+                    CHANNELS[channel], country)
+        return {"success": True, "message": message}
 
     def _fail(self, message: str) -> dict:
         with self._lock:
@@ -420,23 +494,22 @@ class ApAgent:
     # ── stop / rollback ─────────────────────────────────────────────────────
 
     def stop(self) -> dict:
-        """Return the radio to station mode. Idempotent."""
+        """Return the radio to station mode and forget the intent, so a
+        restart leaves it a station too. Idempotent."""
+        self._cancel_restore()
         refused = self._claim_stop()
         if refused:
             return {"success": False, "message": refused}
-        return self._stop_claimed("Access point stopped")
+        if self._clear_state():
+            return self._stop_claimed("Access point stopped")
+        return self._stop_claimed("Access point stopped, but it may come back after a restart: "
+                                  "its saved state could not be removed")
 
-    def _claim_stop(self, only_if_unjoined: bool = False) -> str | None:
-        """Take the transition for a stop, or say why not.
-
-        The join check and the claim happen under one lock: a station that
-        associated before the deadline fired keeps the access point, one that
-        associates after the claim goes down with it."""
+    def _claim_stop(self) -> str | None:
+        """Take the transition for a stop, or say why not."""
         with self._lock:
             if self._transition:
                 return "An access point transition is in progress"
-            if only_if_unjoined and (not self._active or self._joined):
-                return "a remote camera has joined"
             self._transition = True
             return None
 
@@ -452,19 +525,97 @@ class ApAgent:
                 self._transition = False
 
     def reconcile(self) -> None:
-        """Agent start-up: whatever the radio was doing, be a station now."""
+        """Agent start-up: whatever the radio was doing, be a station now;
+        then, if the access point was on before the restart, bring it back
+        in the background."""
         try:
             with self.radio:
                 self._teardown()
         except Exception as exc:  # noqa: BLE001
             logger.error("access point reconcile failed: %s", exc)
+        state = self._load_state()
+        if state is None:
+            return
+        cancel = threading.Event()
+        with self._lock:
+            self._restore_cancel = cancel
+            self._message = _RESTORING
+        logger.info("the access point was on before the restart; restoring it")
+        self._spawn(lambda: self._restore(state, cancel))
+
+    def _restore(self, state: dict, cancel: threading.Event) -> None:
+        """Start the persisted access point, retrying until it is up.
+
+        It never gives up on its own: only an admin start or stop (``cancel``)
+        ends it. At boot the wpa socket and a usable channel arrive late, so
+        the first ``_RESTORE_WINDOW_S`` retry quickly and later attempts slow
+        down. The wired port is not waited for — see ``_start``."""
+        slow_after = self._now() + _RESTORE_WINDOW_S
+        logged = ""
+        while not cancel.is_set():
+            try:
+                result = self._locked_start(state["ssid"], state["psk"], state["channel"], restored=True,
+                                            cancel=cancel)
+                if result["success"]:
+                    return
+                why = result["message"]
+            except Exception as exc:  # noqa: BLE001 - a restore attempt must not kill the thread
+                why = str(exc)
+            if why != logged:
+                logger.warning("access point restore attempt failed, retrying: %s", why)
+                logged = why
+            with self._lock:
+                if not cancel.is_set():
+                    self._message = f"{_RESTORING}; the last attempt failed: {why}"
+            wait = _RESTORE_RETRY_S if self._now() < slow_after else _RESTORE_SLOW_RETRY_S
+            if cancel.wait(wait):
+                return
+
+    def _cancel_restore(self) -> None:
+        with self._lock:
+            if self._restore_cancel is not None:
+                self._restore_cancel.set()
+                self._restore_cancel = None
+
+    # ── persisted intent ────────────────────────────────────────────────────
+
+    def _save_state(self, ssid: str, psk: str, channel: int) -> bool:
+        try:
+            atomic_write_json(self._state_path, {"ssid": ssid, "psk": psk, "channel": channel})
+            return True
+        except OSError as exc:
+            logger.error("could not save the access point state to %s: %s", self._state_path, exc.strerror)
+            return False
+
+    def _clear_state(self) -> bool:
+        """Remove the intent; ``True`` when none is left on disk.
+
+        The removal is made durable like the write: a power cut before the
+        directory entry reaches the disk would bring a stopped access point
+        back at the next start."""
+        try:
+            os.unlink(self._state_path)
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            logger.error("could not remove the access point state %s: %s", self._state_path, exc.strerror)
+            return False
+        fsync_dir(os.path.dirname(os.path.abspath(self._state_path)))
+        return True
+
+    def _load_state(self) -> dict | None:
+        raw = read_json(self._state_path, _MISSING)
+        if raw is _MISSING:
+            return None
+        state = _valid_state(raw)
+        if state is None:
+            logger.error("ignoring a malformed access point state in %s", self._state_path)
+            self._clear_state()
+        return state
 
     def _teardown(self) -> None:
         with self._lock:
-            self._cancel_deadline()
-            self._watch_stop.set()
-            self._active, self._ssid, self._frequency, self._joined = False, "", 0, False
-            self._deadline, self._net_id = None, None
+            self._active, self._ssid, self._frequency, self._net_id = False, "", 0, None
         links = self._discover()
         wifi = links.get("wifi")
         if not wifi:
@@ -511,40 +662,3 @@ class ApAgent:
         except OSError:
             return []
         return [os.path.join(self._run_dir, n) for n in names if n.startswith(AP_FILE_PREFIX)]
-
-    # ── join deadline ───────────────────────────────────────────────────────
-
-    def _arm_deadline(self) -> None:
-        self._cancel_deadline()
-        self._timer = threading.Timer(JOIN_DEADLINE_S, self._deadline_fired)
-        self._timer.daemon = True
-        self._timer.start()
-
-    def _cancel_deadline(self) -> None:
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
-
-    def _deadline_fired(self) -> None:
-        if self._claim_stop(only_if_unjoined=True) is not None:
-            return
-        logger.info("no remote camera joined the access point in %d s; stopping it", int(JOIN_DEADLINE_S))
-        self._stop_claimed("No remote camera joined within five minutes; the access point stopped")
-
-    def note_station(self) -> None:
-        """A station has joined: the join deadline no longer applies."""
-        with self._lock:
-            if self._active and not self._joined:
-                self._joined = True
-                self._deadline = None
-                self._cancel_deadline()
-
-    def _watch_stations(self, iface: str, stop: threading.Event) -> None:
-        wpa = self._wpa(iface)
-        while not stop.wait(_STATION_POLL_S):
-            try:
-                if wpa.all_sta():
-                    self.note_station()
-                    return
-            except WpaError:
-                pass

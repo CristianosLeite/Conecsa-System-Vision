@@ -26,7 +26,7 @@ echo "Building CSS..."
 # Pinned + checksum-verified (scripts/tailwind.pin); re-downloads on mismatch.
 TAILWIND_BIN="$PROJECT_ROOT/bin/tailwindcss"
 "$PROJECT_ROOT/scripts/fetch-tailwind.sh"
-"$TAILWIND_BIN" -i ./styles/input.css -o ./system-vision/styles.css --minify
+"$TAILWIND_BIN" -i ./shared/styles/input.css -o ./system-vision/styles.css --minify
 
 # Compile protobuf files
 echo "Compiling protobuf files..."

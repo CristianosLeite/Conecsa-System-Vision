@@ -18,7 +18,9 @@ use crate::api::{model_stem, training_image_url};
 use crate::class_color::{class_color_for, class_display_name};
 use crate::i18n::*;
 
-use super::dataset_editor::{AiState, Assistant, ClassesState, ImagesState, LabelActions};
+use super::dataset_editor::{
+    AiState, Assistant, ClassesState, ImageStep, ImagesState, LabelActions,
+};
 
 /// The open image and its class buttons, plus the model assistant.
 #[component]
@@ -52,7 +54,8 @@ pub(super) fn ImageClassPicker(
         on_pick.run(if current == Some(index) { None } else { Some(index) });
     };
 
-    // Number keys: 1–9 pick the first nine classes, 0 clears. Ignored while a
+    // Number keys: 1–9 pick the first nine classes, 0 clears; the arrow keys
+    // (and Home / End, PageUp / PageDown) open another image. Ignored while a
     // form field has focus (class names are typed on this page).
     let key_handle = window_event_listener(leptos::ev::keydown, move |ev: web_sys::KeyboardEvent| {
         if ev.ctrl_key() || ev.meta_key() || ev.alt_key() {
@@ -65,6 +68,19 @@ pub(super) fn ImageClassPicker(
         if matches!(focused_tag.as_deref(), Some("INPUT" | "TEXTAREA" | "SELECT")) {
             return;
         }
+        let key = ev.key();
+        let step = match key.as_str() {
+            "ArrowLeft" | "PageUp" => Some(ImageStep::Previous),
+            "ArrowRight" | "PageDown" => Some(ImageStep::Next),
+            "Home" => Some(ImageStep::First),
+            "End" => Some(ImageStep::Last),
+            _ => None,
+        };
+        if let Some(step) = step {
+            ev.prevent_default();
+            actions.on_step_image.run(step);
+            return;
+        }
         // try_* throughout: a global listener can briefly outlive the signals.
         let Some(Some(_)) = selected.try_get_untracked() else {
             return;
@@ -72,7 +88,6 @@ pub(super) fn ImageClassPicker(
         let Some(len) = class_list.try_with_untracked(|c| c.len()) else {
             return;
         };
-        let key = ev.key();
         if key == "0" {
             ev.prevent_default();
             on_pick.run(None);

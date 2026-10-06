@@ -20,5 +20,22 @@ class PreconditionFailed(RuntimeError):
     """The request is valid but the device state forbids it right now."""
 
 
+#: GPU holders that ``ModelService.free_gpu`` refuses to evict.
+GPU_HOLDER_DETECTION = "detection"
+GPU_HOLDER_CONVERSION = "conversion"
+
+
+class GpuBusy(PreconditionFailed):
+    """The GPU cannot be freed: detection runs or a model conversion does.
+
+    ``holder`` is ``GPU_HOLDER_DETECTION`` or ``GPU_HOLDER_CONVERSION``; the
+    gRPC layer reports it so the gateway can name the blocker.
+    """
+
+    def __init__(self, holder: str, message: str) -> None:
+        super().__init__(message)
+        self.holder = holder
+
+
 class InvalidTask(ValueError):
     """An application task id that is not one of the known tasks."""

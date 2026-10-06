@@ -7,7 +7,7 @@
 The single Jetson GPU belongs to a training job or a TensorRT engine build
 while one runs; the gateway refuses to start detection (409) in both states
 so that the hub, Node-RED and a second browser tab cannot bypass the device
-UI's disabled Start button. The probes live in gateway.training.helpers.
+UI's disabled Start button. The probes live in gateway.gpu (``Purpose.DETECTION``).
 """
 from types import SimpleNamespace
 
@@ -15,8 +15,8 @@ import grpc
 import inference_pb2 as inf_pb
 import pytest
 from flask import Flask
+from gateway import gpu
 from gateway.controllers import detection
-from gateway.training import helpers as training_helpers
 
 
 class FakeRpcError(grpc.RpcError):
@@ -67,7 +67,7 @@ def _wire(monkeypatch, job_status="idle", conversions=(), training_raises=False,
         model=SimpleNamespace(ListConversions=list_conversions,
                               GetLabelModelStatus=loaded_false))
     monkeypatch.setattr(detection, "clients", fake_clients)
-    monkeypatch.setattr(training_helpers, "clients", fake_clients)
+    monkeypatch.setattr(gpu, "clients", fake_clients)
     monkeypatch.setattr(detection, "_publish_if_success", lambda resp, *a, **kw: resp)
     return calls
 
@@ -85,7 +85,7 @@ def test_no_application_type_refuses_start_before_the_gpu_probes(app, monkeypatc
     assert calls == ["get_status"]
 
 
-@pytest.mark.parametrize("job_status", training_helpers.ACTIVE_JOB_STATUSES)
+@pytest.mark.parametrize("job_status", gpu.ACTIVE_JOB_STATUSES)
 def test_active_training_job_refuses_start(app, monkeypatch, job_status):
     calls = _wire(monkeypatch, job_status=job_status)
     resp = _post_start(app)
@@ -94,7 +94,7 @@ def test_active_training_job_refuses_start(app, monkeypatch, job_status):
     assert "start" not in calls
 
 
-@pytest.mark.parametrize("status", training_helpers.ACTIVE_CONVERSION_STATUSES)
+@pytest.mark.parametrize("status", gpu.ACTIVE_CONVERSION_STATUSES)
 def test_active_conversion_refuses_start(app, monkeypatch, status):
     calls = _wire(monkeypatch, conversions=("done", status))
     resp = _post_start(app)

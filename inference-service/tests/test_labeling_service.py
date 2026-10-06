@@ -177,6 +177,50 @@ class TestLoad:
         assert closed == [5599]
 
 
+    def test_a_worker_that_will_not_exit_keeps_the_engine_loaded(self, wired, monkeypatch):
+        svc, _, _ = wired
+        import api.runtime_management.worker_client as wc
+
+        def stuck():
+            raise RuntimeError("TensorRT worker on port 5599 did not exit")
+
+        monkeypatch.setattr(wc, "get_worker_client",
+                            lambda port=None: SimpleNamespace(close=stuck))
+        svc.load("Teste.engine")
+        with pytest.raises(RuntimeError, match="did not exit"):
+            svc.unload()
+        # The status does not claim memory that is still held.
+        assert svc.status()["loaded"] is True
+
+
+    def test_a_failed_load_whose_worker_survives_stays_reported(self, wired, monkeypatch):
+        svc, _, _ = wired
+        import api.runtime_management.worker_client as wc
+        import api.services.labeling_service as ls
+        closes = []
+
+        def close():
+            closes.append(1)
+            if len(closes) == 1:
+                raise RuntimeError("TensorRT worker on port 5599 did not exit")
+
+        monkeypatch.setattr(wc, "get_worker_client",
+                            lambda port=None: SimpleNamespace(close=close))
+
+        def broken(*a, **k):
+            raise RuntimeError("engine rejected")
+
+        monkeypatch.setattr(ls, "ModelManager", broken)
+        with pytest.raises(RuntimeError, match="engine rejected"):
+            svc.load("Teste.engine")
+        # No engine, but the worker still holds GPU memory: reported as loaded.
+        status = svc.status()
+        assert status["loaded"] is True and status["model_name"] == ""
+        assert "did not exit" in status["message"]
+        svc.unload()
+        assert closes == [1, 1] and svc.status()["loaded"] is False
+
+
 class TestDetect:
     def test_requires_a_loaded_engine(self, wired):
         svc, _, _ = wired

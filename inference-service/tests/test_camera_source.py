@@ -50,6 +50,7 @@ class FakeConsumer:
         self.attached = attached
         self.written = []
         self._health = SimpleNamespace(status=status, detail=detail)
+        self.ip_health = {}
 
     def write_config(self, cfg):
         if not self.attached:
@@ -59,6 +60,9 @@ class FakeConsumer:
 
     def read_health(self):
         return self._health
+
+    def read_ip_health(self, index):
+        return self.ip_health.get(index)
 
     @property
     def last(self):
@@ -114,8 +118,8 @@ class TestValidation:
         with pytest.raises(ConfigValidationError, match="network_port"):
             validate_camera_patch({"network_port": port})
 
-    @pytest.mark.parametrize("source", ["v4l2", "NETWORK", "", None, 1])
-    def test_source_is_local_or_network_only(self, source):
+    @pytest.mark.parametrize("source", ["v4l2", "NETWORK", "rtsp", "IP", "", None, 1])
+    def test_source_is_local_network_or_ip_only(self, source):
         with pytest.raises(ConfigValidationError, match="source"):
             validate_camera_patch({"source": source})
 
@@ -132,13 +136,14 @@ class TestValidation:
 
     def test_a_local_state_may_keep_dormant_or_no_credentials(self):
         assert validate_source_state({"source": "local"}) == {
-            "source": "local", "network_host": "", "network_port": 0, "network_token": ""}
+            "source": "local", "network_host": "", "network_port": 0, "network_token": "",
+            "ip_cameras": []}
         dormant = validate_source_state({**NETWORK, "source": "local"})
         assert dormant["network_token"] == TOKEN
 
     def test_source_keys_are_not_model_camera_keys(self):
         assert not set(LOCAL_CAMERA_KEYS) & {"source", "network_host", "network_port",
-                                             "network_token"}
+                                             "network_token", "ip_cameras"}
 
 
 # ── store ────────────────────────────────────────────────────────────────────
@@ -150,7 +155,7 @@ class TestStore:
         state = validate_source_state(NETWORK)
         store.save(state)
         assert store.load() == state
-        assert _stored(tmp_path)["version"] == 1
+        assert _stored(tmp_path)["version"] == 2
         mode = stat.S_IMODE(os.stat(tmp_path / CameraSourceStore.FILENAME).st_mode)
         assert mode == 0o600, "the file holds the token"
 
@@ -162,8 +167,9 @@ class TestStore:
         assert (tmp_path / (CameraSourceStore.FILENAME + ".corrupt")).exists()
 
     @pytest.mark.parametrize("payload", [
-        {"version": 2, **NETWORK},
+        {"version": 3, **NETWORK},
         {"version": 1, "source": "network", "network_host": HOST},
+        {"version": 2, "source": "ip", "ip_cameras": []},
         {"version": 1, "source": "rtsp"},
         ["not", "an", "object"],
     ])
@@ -192,8 +198,9 @@ class TestSourceUpdate:
         video, consumer = _video(tmp_path)
         assert video.apply_camera_update(dict(NETWORK)) == (True, "Camera configuration applied", 200)
 
-        assert _stored(tmp_path) == {"version": 1, "source": "network", "network_host": HOST,
-                                     "network_port": 8080, "network_token": TOKEN}
+        assert _stored(tmp_path) == {"version": 2, "source": "network", "network_host": HOST,
+                                     "network_port": 8080, "network_token": TOKEN,
+                                     "ip_cameras": []}
         sent = consumer.last
         assert sent.HasField("source") and sent.source == shm_pb2.CAMERA_SOURCE_NETWORK
         assert (sent.network_host, sent.network_port, sent.network_token) == (HOST, 8080, TOKEN)
@@ -506,3 +513,162 @@ class TestServicer:
         body = servicer.GetCamera(None, None).json
         assert TOKEN not in body and RAW_TOKEN not in body
         assert json.loads(body)["network_token_set"] is True
+
+
+# ── IP cameras ───────────────────────────────────────────────────────────────
+
+# Visibly fake credentials and RFC 5737 addresses.
+IP_PASSWORD = "not-a-real-pass"
+IP_URL = "rtsp://192.0.2.10:554/cam/realmonitor?channel=1&subtype=0"
+IP_SOURCE = {"source": "ip", "ip_cameras": [
+    {"name": "Dock 1", "url": IP_URL, "username": "operator", "password": IP_PASSWORD},
+    {"url": "rtsp://198.51.100.7/stream1"},
+]}
+
+
+class TestIpCameraValidation:
+    @pytest.mark.parametrize("url", [
+        IP_URL, "rtsp://camera.local/live", "rtsp://[2001:db8::1]:8554/a", "rtsp://10.0.0.3",
+    ])
+    def test_rtsp_addresses_are_accepted(self, url):
+        patch = validate_camera_patch({"ip_cameras": [{"url": url}]})
+        assert patch.source["ip_cameras"][0]["url"] == url
+
+    @pytest.mark.parametrize("url,message", [
+        ("http://192.0.2.10/stream", "rtsp://"),
+        ("rtsp://user:pw@192.0.2.10/stream", "credentials"),
+        ("rtsp://user@192.0.2.10/stream", "credentials"),
+        ("rtsp://127.0.0.1/stream", "reachable"),
+        ("rtsp://localhost/stream", "reachable"),
+        ("rtsp://0.0.0.0/stream", "reachable"),
+        ("rtsp://224.0.0.1/stream", "reachable"),
+        ("rtsp:///stream", "host"),
+        ("rtsp://192.0.2.10:99999/x", "url"),
+        ("rtsp://192.0.2.10/a b", "spaces"),
+        ("rtsp://192.0.2.10/" + "a" * 260, "256"),
+        ("", "required"),
+        (None, "string"),
+    ])
+    def test_unusable_addresses_are_rejected(self, url, message):
+        with pytest.raises(ConfigValidationError, match=message):
+            validate_camera_patch({"ip_cameras": [{"url": url}]})
+
+    def test_a_rejected_url_never_echoes_a_password(self):
+        with pytest.raises(ConfigValidationError) as err:
+            validate_camera_patch({"ip_cameras": [
+                {"url": f"rtsp://operator:{IP_PASSWORD}@192.0.2.10/stream"}]})
+        assert IP_PASSWORD not in str(err.value)
+
+    def test_at_most_four_cameras(self):
+        cameras = [{"url": f"rtsp://192.0.2.{i}/s"} for i in range(1, 6)]
+        with pytest.raises(ConfigValidationError, match="at most 4"):
+            validate_camera_patch({"ip_cameras": cameras})
+
+    def test_an_ip_source_needs_a_camera(self):
+        with pytest.raises(ConfigValidationError, match="at least one camera"):
+            validate_source_state({"source": "ip", "ip_cameras": []})
+
+    @pytest.mark.parametrize("entry,message", [
+        ({"url": IP_URL, "id": "camera-1"}, "camera id"),
+        ({"url": IP_URL, "password": "x" * 65}, "password"),
+        ({"url": IP_URL, "username": "u\nv"}, "control"),
+        ({"url": IP_URL, "name": "n" * 41}, "name"),
+        ("rtsp://192.0.2.10/stream", "object"),
+    ])
+    def test_bad_entries_are_rejected(self, entry, message):
+        with pytest.raises(ConfigValidationError, match=message):
+            validate_camera_patch({"ip_cameras": [entry]})
+
+    def test_an_unnamed_camera_is_named_by_its_position(self):
+        patch = validate_camera_patch(IP_SOURCE)
+        assert [c["name"] for c in patch.source["ip_cameras"]] == ["Dock 1", "Camera 2"]
+
+
+class TestIpCameraSource:
+    def test_switching_to_ip_persists_publishes_and_reports(self, tmp_path):
+        video, consumer = _video(tmp_path)
+        consumer.ip_health[0] = SimpleNamespace(status="capturing", detail=0)
+        consumer.ip_health[1] = SimpleNamespace(status="no_camera", detail=2)
+        assert video.apply_camera_update(IP_SOURCE)[2] == 200
+
+        stored = _stored(tmp_path)
+        assert stored["source"] == "ip" and stored["version"] == 2
+        ids = [c["id"] for c in stored["ip_cameras"]]
+        assert len(set(ids)) == 2 and all(i.startswith("cam-") for i in ids)
+        assert stored["ip_cameras"][0]["password"] == IP_PASSWORD
+        assert stored["ip_cameras"][1]["password"] == ""
+
+        sent = consumer.last
+        assert sent.source == shm_pb2.CAMERA_SOURCE_IP
+        assert [(c.url, c.username, c.password) for c in sent.ip_cameras] == [
+            (IP_URL, "operator", IP_PASSWORD), ("rtsp://198.51.100.7/stream1", "", "")]
+
+        listed = video.list_camera_devices()
+        assert listed["current_source"] == "ip" and listed["ip_cameras_max"] == 4
+        assert [(c["id"], c["status"], c["detail"], c["password_set"])
+                for c in listed["ip_cameras"]] == [
+            (ids[0], "capturing", "unspecified", True),
+            (ids[1], "no_camera", "unauthorized", False)]
+        assert IP_PASSWORD not in json.dumps(listed)
+        assert video.ip_camera_identities() == [
+            {"id": ids[0], "name": "Dock 1"}, {"id": ids[1], "name": "Camera 2"}]
+
+    def test_an_omitted_password_keeps_the_stored_one_and_empty_clears_it(self, tmp_path):
+        video, consumer = _video(tmp_path)
+        video.apply_camera_update(IP_SOURCE)
+        first, second = _stored(tmp_path)["ip_cameras"]
+        # Reordered, renamed, first password kept, second password set then cleared.
+        update = {"ip_cameras": [
+            {"id": second["id"], "url": second["url"], "password": "other-fake"},
+            {"id": first["id"], "name": "Gate", "url": first["url"], "username": "operator"},
+        ]}
+        assert video.apply_camera_update(update)[2] == 200
+        cameras = _stored(tmp_path)["ip_cameras"]
+        assert [(c["id"], c["password"]) for c in cameras] == [
+            (second["id"], "other-fake"), (first["id"], IP_PASSWORD)]
+        assert cameras[1]["name"] == "Gate"
+        assert [c.url for c in consumer.last.ip_cameras] == [second["url"], first["url"]]
+
+        clear = {"ip_cameras": [{"id": first["id"], "url": first["url"], "password": ""}]}
+        assert video.apply_camera_update(clear)[2] == 200
+        assert _stored(tmp_path)["ip_cameras"] == [
+            {"id": first["id"], "name": "Camera 1", "url": first["url"], "username": "",
+             "password": ""}]
+
+    def test_an_unknown_camera_id_changes_nothing(self, tmp_path):
+        video, consumer = _video(tmp_path)
+        video.apply_camera_update(IP_SOURCE)
+        before = _stored(tmp_path)
+        ok, message, status = video.apply_camera_update(
+            {"ip_cameras": [{"id": "cam-00000000", "url": IP_URL}]})
+        assert (ok, status) == (False, 400) and "known camera" in message
+        assert _stored(tmp_path) == before
+
+    def test_leaving_ip_keeps_the_cameras_dormant_and_off_the_wire(self, tmp_path):
+        video, consumer = _video(tmp_path)
+        video.apply_camera_update(IP_SOURCE)
+        assert video.apply_camera_update({"source": "local"})[2] == 200
+        assert len(_stored(tmp_path)["ip_cameras"]) == 2
+        assert consumer.last.source == shm_pb2.CAMERA_SOURCE_LOCAL
+        assert len(consumer.last.ip_cameras) == 0
+        assert video.ip_camera_identities() == []
+        assert all(c["status"] == "no_camera" for c in video.list_camera_devices()["ip_cameras"])
+        # Back to ip with no list in the body: the dormant cameras return.
+        assert video.apply_camera_update({"source": "ip"})[2] == 200
+        assert len(consumer.last.ip_cameras) == 2
+
+    def test_a_version_1_file_loads_without_cameras(self, tmp_path):
+        (tmp_path / CameraSourceStore.FILENAME).write_text(json.dumps(
+            {"version": 1, "source": "network", "network_host": HOST, "network_port": 8080,
+             "network_token": TOKEN}))
+        loaded = CameraSourceStore(str(tmp_path)).load()
+        assert loaded is not None and loaded["ip_cameras"] == []
+
+    def test_the_password_never_reaches_a_log(self, tmp_path, caplog):
+        video, _ = _video(tmp_path)
+        with caplog.at_level(logging.DEBUG):
+            video.apply_camera_update(IP_SOURCE)
+            video.list_camera_devices()
+            video.apply_camera_update({"ip_cameras": [
+                {"url": f"rtsp://operator:{IP_PASSWORD}@192.0.2.10/stream"}]})
+        assert IP_PASSWORD not in caplog.text

@@ -1,0 +1,5 @@
+# Standalone in the open-source mirror: a library consumed by path never
+# ships its own lockfile (in the monorepo it is a workspace member and cargo
+# writes no lockfile here).
+/target/
+/Cargo.lock

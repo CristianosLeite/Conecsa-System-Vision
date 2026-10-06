@@ -5,6 +5,7 @@
 use leptos::prelude::*;
 
 use crate::class_color::{class_color_for, class_display_name, is_reserved_person_name};
+use crate::components::common::confirm_modal::DangerConfirmModal;
 use crate::i18n::*;
 
 /// Class CRUD + active-class selection. The active class is the one new boxes
@@ -52,10 +53,9 @@ pub(super) fn ClassesPanel(
     let rename = move |index: usize, current: String| {
         let window = web_sys::window();
         let Some(window) = window else { return };
-        if let Ok(Some(name)) = window.prompt_with_message_and_default(
-            t_string!(i18n, training::new_class_prompt),
-            &current,
-        ) {
+        if let Ok(Some(name)) = window
+            .prompt_with_message_and_default(t_string!(i18n, training::new_class_prompt), &current)
+        {
             let name = name.trim().to_string();
             if !name.is_empty() && name != current && !reserved(&name) {
                 on_rename.run((index, name));
@@ -63,21 +63,46 @@ pub(super) fn ClassesPanel(
         }
     };
 
+    // Removal asks first, in the app's own dialog: `(index, raw name)` of the
+    // row whose trash was pressed; `None` hides the dialog.
+    let (remove_target, set_remove_target) = signal(None::<(usize, String)>);
     let remove = move |index: usize, name: String| {
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let msg = if face {
-            t_string!(i18n, training::remove_person_confirm, name = name)
-        } else if classify {
-            t_string!(i18n, training::remove_class_confirm_classify, name = name)
-        } else {
-            t_string!(i18n, training::remove_class_confirm, name = name)
-        };
-        if window.confirm_with_message(&msg).unwrap_or(false) {
-            on_remove.run(index);
-        }
+        set_remove_target.set(Some((index, name)));
     };
+    let remove_title = Signal::derive(move || {
+        if face {
+            t_string!(i18n, training::remove_person)
+        } else {
+            t_string!(i18n, training::remove_class)
+        }
+    });
+    let remove_body = Signal::derive(move || {
+        remove_target
+            .get()
+            .map(|(_, name)| {
+                let name = class_display_name(&name);
+                if face {
+                    t_string!(i18n, training::remove_person_confirm, name = name)
+                } else if classify {
+                    t_string!(i18n, training::remove_class_confirm_classify, name = name)
+                } else {
+                    t_string!(i18n, training::remove_class_confirm, name = name)
+                }
+            })
+            .unwrap_or_default()
+    });
+    let remove_confirm = Callback::new(move |_: ()| {
+        if let Some((index, name)) = remove_target.get_untracked() {
+            // The list may have changed while the dialog was open: only
+            // remove the row that was asked about.
+            let same = classes.with_untracked(|c| c.get(index) == Some(&name));
+            if same {
+                on_remove.run(index);
+            }
+        }
+        set_remove_target.set(None);
+    });
+    let remove_cancel = Callback::new(move |_: ()| set_remove_target.set(None));
 
     view! {
         <div class="ui-card ui-card-pad-sm flex flex-col gap-3">
@@ -110,7 +135,7 @@ pub(super) fn ClassesPanel(
                         }
                     }
                 />
-                <button
+                <button type="button"
                     class="ui-button ui-button-primary ui-button-xs"
                     on:click=add
                 >
@@ -162,21 +187,27 @@ pub(super) fn ClassesPanel(
                                             ))
                                         />
                                         <span class="ui-value ui-class-name">{display_name}</span>
-                                        <button
-                                            class="ui-icon-button p-1 opacity-0 group-hover:opacity-100"
+                                        <button type="button"
+                                            class="ui-icon-button ui-icon-button-md ui-icon-button-compact"
                                             title=move || t_string!(i18n, training::rename_class)
+                                            aria-label=move || t_string!(i18n, training::rename_class)
                                             on:click=move |ev| {
                                                 ev.stop_propagation();
                                                 rename(i, name_rename.clone());
                                             }
                                         >
-                                            <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none">
+                                            <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                                             </svg>
                                         </button>
-                                        <button
-                                            class="ui-icon-button ui-icon-button-danger p-1 opacity-0 group-hover:opacity-100"
+                                        <button type="button"
+                                            class="ui-icon-button ui-icon-button-md ui-icon-button-compact ui-icon-button-danger"
                                             title=move || if face {
+                                                t_string!(i18n, training::remove_person)
+                                            } else {
+                                                t_string!(i18n, training::remove_class)
+                                            }
+                                            aria-label=move || if face {
                                                 t_string!(i18n, training::remove_person)
                                             } else {
                                                 t_string!(i18n, training::remove_class)
@@ -186,7 +217,7 @@ pub(super) fn ClassesPanel(
                                                 remove(i, name_remove.clone());
                                             }
                                         >
-                                            <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none">
+                                            <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                                             </svg>
                                         </button>
@@ -197,6 +228,16 @@ pub(super) fn ClassesPanel(
                     </ul>
                 }.into_any()
             }}
+
+            <DangerConfirmModal
+                open=Signal::derive(move || remove_target.get().is_some())
+                labelled_by="remove-class-title"
+                title=remove_title
+                body=remove_body
+                confirm_label=Signal::derive(move || t_string!(i18n, common::remove))
+                on_confirm=remove_confirm
+                on_cancel=remove_cancel
+            />
         </div>
     }
 }

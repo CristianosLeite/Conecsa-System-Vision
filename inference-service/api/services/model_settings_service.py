@@ -21,13 +21,18 @@ and applies it on selection and at startup. Keys, all preserved by ``save()``:
   disagrees with the live ``TILING_MODE``/``TILING_TILE`` and never applies it;
 - ``"task"`` ("detect", "classify", "segment", "face"), declared at upload, verified at
   activation and never rewritten; a file without it (older firmware) means
-  ``"detect"``.
+  ``"detect"``;
+- ``"metrics"`` (``"map50_95_box"``, ``"map50_95_mask"``, ``"accuracy_top1"``,
+  fractions in 0..1), the validation scores of the checkpoint a ``.pt``
+  conversion built the engine from; absent for prebuilt engines and models
+  converted by older firmware. Shown in the model list, never applied.
 """
 import json
 import logging
+import math
 import os
 from threading import Lock
-from typing import Optional, Sequence, Union
+from typing import Dict, Mapping, Optional, Sequence, Union
 
 from conecsa_common.atomic import atomic_write_json
 from conecsa_common.tasks import task_or_default
@@ -48,6 +53,28 @@ _FACE_SETTINGS = (
     ("FACE_MIN_SIZE_PX", "min_size_px", valid_face_min_size),
     ("FACE_MAX_FACES", "max_faces", valid_face_max_faces),
 )
+
+#: Keys of the settings file's ``"metrics"`` block (see the module docstring).
+METRIC_KEYS = ("map50_95_box", "map50_95_mask", "accuracy_top1")
+
+
+def parse_metrics(value) -> Dict[str, float]:
+    """The well-formed entries of a ``"metrics"`` block (finite fractions in 0..1)."""
+    if not isinstance(value, Mapping):
+        return {}
+    metrics: Dict[str, float] = {}
+    for key in METRIC_KEYS:
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        try:
+            number = float(raw)
+        except OverflowError:  # a JSON integer too large for a float
+            continue
+        if math.isfinite(number) and 0.0 <= number <= 1.0:
+            metrics[key] = number
+    return metrics
+
 
 GEOMETRY_FRAMES = "frames"
 GEOMETRY_TILES_AUTO = "tiles:auto"
@@ -182,6 +209,14 @@ class ModelSettingsService:
             return task_or_default(None)
         return task_or_default((cls._read_payload(path) or {}).get("task"))
 
+    @classmethod
+    def metrics_of(cls, settings_path: str) -> Dict[str, float]:
+        """Read a model's recorded validation scores (``{}`` when it has none)."""
+        path = os.path.abspath(settings_path)
+        if not os.path.exists(path):
+            return {}
+        return parse_metrics((cls._read_payload(path) or {}).get("metrics"))
+
     # ── Load / apply ──
 
     def load_and_apply(self) -> Optional[dict]:
@@ -302,6 +337,9 @@ class ModelSettingsService:
         task = (existing or {}).get("task")
         if isinstance(task, str) and task:
             payload["task"] = task
+        metrics = parse_metrics((existing or {}).get("metrics"))
+        if metrics:
+            payload["metrics"] = metrics
         face = (existing or {}).get("face")
         if isinstance(face, dict) and face:
             # Only values the operator set are kept, as their live values.
@@ -313,7 +351,8 @@ class ModelSettingsService:
     @classmethod
     def record_training(cls, settings_path: str, imgsz: Optional[int],
                         train_geometry: Optional[str] = None,
-                        task: Optional[str] = None) -> None:
+                        task: Optional[str] = None,
+                        metrics: Optional[Mapping[str, float]] = None) -> None:
         """Store what a freshly uploaded or converted model was built as.
 
         Called before the model is ever activated — by the conversion job when
@@ -322,7 +361,9 @@ class ModelSettingsService:
         and well-formed) and the model's ``"task"`` into an existing settings
         file or creates one holding just those keys (``switch_model``
         completes it with the threshold snapshot on first activation).
-        Best-effort, like ``save``.
+        ``metrics`` replaces the recorded scores — an empty mapping drops
+        them, since a replaced engine must not inherit its predecessor's —
+        and ``None`` leaves them alone. Best-effort, like ``save``.
         """
         path = os.path.abspath(settings_path)
         payload = (cls._read_payload(path) if os.path.exists(path) else None) or {}
@@ -333,6 +374,11 @@ class ModelSettingsService:
             payload["training"] = {"geometry": geometry}
         if task:
             payload["task"] = task
+        if metrics is not None:
+            payload.pop("metrics", None)
+            parsed = parse_metrics(metrics)
+            if parsed:
+                payload["metrics"] = parsed
         cls._write_payload(path, payload)
 
     @classmethod

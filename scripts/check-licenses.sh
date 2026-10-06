@@ -12,6 +12,8 @@
 #    its text under LICENSES/.
 # 2. The Apache-2.0 Python layers never import AGPL code: neither
 #    `ultralytics` nor the AGPL service packages (api, service, gateway, agent).
+# 3. The Apache-2.0 Rust crate ui-view never depends on the AGPL device UI or
+#    on the closed hub (it is their dependency, not the other way round).
 #
 # The REUSE check is skipped with a warning when `reuse` is not installed
 # (requirements-dev.txt pins it; CI installs it). Set REUSE to override the binary.
@@ -46,6 +48,12 @@ if bad="$(grep -rnE --include='*.py' \
         '^[[:space:]]*(import|from)[[:space:]]+(ultralytics|api|service|gateway|agent)([.[:space:]]|$)' \
         "${APACHE_PYTHON[@]}" 2>/dev/null || true)"; [ -n "$bad" ]; then
     echo "check-licenses: Apache-2.0 code imports AGPL code:" >&2
+    echo "$bad" >&2
+    status=1
+fi
+
+if bad="$(grep -nE 'path *= *"(\.\./)+(system-vision|hub-vision|manual)' shared/ui-view/Cargo.toml 2>/dev/null || true)"; [ -n "$bad" ]; then
+    echo "check-licenses: Apache-2.0 crate ui-view depends on AGPL or closed code:" >&2
     echo "$bad" >&2
     status=1
 fi

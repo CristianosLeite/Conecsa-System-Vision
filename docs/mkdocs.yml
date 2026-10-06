@@ -82,6 +82,7 @@ nav:
   - HTTP API reference: api-reference.md
   - Face recognition: face-recognition.md
   - Remote camera: remote-camera.md
+  - IP cameras: ip-cameras.md
   - Services:
       - services/inference-service.md
       - services/api-gateway.md

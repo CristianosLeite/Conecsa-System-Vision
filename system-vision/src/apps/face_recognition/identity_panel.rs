@@ -180,6 +180,8 @@ mod tests {
             color: Some("#00ff00".into()),
             bbox: Some([0.1, 0.1, 0.2, 0.2]),
             polygons: None,
+            camera: None,
+            camera_name: None,
         }
     }
 

@@ -12,7 +12,7 @@
 # ============================================================================
 
 # Stage 1: Build WASM frontend with Trunk
-FROM rust:1.98-slim AS frontend-builder
+FROM rust:1.99-slim AS frontend-builder
 
 WORKDIR /app
 
@@ -56,13 +56,16 @@ COPY Cargo.toml Cargo.lock /app/
 
 COPY system-vision/ ./system-vision/
 
+# Shared Apache-2.0 UI crate (path dependency ../shared/ui-view of system-vision)
+COPY shared/ui-view/ ./shared/ui-view/
+
 # Shared design system (Tailwind input) used by system-vision + hub-vision
-COPY styles/ ./styles/
+COPY shared/styles/ ./shared/styles/
 
 COPY proto/ ./proto/
 
-# Shared translation catalogs (read by build.rs via ../i18n/system-vision)
-COPY i18n/ ./i18n/
+# Shared translation catalogs (read by build.rs via ../shared/i18n/system-vision)
+COPY shared/i18n/ ./shared/i18n/
 
 # Tailwind CSS v4 standalone binary, pinned by version and per-architecture
 # SHA256 (scripts/tailwind.pin is the source of truth; `bump-tailwind-version`).
@@ -81,7 +84,7 @@ RUN set -eu; arch="$(uname -m)"; \
     chmod +x /usr/local/bin/tailwindcss; \
     tailwindcss --help | head -1
 
-RUN cd system-vision && tailwindcss -i ../styles/input.css -o ./styles.css --minify
+RUN cd system-vision && tailwindcss -i ../shared/styles/input.css -o ./styles.css --minify
 
 # Build WASM with Trunk — run from system-vision/ so cargo finds its Cargo.toml
 # directly, avoiding the virtual workspace root. dist goes back to /app/dist/.

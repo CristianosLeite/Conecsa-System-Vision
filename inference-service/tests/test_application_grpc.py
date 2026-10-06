@@ -109,8 +109,7 @@ class TestApplicationRpcs:
 
 
 class TestGpuHandoverRpcs:
-    """An explicit Start and a ResumeRuntime without restart end the handover,
-    so the application type can change again."""
+    """An explicit Start and a ResumeRuntime without restart end the handover."""
 
     @pytest.fixture
     def rig(self, app, monkeypatch):
@@ -133,6 +132,16 @@ class TestGpuHandoverRpcs:
         app.detection_service = detection
         app.application_service.persist("detect")
         return SimpleNamespace(app=app, detection=detection, published=published)
+
+    def test_a_start_during_a_conversion_is_a_precondition_failure(self, rig):
+        # A conversion that started after the gateway's probe: 409, not 500.
+        rig.app.model_service.attach_conversion_service(
+            SimpleNamespace(get_active_jobs=lambda: [SimpleNamespace(job_id="job")]))
+        ctx = FakeContext()
+        r = ig.DetectionControlServicer(rig.app).Start(pb.Empty(), ctx)
+        assert not r.success and rig.detection.starts == 0
+        assert ctx.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "conversion" in ctx.details
 
     def test_start_ends_a_handover_and_says_so(self, rig):
         ok, _ = rig.app.model_service.release_runtime()
@@ -195,6 +204,18 @@ class TestModelRpcs:
         (app.dir / "old.engine").write_bytes(b"x")
         ml = ig.ModelControlServicer(app).ListModels(pb.Empty(), FakeContext())
         assert [(m.name, m.task) for m in ml.models] == [("old.engine", "detect")]
+
+    def test_list_models_sets_only_the_recorded_scores(self, app):
+        (app.dir / "old.engine").write_bytes(b"x")
+        (app.dir / "new.engine").write_bytes(b"x")
+        (app.dir / "new.settings.json").write_text(
+            json.dumps({"task": "detect", "metrics": {"map50_95_box": 0.5}}))
+        ml = ig.ModelControlServicer(app).ListModels(pb.Empty(), FakeContext())
+        by_name = {m.name: m for m in ml.models}
+        assert by_name["new.engine"].HasField("map50_95")
+        assert by_name["new.engine"].map50_95 == pytest.approx(0.5)
+        assert not by_name["new.engine"].HasField("accuracy_top1")
+        assert not by_name["old.engine"].HasField("map50_95")
 
     def test_a_model_being_converted_lists_with_its_declared_task(self, app):
         # Regression: before the sidecar exists it listed as "detect".

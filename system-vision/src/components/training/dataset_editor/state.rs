@@ -13,12 +13,14 @@ use leptos::prelude::*;
 
 use crate::api::{
     DatasetSummary, LabelBox, LabelClassSuggestion, LabelModelStatusResponse, LabelPolygon,
-    SamStatusResponse, TrainingImageInfo, TrainingJobStatus,
+    LabelsResponse, SamStatusResponse, TrainingImageInfo, TrainingJobStatus,
 };
 use crate::i18n::*;
 use crate::models::Task;
 
 use super::MIN_IMAGES_DEFAULT;
+use super::history::{LabelHistory, LabelSnapshot};
+use super::label_queue::{self, LabelQueue};
 
 /// The i18n context handle, captured by value into callbacks.
 pub(crate) type I18n = leptos_i18n::I18nContext<Locale>;
@@ -59,8 +61,98 @@ pub(crate) struct ImagesState {
     pub(crate) polygons: RwSignal<Vec<LabelPolygon>>,
     /// The open image's class in a classification dataset (saved per pick).
     pub(crate) image_class: RwSignal<Option<u32>>,
+    /// The image whose labels `boxes` / `polygons` / `image_class` hold:
+    /// `None` while another image's labels are still loading (or after a
+    /// failed load), when nothing may be saved from them — a save then would
+    /// write empty or stale labels over the server's.
+    pub(crate) loaded: RwSignal<Option<String>>,
+    /// Undo / redo over the open image's `boxes` / `polygons`: recorded when
+    /// a completed edit is saved, reset when another image is opened.
+    pub(crate) history: RwSignal<LabelHistory>,
     pub(crate) cover_image_id: RwSignal<String>,
     pub(crate) capturing: RwSignal<bool>,
+    /// Image files from the operator's computer are being uploaded.
+    pub(crate) uploading: RwSignal<bool>,
+}
+
+impl ImagesState {
+    /// The signals hold `image_id`'s labels: it is open and loaded, so a
+    /// gesture may edit and save them.
+    pub(crate) fn holds_labels_of(self, image_id: &str) -> bool {
+        self.selected.try_get_untracked().flatten().as_deref() == Some(image_id)
+            && self.loaded.try_get_untracked().flatten().as_deref() == Some(image_id)
+    }
+
+    /// The open image's labels are loaded (see [`Self::holds_labels_of`]).
+    pub(crate) fn labels_loaded(self) -> bool {
+        match self.selected.try_get_untracked().flatten() {
+            Some(id) => self.holds_labels_of(&id),
+            None => false,
+        }
+    }
+
+    /// Show the labels the server returned for `image_id` as the open
+    /// image's: a fresh baseline for undo. `try_*`: reached after awaits.
+    pub(crate) fn load_labels(self, image_id: &str, labels: LabelsResponse) {
+        let _ = self.boxes.try_set(labels.boxes);
+        let _ = self.polygons.try_set(labels.polygons);
+        let _ = self.image_class.try_set(labels.image_class);
+        let _ = self.loaded.try_set(Some(image_id.to_string()));
+        self.reset_history();
+    }
+
+    /// The class at `removed` was removed on the server, which dropped its
+    /// labels and moved the ids above it down: the open image's labels do
+    /// the same (keeping any edit not yet saved), and the undo history
+    /// starts again from them (older snapshots hold the old ids).
+    pub(crate) fn renumber_labels(self, removed: usize) {
+        let (Some(mut boxes), Some(mut polygons), Some(mut image_class)) = (
+            self.boxes.try_get_untracked(),
+            self.polygons.try_get_untracked(),
+            self.image_class.try_get_untracked(),
+        ) else {
+            return;
+        };
+        label_queue::renumber(&mut boxes, &mut polygons, &mut image_class, removed);
+        let _ = self.boxes.try_set(boxes);
+        let _ = self.polygons.try_set(polygons);
+        let _ = self.image_class.try_set(image_class);
+        self.reset_history();
+    }
+
+    /// Nothing is loaded: empty labels (another image's must not be shown or
+    /// edited under a picture they do not belong to) and no undo.
+    pub(crate) fn unload_labels(self) {
+        let _ = self.loaded.try_set(None);
+        let _ = self.boxes.try_set(Vec::new());
+        let _ = self.polygons.try_set(Vec::new());
+        let _ = self.image_class.try_set(None);
+        let _ = self.history.try_set(LabelHistory::default());
+    }
+
+    /// The open image's labels as they are now (`None` once disposed).
+    pub(crate) fn snapshot(self) -> Option<LabelSnapshot> {
+        Some(LabelSnapshot {
+            boxes: self.boxes.try_get_untracked()?,
+            polygons: self.polygons.try_get_untracked()?,
+        })
+    }
+
+    /// A completed edit was made: the current labels become an undo step.
+    /// `try_*`: also reached after awaits.
+    pub(crate) fn record_history(self) {
+        if let Some(s) = self.snapshot() {
+            let _ = self.history.try_update(|h| h.record(s));
+        }
+    }
+
+    /// The current labels are a fresh baseline (an image was opened or
+    /// reloaded): nothing to undo or redo.
+    pub(crate) fn reset_history(self) {
+        if let Some(s) = self.snapshot() {
+            let _ = self.history.try_update(|h| h.reset(s));
+        }
+    }
 }
 
 /// The dataset's class list and the class new boxes are stamped with.
@@ -136,6 +228,14 @@ pub(crate) struct ReplicateState {
     pub(crate) busy: RwSignal<bool>,
 }
 
+/// The delete-image confirmation.
+#[derive(Clone, Copy)]
+pub(crate) struct DeleteImageState {
+    /// `image_id` awaiting confirmation; `None` hides the dialog.
+    pub(crate) target: RwSignal<Option<String>>,
+    pub(crate) busy: RwSignal<bool>,
+}
+
 /// The editor's own popup messages.
 #[derive(Clone, Copy)]
 pub(crate) struct Notices {
@@ -172,10 +272,13 @@ pub(crate) struct EditorState {
     /// segmentation, one class per image for classification.
     pub(crate) task: Task,
     pub(crate) images: ImagesState,
+    /// Label saves and loads, run one at a time in the order issued.
+    pub(crate) label_queue: LabelQueue,
     pub(crate) classes: ClassesState,
     pub(crate) ai: AiState,
     pub(crate) training: TrainingState,
     pub(crate) replicate: ReplicateState,
+    pub(crate) delete_image: DeleteImageState,
     pub(crate) notices: Notices,
 }
 
@@ -190,9 +293,13 @@ impl EditorState {
                 boxes: RwSignal::new(Vec::new()),
                 polygons: RwSignal::new(Vec::new()),
                 image_class: RwSignal::new(None),
+                loaded: RwSignal::new(None),
+                history: RwSignal::new(LabelHistory::default()),
                 cover_image_id: RwSignal::new(dataset.cover_image_id.clone()),
                 capturing: RwSignal::new(false),
+                uploading: RwSignal::new(false),
             },
+            label_queue: LabelQueue::new(),
             classes: ClassesState {
                 list: RwSignal::new(Vec::new()),
                 active: RwSignal::new(0),
@@ -222,6 +329,10 @@ impl EditorState {
                 show_modal: RwSignal::new(false),
                 target: RwSignal::new(None),
                 count: RwSignal::new(5),
+                busy: RwSignal::new(false),
+            },
+            delete_image: DeleteImageState {
+                target: RwSignal::new(None),
                 busy: RwSignal::new(false),
             },
             notices: Notices {

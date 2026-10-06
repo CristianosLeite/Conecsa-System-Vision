@@ -10,8 +10,8 @@
 # Suites:
 #   1. Python (pytest)   — inference-service, training-service, api-gateway, os-base
 #   2. Python (pyright)  — static types across every Python service; baseline is 0
-#   3. Rust native       — webcam-server, hub-vision (`cargo test`)
-#   4. Rust wasm         — system-vision (`wasm-pack test`, headless browser)
+#   3. Rust native       — ui-view, webcam-server, hub-vision (`cargo test`)
+#   4. Rust wasm         — system-vision, ui-view (`wasm-pack test`, headless browser)
 #   5. Node-RED (jest)   — flow custom nodes
 #   6. Licenses          — `reuse lint` + no AGPL imports from Apache layers
 #
@@ -100,6 +100,13 @@ fi
 
 # ── 3. Rust (native) ────────────────────────────────────────────────────────────
 if [[ "${SKIP_RUST:-0}" != "1" ]]; then
+  # Shared Apache-2.0 UI crate: pure math and gesture decisions test natively,
+  # the wasm32 DOM glue is covered by the clippy below and the wasm suite (4).
+  echo "==> cargo test: ui-view"
+  cargo test --manifest-path shared/ui-view/Cargo.toml
+  echo "==> clippy (wasm32): ui-view"
+  cargo clippy --manifest-path shared/ui-view/Cargo.toml --all-targets --target wasm32-unknown-unknown -- -D warnings
+
   echo "==> cargo test: webcam-server"
   cargo test --manifest-path webcam-server/Cargo.toml
 
@@ -143,6 +150,8 @@ if [[ "${SKIP_WASM:-0}" != "1" ]]; then
   if command -v wasm-pack >/dev/null 2>&1; then
     echo "==> wasm-pack test: system-vision (headless $WASM_BROWSER)"
     wasm-pack test --headless "--$WASM_BROWSER" system-vision
+    echo "==> wasm-pack test: ui-view (headless $WASM_BROWSER)"
+    wasm-pack test --headless "--$WASM_BROWSER" shared/ui-view
   else
     echo "!! wasm-pack not found — skipping system-vision wasm tests"
     echo "   (install: cargo install wasm-pack; needs a browser + driver)"

@@ -196,3 +196,22 @@ def test_a_gallery_of_another_embedder_is_refused(model, monkeypatch):
 def test_names_missing_from_the_classes_sidecar_come_from_the_gallery(model):
     pp = FacePostprocessor([], _config(model), embedder=FakeEmbedder())
     assert pp.class_labels == ["Ana", "Bruno #00ff00"]
+
+
+def test_ip_camera_faces_stay_inside_their_own_camera(model, monkeypatch):
+    # Two 640×480 cameras side by side; the second one's input is offset.
+    frame = np.zeros((480, 1280, 3), np.uint8)
+    frame[:, 640:] = 255  # the neighbour is white: a leaking crop would show it
+    metas = [META, META._replace(ox=640)]
+    crops = []
+    monkeypatch.setattr("api.postprocess.face.align_crop",
+                        lambda img, landmarks: crops.append(img) or np.zeros((112, 112, 3), np.uint8))
+    pp, _ = _strategy(model, [ANA, BRUNO])
+    outputs = [yunet_outputs([((560, 180, 700, 300), 0.9)], ORDER),
+               yunet_outputs([((100, 180, 200, 300), 0.9)], ORDER)]
+    out = pp.process(outputs, frame, metas, True)
+    boxes = [d.bbox for d in out.items if d.bbox is not None]
+    assert sorted(boxes) == [(560, 100, 639, 220), (740, 100, 840, 220)]
+    # Each face is aligned from its own camera's picture only.
+    assert sorted(c.shape for c in crops) == [(480, 640, 3), (480, 640, 3)]
+    assert sorted(int(c.mean()) for c in crops) == [0, 255]

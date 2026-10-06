@@ -107,6 +107,9 @@ pub(super) fn MainComponent(
                                     }.into_any(),
                                     ViewMode::Settings => view! {
                                         <Settings
+                                            detection_running=Signal::derive(move || {
+                                                status.get().is_some_and(|s| s.is_running)
+                                            })
                                             refresh_network=network_refresh
                                             refresh_gpio=gpio_refresh
                                             set_error_msg=set_error_msg

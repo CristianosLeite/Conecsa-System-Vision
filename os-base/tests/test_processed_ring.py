@@ -111,3 +111,12 @@ class TestProcessedRing:
         finally:
             stop.set()
             producer.join(5)
+
+
+def test_the_default_slot_fits_a_busy_ip_camera_mosaic(monkeypatch):
+    # A 2x2 mosaic at the default cell size is 2560x1440; a frame larger than
+    # a slot is dropped and freezes the processed feed.
+    monkeypatch.delenv("PROCESSED_SHM_SLOT_BYTES", raising=False)
+    from conecsa_shm.processed_ring import _default_slot_bytes
+
+    assert _default_slot_bytes() == 4 << 20

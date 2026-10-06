@@ -44,6 +44,10 @@ class Detection:
     # so it runs on demand rather than on every frame.
     ring_source: Optional[Callable[[], List[List[List[float]]]]] = field(
         default=None, repr=False, compare=False)
+    # Origin, in frame pixels, of the input a result without geometry came
+    # from — what places a per-camera classification in an IP camera mosaic.
+    # Results with a box are placed by their center instead.
+    origin: Optional[Tuple[int, int]] = None
 
     def resolve_polygons(self) -> Optional[List[List[List[float]]]]:
         """The outline rings, extracted from ``ring_source`` on first use.
@@ -77,6 +81,12 @@ class DetectionResult:
     # Classification top-k ([{class_id, class_name, confidence}]); None for
     # tasks without one, and then absent from the snapshot.
     candidates: Optional[List[dict]] = None
+    # Per-input classification top-k of an IP camera mosaic:
+    # [{"origin": (x, y), "candidates": [...]}]; None otherwise.
+    region_candidates: Optional[List[dict]] = None
+    # IP camera mosaic layout ([{id, name, rect}], rect a conecsa_shm.mosaic.Rect
+    # cell in frame pixels); None for a single camera.
+    cameras: Optional[List[dict]] = None
 
 
 @dataclass
@@ -107,4 +117,9 @@ class ModelInfo:
     has_weights: bool = False
     # The model's task from its settings sidecar ("detect" when unrecorded).
     task: str = "detect"
+    # Validation mAP@50:95 (box for detect, mask for segment) and top-1
+    # accuracy (classify) recorded in the settings sidecar by the .pt
+    # conversion, as fractions; None when the model has no recorded score.
+    map50_95: Optional[float] = None
+    accuracy_top1: Optional[float] = None
 

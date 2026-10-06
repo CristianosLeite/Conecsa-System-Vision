@@ -14,8 +14,9 @@ callers keep a single entry point.
 
 Two kinds of camera state meet here and are kept apart on purpose. The local
 camera *tuning* (``_current_config``) is per-model: model settings load and save
-it. The capture *source* (``_source``: local camera or a remote camera's stream, with
-its address and secret token) is per-device: it lives in ``CameraSourceStore``,
+it. The capture *source* (``_source``: local camera, a remote camera's stream with
+its address and secret token, or up to four RTSP IP cameras with their
+passwords) is per-device: it lives in ``CameraSourceStore``,
 survives a model switch, and never enters a model's settings file.
 """
 import json
@@ -23,15 +24,18 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .camera_source_store import CameraSourceStore
 from .config_validation import (
+    IP_CAMERAS_MAX,
     LOCAL_CAMERA_KEYS,
+    SOURCE_IP,
     SOURCE_KEYS,
     SOURCE_LOCAL,
     SOURCE_NETWORK,
     ConfigValidationError,
+    merge_ip_cameras,
     validate_camera_patch,
     validate_source_state,
 )
@@ -107,6 +111,7 @@ class VideoService:
         self._source_configured = stored is not None
         self._source: Dict[str, Any] = stored or {
             "source": SOURCE_LOCAL, "network_host": "", "network_port": 0, "network_token": "",
+            "ip_cameras": [],
         }
         # Whether a config was ever meant to reach the webcam-server: what the
         # attach hook replays when the producer recreates its segment.
@@ -194,6 +199,40 @@ class VideoService:
         health = self._consumer.read_health()
         return _CAMERA_DETAILS.get(getattr(health, "detail", 0), CAMERA_DETAIL_UNSPECIFIED)
 
+    # ── IP cameras ──
+
+    def ip_camera_identities(self) -> List[Dict[str, str]]:
+        """``[{id, name}]`` of the configured IP cameras in mosaic order.
+
+        Empty unless the IP source is the active one.
+        """
+        with self._lock:
+            if self._source.get("source") != SOURCE_IP:
+                return []
+            return [{"id": c["id"], "name": c["name"]}
+                    for c in self._source.get("ip_cameras", [])]
+
+    def ip_camera_statuses(self) -> List[Dict[str, Any]]:
+        """The stored IP cameras for the API, each with its ring's health.
+
+        The password is write-only: only whether one is stored is reported.
+        Outside the IP source the list is dormant and reads ``no_camera``.
+        """
+        with self._lock:
+            cameras = [dict(c) for c in self._source.get("ip_cameras", [])]
+            active = self._source.get("source") == SOURCE_IP
+        out = []
+        for index, camera in enumerate(cameras):
+            health = self._consumer.read_ip_health(index) if active else None
+            out.append({
+                "id": camera["id"], "name": camera["name"], "url": camera["url"],
+                "username": camera["username"], "password_set": bool(camera["password"]),
+                "status": health.status if health else CAMERA_STATUS_NO_CAMERA,
+                "detail": _CAMERA_DETAILS.get(getattr(health, "detail", 0),
+                                              CAMERA_DETAIL_UNSPECIFIED),
+            })
+        return out
+
     def get_current_camera_config(self) -> Dict:
         """Return a copy of the last-applied local camera tuning."""
         return dict(self._current_config)
@@ -262,13 +301,20 @@ class VideoService:
             gain=config["gain"],
         )
         if source is not None:
-            # The enum is set from a validated name, never from a raw number:
-            # an out-of-range value would not fit the config region.
-            cfg.source = (shm_pb2.CAMERA_SOURCE_NETWORK if source["source"] == SOURCE_NETWORK
-                          else shm_pb2.CAMERA_SOURCE_LOCAL)
+            # The enum is set from a validated name, never from a raw number.
+            cfg.source = {
+                SOURCE_NETWORK: shm_pb2.CAMERA_SOURCE_NETWORK,
+                SOURCE_IP: shm_pb2.CAMERA_SOURCE_IP,
+            }.get(source["source"], shm_pb2.CAMERA_SOURCE_LOCAL)
             cfg.network_host = source["network_host"]
             cfg.network_port = source["network_port"]
             cfg.network_token = source["network_token"]
+            # Dormant cameras stay off the wire: the webcam-server only needs
+            # the list while it captures from it.
+            if source["source"] == SOURCE_IP:
+                for camera in source.get("ip_cameras", []):
+                    cfg.ip_cameras.add(url=camera["url"], username=camera["username"],
+                                       password=camera["password"])
         self._publish_wanted = True
         # ``None`` comes from transports predating the confirmed write.
         return self._consumer.write_config(cfg) is not False
@@ -319,6 +365,9 @@ class VideoService:
         Memory changes only after both the file and SHM took the candidate. If
         the publish fails, the previous file comes back (best effort).
         """
+        if "ip_cameras" in source_patch:
+            source_patch = {**source_patch, "ip_cameras": merge_ip_cameras(
+                self._source.get("ip_cameras", []), source_patch["ip_cameras"])}
         candidate = validate_source_state({**self._source, **source_patch})
         config = {**self._current_config, **tuning}
         previous = dict(self._source) if self._source_configured else None
@@ -397,6 +446,8 @@ class VideoService:
             "current_network_host": self._source["network_host"],
             "current_network_port": self._source["network_port"],
             "network_token_set": bool(self._source["network_token"]),
+            "ip_cameras_max": IP_CAMERAS_MAX,
+            "ip_cameras": self.ip_camera_statuses(),
             "current_device": cur_path, "current_index": cur_index,
             "current_width": g("width", 640), "current_height": g("height", 640),
             "current_framerate": g("framerate", 30),

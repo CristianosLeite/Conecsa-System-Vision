@@ -12,9 +12,11 @@ import re
 import grpc
 from flask import Response, request
 
+from ..gpu import TRAINING_JOB_HEADER, GpuBusy, Purpose, busy_response, gpu_session
 from ..grpc_clients import clients, inf
 from ..helpers import (
     _grpc_error,
+    _hub_verified,
     _json,
     _json_error,
     _json_success,
@@ -29,9 +31,15 @@ logger = logging.getLogger(__name__)
 
 
 def _model_dict(m) -> dict:
-    """Serialize a ModelInfo message (a producer without tasks means ``detect``)."""
+    """Serialize a ModelInfo message (a producer without tasks means ``detect``).
+
+    ``map50_95`` / ``accuracy_top1`` are ``None`` when the model records no score.
+    """
     return {"name": m.name, "size": m.size, "modified": m.modified, "is_active": m.is_active,
-            "has_weights": m.has_weights, "task": m.task or "detect"}
+            "has_weights": m.has_weights, "task": m.task or "detect",
+            "map50_95": round(m.map50_95, 4) if m.HasField("map50_95") else None,
+            "accuracy_top1": (round(m.accuracy_top1, 4) if m.HasField("accuracy_top1")
+                              else None)}
 
 
 @api_bp.route('/api/v1/models', methods=['GET'])
@@ -55,6 +63,8 @@ def list_models():
 
 # Training geometry a client may declare on upload (see ModelUploadMeta in
 # proto/inference.proto); anything else is treated as "unknown".
+#: Uploads the inference-service activates as they land (``model_paths.ENGINE_FILE_EXTENSIONS``).
+_ENGINE_EXTENSIONS = (".engine", ".plan")
 _TRAIN_GEOMETRY_RE = re.compile(r"^(frames|tiles:(auto|[1-9]\d*))$")
 
 
@@ -99,8 +109,25 @@ def upload_model():
     train_geometry = _train_geometry_from_form(request.form.get("train_geometry"))
     task = _task_from_form(request.form.get("task"))
     try:
-        result = clients.model.UploadModel(
-            _upload_stream(file.filename, imgsz, file.stream, train_geometry, task))
+        # A prebuilt engine is activated on arrival (like a select); anything
+        # else is converted, which only a training job refuses — except that
+        # job's own result upload, which the training-service names with the
+        # job's id (never honoured on a hub-relayed request). Training's
+        # labeling assistants go first.
+        # The GPU lock is held through the upload, so a queued conversion or
+        # an activated engine cannot slip between another route's checks and
+        # its operation.
+        if os.path.splitext(file.filename or "")[1].lower() in _ENGINE_EXTENSIONS:
+            session = gpu_session(Purpose.ENGINE_UPLOAD)
+        else:
+            upload_job = None if _hub_verified() else request.headers.get(TRAINING_JOB_HEADER)
+            session = gpu_session(Purpose.CONVERSION, upload_name=file.filename,
+                                  upload_job=upload_job)
+        with session:
+            result = clients.model.UploadModel(
+                _upload_stream(file.filename, imgsz, file.stream, train_geometry, task))
+    except GpuBusy as exc:
+        return busy_response(exc)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     try:
@@ -127,8 +154,14 @@ def select_model():
         return _json_error("Missing model_name parameter")
     model_name = data["model_name"]
     try:
-        was_running = clients.detection.GetStatus(inf.Empty()).is_running
-        r = clients.model.SelectModel(inf.ModelName(name=model_name))
+        # Activation loads an engine: refused while a training or a
+        # conversion holds the GPU; the labeling assistants go first. A
+        # running detection adopts the new model, so it does not block.
+        with gpu_session(Purpose.MODEL_SELECT):
+            was_running = clients.detection.GetStatus(inf.Empty()).is_running
+            r = clients.model.SelectModel(inf.ModelName(name=model_name))
+    except GpuBusy as exc:
+        return busy_response(exc)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     if not r.success:

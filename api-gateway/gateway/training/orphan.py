@@ -26,8 +26,8 @@ import time
 import grpc
 
 from ..config import settings
+from ..gpu import ACTIVE_CONVERSION_STATUSES, ACTIVE_JOB_STATUSES
 from ..grpc_clients import clients, inf, trn
-from .helpers import ACTIVE_CONVERSION_STATUSES, ACTIVE_JOB_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -137,15 +137,22 @@ class OrphanTracker:
             return
         logger.warning("Training mode idle for %.0fs with no client activity "
                        "— auto-exiting and resuming detection", idle)
+        from ..gpu import GpuBusy, gpu_lock
         from .session import _do_exit  # runtime import: session imports this module
         try:
-            ok, msg = _do_exit(resume_detection=True)
+            # The resume loads the engine; a GPU operation in progress means
+            # a client is active after all — retry on the next tick.
+            with gpu_lock(wait=0):
+                ok, msg = _do_exit(resume_detection=True)
+                if ok:
+                    # Inside the lock, like every other arm/disarm.
+                    self.disarm()
+        except GpuBusy as exc:
+            ok, msg = False, exc.message
         except grpc.RpcError as exc:
             detail = exc.details() if hasattr(exc, "details") else str(exc)
             ok, msg = False, detail
-        if ok:
-            self.disarm()
-        else:
+        if not ok:
             logger.error("Orphan auto-exit failed (%s); retrying on the next "
                          "tick", msg)
 

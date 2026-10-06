@@ -153,10 +153,6 @@ pub struct ApStatus {
     pub prefix: u32,
     #[serde(default)]
     pub stations: Vec<ApStation>,
-    /// Seconds left before an access point nobody joined stops; 0 once a
-    /// remote camera has joined and when inactive.
-    #[serde(default)]
-    pub join_deadline_remaining_secs: u32,
     #[serde(default)]
     pub wired_ready: bool,
     #[serde(default)]

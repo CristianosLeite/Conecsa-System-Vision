@@ -81,6 +81,7 @@ class TestCameraRingMatchesRust:
             "HEALTH_PAYLOAD_MAX",
             "FORMAT_RAW_RGB",
             "FORMAT_JPEG",
+            "FORMAT_RAW_BGR",
         ],
     )
     def test_constant_matches(self, rust_src, name):

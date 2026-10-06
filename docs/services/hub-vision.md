@@ -19,8 +19,8 @@ It is the authenticated entry point to the fleet (see
   them (SQLite by default; PostgreSQL or SQL Server configurable),
 - **records** every action operators take — on the hub and on its devices — in
   an [audit trail](#audit-trail),
-- applies **recipes** — a saved model + thresholds state for the whole fleet, in
-  one action, and
+- applies **recipes** — a saved, complete setup (application type, model,
+  settings, camera, lighting) for a chosen set of devices, in one action, and
 - lets you **open each device's main page** inside the hub (an embedded iframe
   pane — no external browser, the same way the device UI embeds the Flow editor).
 
@@ -28,10 +28,12 @@ It is the authenticated entry point to the fleet (see
 
 On first run the hub seeds a default `admin` account (forced password change on
 first login); every action requires a login session. Sessions use a **sliding
-12-hour expiry**: every authenticated action renews the window, so an active
-operator is never signed out mid-shift — the session only lapses after 12 hours
-of inactivity, at which point the UI returns to the login screen automatically
-(detection collection is unaffected; it runs independently of the session). A
+12-hour expiry**: every operator action renews the window (the UI's own
+background polling does not count), so an active operator is never signed out
+mid-shift — the session only lapses after 12 hours of inactivity, at which point
+the UI returns to the login screen automatically with a "session expired" notice
+and an `auth.session_expired` entry in the audit trail (detection collection is
+unaffected; it runs independently of the session). A
 hidden built-in `conecsa` service account also exists (never stored in the
 database), but its sign-in is gated behind the `CONECSA` environment variable
 and **disabled by default**.
@@ -147,7 +149,10 @@ ships the clean image to the device's pre-labeled ingest route
 (`POST /api/v1/training/datasets/<id>/images`). The detection coordinates
 become the image's YOLO labels (letterboxed device-side; class names are
 resolved or created on the dataset), so in the device's label editor the
-operator only fixes the class — no re-drawing. A classification record feeds
+operator only fixes the class — no re-drawing. The hub window itself is never
+page-zoomed (pinch, Ctrl+wheel and Ctrl+± are blocked on every target, the
+embedded device screen included); the label editor zooms its own image
+instead. A classification record feeds
 a classification dataset instead: the frame's class becomes the image's
 label (`image_class`, by name). A segmentation record feeds a segmentation
 dataset with its outlines as polygon pre-labels (`polygons`, by class name).
@@ -257,70 +262,99 @@ actions are:
 
 ## Recipes
 
-A **recipe** names a fleet-wide state: for **every paired device**, which model
-to load and which confidence and overlay thresholds to apply (the overlay
-threshold is the IoU above which overlapping boxes are suppressed). Loading
-one puts the whole fleet into that state in a single action, instead of
-configuring each device from its own UI.
+A **recipe** names a complete setup for the devices it lists: for each one, the
+**application type**, the **model**, the model **settings** of that application
+(confidence and overlap for detection; confidence for classification;
+confidence, overlap and the instance limit for segmentation; match threshold,
+minimum face size and maximum faces for face recognition) and, optionally, the
+**camera** source (local camera with its geometry, remote camera, or up to four
+IP cameras, plus the stereo overlay) and the **lighting** (exposure, gain,
+gamma, colour balance). Loading one puts those devices into that state in a
+single action, instead of configuring each device from its own UI. Devices the
+recipe does not list are left untouched, so a recipe may cover part of the
+fleet.
 
-The **Recipes** page (owner/admin only — loading a recipe reconfigures every
-device) lists the stored recipes with a validity badge, and creates or edits
-them with one row per paired device: a model picker (populated from that
-device's own model list) and the two thresholds, edited to two decimal places.
-A new recipe comes **pre-filled with each device's current values**, so saving
-one straight away captures the fleet as it is today.
+The **Recipes** page (owner/admin only — loading a recipe reconfigures devices)
+lists the stored recipes with a validity badge and opens an **editor** for one:
+a list of the recipe's devices on the left, the selected device's setup in
+five numbered sections on the right. A device added to a recipe comes
+**pre-filled with its current setup** (read from the device over mTLS), so
+saving straight away captures the device as it is today; the camera and
+lighting sections can be switched off per device ("leave unchanged"), and
+they stay unchanged even when the recipe switches the model: the device would
+otherwise load that model's own tuning, so the hub re-sends the current values.
+
+### Secrets stay on the device
+
+A recipe never stores the remote camera token or an IP camera password: the
+device does not read them back, and the hub does not keep a second copy. The
+editor only shows whether the device has one stored. A recipe that pins the
+remote camera on a device with no token is **invalid** until the token is set
+on that device; an IP camera that matches a stored one by URL and username
+keeps its password, a new one is created without.
 
 ### Validity
 
-Every time the page loads it snapshots the fleet (`/api/v1/status` and
-`/api/v1/models` on each paired device, in parallel) and re-checks each recipe
-against it. A recipe is marked **INVALID** — with the reason in the badge's
-tooltip, and its **Load** action disabled until it is edited — when:
+Every time the page loads it snapshots the fleet (`/api/v1/status`,
+`/api/v1/models`, `/api/v1/application` and `/api/v1/camera/devices` on each
+paired device, a few at a time) and re-checks each recipe against it. A recipe
+is **INVALID** — with the reasons in the badge's tooltip, and its **Load**
+action disabled until it is edited — when:
 
-- a device that is **online** no longer has the recipe's model,
+- a device that is **online** no longer has the recipe's model, or the model is
+  built for **another application** than the recipe's,
+- the device does not **support** the recipe's application type,
 - **no model was chosen** for a device — a device that was offline when the
   recipe was saved has no model list to pick from, so the recipe is stored
   without one rather than refusing the save (otherwise a single unreachable
   device would block every recipe from being created),
-- the recipe names a device this hub is **no longer paired** with, or
-- a device was **paired after** the recipe was saved, so the recipe does not
-  cover it. Opening **Edit** pre-fills the new device's row with its current
-  values, so saving fixes it,
-- an **online** device has **no application type** chosen yet — it can load
-  no model until an administrator picks one, or
-- the recipe's model belongs to **another application** than the one the
-  device runs (the device refuses to activate it).
+- the recipe names a device this hub is **no longer paired** with,
+- the recipe uses the **remote camera** and the device has **no token** stored,
+- or a stored value is out of range (a hand-edited file).
+
+Some mismatches only **warn** and never block: the chosen local camera is not
+connected right now, the resolution or frame rate is not among the camera's
+reported formats, or an IP camera is not on the device yet.
 
 A device that is merely **offline** does not, by itself, invalidate a recipe:
-its model list is *unknown*, not empty, so a *missing* model cannot be
-asserted. It shows up instead as a failed device when the recipe is loaded.
+its lists are *unknown*, not empty, so nothing can be asserted about them. It
+shows up instead as a failed device when the recipe is loaded.
 
 ### Loading
 
-**Load** confirms first, then applies to all of the recipe's devices in
-parallel and reports **one outcome per device** — a device that is offline or
-refuses never aborts the others. The backend re-validates against a fresh
-snapshot before applying (the UI gate is not the only one) and re-checks the
-model on the device immediately before selecting it.
+**Load** confirms first (saying how many devices are affected and how many are
+offline), then runs in the background: the page shows **one row per device**
+with the step it is at and its outcome, and a device that is offline or
+refuses never aborts the others. Devices are configured **one at a time**, in
+recipe order, so **Stop after the current device** means exactly that: the
+device being configured finishes and the rest are skipped; nothing is undone.
+The backend re-validates the recipe's devices against a fresh snapshot before
+applying (the UI gate is not the only one), refuses a file whose device list is
+empty or names a device twice, and reads each device again right before
+configuring it: the devices before it may have taken minutes, and a device
+changed through its own screen in the meantime is planned from its current
+state, not from the snapshot. One recipe loads at a time, and never during a federated
+training: both reserve the fleet before they start. A device whose camera
+inventory cannot be read is failed before any call when the recipe pins its
+camera, so an IP camera list is never replaced blind.
 
-Per device the order is fixed:
-
-1. `POST /api/v1/model/select` — **skipped when the model is already active**,
-   since re-selecting it would deserialize the TensorRT engine again for no
-   change.
-2. `POST /api/v1/overlay_threshold`.
-3. `PUT /api/v1/config` with `confidence_threshold`.
-
-The model comes first because selecting it repoints the device at that model's
-`<model>.settings.json` and applies the thresholds stored there — thresholds
-written before the switch would be overwritten. Confidence goes through
-`/api/v1/config` rather than `/api/v1/threshold` because the latter only
-mutates the device's memory and is lost on restart, while the config route
-persists (see
-[inference-service](inference-service.md)).
+Per device the order is fixed: detection is stopped only when the
+**application type changes** (the device refuses a switch while it runs); then
+the application, the model (skipped when already active), one camera-config
+call carrying the source, geometry, lighting and stereo, the thresholds and
+per-application settings, and finally detection is started again if it was
+stopped. The model comes before everything per-model because selecting it
+repoints the device at that model's settings file — camera tuning included —
+which would otherwise overwrite values written earlier. After a model switch
+every per-model value is re-sent; without one, only the values that differ.
+Confidence goes through `/api/v1/config` rather than `/api/v1/threshold`
+because the latter only mutates the device's memory and is lost on restart,
+while the config route persists (see [inference-service](inference-service.md)).
 
 Recipes live in `recipes.json` in the app config directory, next to
-`hub-settings.json`.
+`hub-settings.json`. The file is versioned; a file written by an older hub
+(model and thresholds only) is migrated on load, and its entries show a warning
+until they are re-saved with an application type.
 
 ## Opening a device
 
@@ -469,6 +503,13 @@ device's application type next to its name, as the device last reported it
 — kept while the device is offline; a type this hub does not know reads
 *Unsupported application*.
 
+Where multicast does not reach the hub (VLANs, client-isolated Wi-Fi, routed
+subnets), the **+** button on **Devices** adds a device by IP address. The hub
+reads the device's identity from `/enroll/info` — on the bootstrap channel for
+an unenrolled device, with the hub client certificate for one already enrolled
+— and keeps the entry across restarts, polling it like a discovered device.
+**Remove device** forgets it.
+
 ## Storage
 
 SQLite is the default (a file under the app data directory). External backends
@@ -501,8 +542,8 @@ read pre-auth, so the login screen already renders localized). Date/time
 formatting follows the active language. The selection also propagates to every
 embedded device page via `?lang=` on the iframe URL — the device UI persists it
 in localStorage, so it keeps the language even when opened directly in a
-browser. Translations are compiled in from the repo-root `i18n/hub-vision/`
-catalogs (see `i18n/README.md` for the layout and the shared glossary).
+browser. Translations are compiled in from the repo-root `shared/i18n/hub-vision/`
+catalogs (see `shared/i18n/README.md` for the layout and the shared glossary).
 
 ## Build
 

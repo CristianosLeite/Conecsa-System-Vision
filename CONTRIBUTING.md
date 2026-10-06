@@ -32,7 +32,7 @@ next export. The pull request is then closed with a reference to that export.
 Every file declares its license with an SPDX header or an annotation in
 [`REUSE.toml`](REUSE.toml):
 
-- **Apache-2.0**: `proto/`, `styles/`, `i18n/`, `os-base/conecsa_shm`,
+- **Apache-2.0**: `proto/`, `shared/styles/`, `shared/i18n/`, `shared/ui-view/`, `os-base/conecsa_shm`,
   `os-base/conecsa_common`, `flow/nodes/conecsa-system-vision`, `scripts/`,
   `yocto/` and `docs/`.
 - **AGPL-3.0-only**: everything else.

@@ -6,6 +6,8 @@
 
 /// Training-service HTTP client. Mirrors `/api/v1/training/*` (api-gateway).
 /// Every dataset-scoped call carries the dataset_id (stateless backend).
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -213,6 +215,19 @@ pub struct TrainingJobStatus {
     pub started_at: f64,
     #[serde(default)]
     pub dataset_id: String,
+    /// Per-epoch metrics, oldest first (absent on an older backend).
+    #[serde(default)]
+    pub history: Vec<EpochMetrics>,
+}
+
+/// One finished epoch of a training run: its 1-based number plus the
+/// ultralytics `results.csv` keys the backend keeps (`train/box_loss`,
+/// `val/cls_loss`, `metrics/mAP50-95(B)`, …).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EpochMetrics {
+    pub epoch: u32,
+    #[serde(flatten)]
+    pub values: HashMap<String, f64>,
 }
 
 impl TrainingJobStatus {
@@ -323,30 +338,20 @@ pub async fn set_dataset_cover(dataset_id: &str, image_id: &str) -> Result<Simpl
     .await
 }
 
-/// Upload a YOLO-formatted dataset ZIP as a new dataset named `name`.
-/// Multipart POST; the gateway streams the file to the training-service,
-/// which validates the structure and rejects incompatible archives.
-pub async fn upload_dataset_zip(
-    file: web_sys::File,
-    name: &str,
-) -> Result<DatasetUploadResponse, String> {
-    use web_sys::FormData;
-
+/// Multipart POST of `form_data` to the gateway `path`, decoding a JSON reply.
+/// The gateway answers a refusal with `{"error": "..."}`, returned as the
+/// error text.
+async fn post_multipart<T: serde::de::DeserializeOwned>(
+    path: &str,
+    form_data: &web_sys::FormData,
+) -> Result<T, String> {
     let window = web_sys::window().ok_or("No window object")?;
-    let url = format!("{}/api/v1/training/datasets/upload", get_api_base_url());
-
-    let form_data = FormData::new().map_err(|e| format!("Failed to create FormData: {:?}", e))?;
-    form_data
-        .append_with_blob("file", &file)
-        .map_err(|e| format!("Failed to append file to FormData: {:?}", e))?;
-    form_data
-        .append_with_str("name", name)
-        .map_err(|e| format!("Failed to append name to FormData: {:?}", e))?;
+    let url = format!("{}{}", get_api_base_url(), path);
 
     let opts = RequestInit::new();
     opts.set_method("POST");
     opts.set_mode(RequestMode::Cors);
-    opts.set_body(&form_data);
+    opts.set_body(form_data);
 
     let request = Request::new_with_str_and_init(&url, &opts)
         .map_err(|e| format!("Failed to create request: {:?}", e))?;
@@ -372,15 +377,37 @@ pub async fn upload_dataset_zip(
     let text = text_js.as_string().unwrap_or_else(|| "{}".to_string());
 
     if !resp.ok() {
-        // The gateway returns {"error": "..."} with the validation detail.
         let detail = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
             .unwrap_or(text);
         return Err(detail);
     }
-    serde_json::from_str::<DatasetUploadResponse>(&text)
+    serde_json::from_str::<T>(&text)
         .map_err(|e| format!("Failed to parse upload response: {} — body: {}", e, text))
+}
+
+fn file_form(file: &web_sys::File) -> Result<web_sys::FormData, String> {
+    let form_data =
+        web_sys::FormData::new().map_err(|e| format!("Failed to create FormData: {:?}", e))?;
+    form_data
+        .append_with_blob("file", file)
+        .map_err(|e| format!("Failed to append file to FormData: {:?}", e))?;
+    Ok(form_data)
+}
+
+/// Upload a YOLO-formatted dataset ZIP as a new dataset named `name`.
+/// Multipart POST; the gateway streams the file to the training-service,
+/// which validates the structure and rejects incompatible archives.
+pub async fn upload_dataset_zip(
+    file: web_sys::File,
+    name: &str,
+) -> Result<DatasetUploadResponse, String> {
+    let form_data = file_form(&file)?;
+    form_data
+        .append_with_str("name", name)
+        .map_err(|e| format!("Failed to append name to FormData: {:?}", e))?;
+    post_multipart("/api/v1/training/datasets/upload", &form_data).await
 }
 
 // ── dataset-scoped operations ────────────────────────────────────────────────
@@ -399,6 +426,19 @@ pub async fn capture_training_image(dataset_id: &str) -> Result<TrainingImageInf
         &format!("/api/v1/training/datasets/{}/capture", dataset_id),
         "POST",
         Some("{}"),
+    )
+    .await
+}
+
+/// Add an image file from the operator's computer to the dataset, unlabeled.
+/// The training-service stores it in the dataset's geometry like a capture.
+pub async fn upload_training_image(
+    dataset_id: &str,
+    file: web_sys::File,
+) -> Result<TrainingImageInfo, String> {
+    post_multipart(
+        &format!("/api/v1/training/datasets/{}/images", dataset_id),
+        &file_form(&file)?,
     )
     .await
 }

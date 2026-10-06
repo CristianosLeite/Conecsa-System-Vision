@@ -120,11 +120,17 @@ class SamService:
                 try:
                     self._process.terminate()
                     self._process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=5)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("SAM worker terminate failed: %s", exc)
+                except Exception as exc:  # noqa: BLE001 - a timeout included
+                    logger.warning("SAM worker did not terminate (%s); killing it", exc)
+                    try:
+                        self._process.kill()
+                        self._process.wait(timeout=5)
+                    except Exception:  # noqa: BLE001 - reported below
+                        logger.exception("SAM worker kill failed")
+                if self._process.poll() is None:
+                    # Still resident: keep the handle so the status stays
+                    # "loaded" and the gateway refuses the GPU to others.
+                    raise RuntimeError("SAM worker did not exit")
                 self._process = None
                 logger.info("SAM worker unloaded")
         self._publish_state()

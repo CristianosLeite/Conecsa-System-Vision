@@ -399,7 +399,7 @@ class TestCatalogCoverage:
         import os
         here = os.path.dirname(os.path.abspath(__file__))
         repo = os.path.abspath(os.path.join(here, os.pardir, os.pardir))
-        path = os.path.join(repo, "i18n", "hub-vision", "en.json")
+        path = os.path.join(repo, "shared", "i18n", "hub-vision", "en.json")
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)["audit"]["events"]
 

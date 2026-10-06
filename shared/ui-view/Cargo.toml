@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Conecsa
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "conecsa-ui-view"
+version = "2026.7.0"
+description = "Conecsa UI: zoomable image view (transform math, pointer and wheel gestures, viewport glue) and the page-zoom guard, shared by the device UI and the hub"
+license = "Apache-2.0"
+authors = ["Conecsa Automação"]
+edition = "2024"
+# Path dependency of two workspaces (the root one through hub-vision, the
+# standalone system-vision one); never on crates.io. hub-vision/about.toml's
+# `private.ignore` keeps it out of the hub's third-party notices.
+publish = false
+
+# Designed and developed by Cristiano Leite. https://github.com/CristianosLeite
+
+# No [workspace] table and no `workspace = true` inheritance on purpose: in the
+# monorepo this crate is a member of the root workspace, in the open-source
+# mirror and in the system-vision Docker image it is resolved as a plain path
+# dependency from system-vision's own workspace.
+
+# The DOM glue is wasm32-only; the math and the gesture decisions are plain
+# Rust, so a host `cargo test` compiles no dependencies at all.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+leptos = { version = "0.8.15", features = ["csr"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3.83", features = [
+    "AddEventListenerOptions",
+    "DomRect",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlDivElement",
+    "KeyboardEvent",
+    "MouseEvent",
+    "PointerEvent",
+    "ResizeObserver",
+    "WheelEvent",
+    "Window",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

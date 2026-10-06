@@ -10,7 +10,7 @@ _pt_onnx_converter). Unlike the converter, progress streams while it runs:
 one JSON line per epoch on stdout, then a final done/error line.
 
 Stdout contract (one JSON object per line, flushed):
-    {"epoch": 3, "total": 50, "metrics": {...}}     after each epoch
+    {"epoch": 3, "total": 50, "metrics": {...}}     after each epoch's validation
     {"stopping": true}                              early stop requested (SIGUSR1)
     {"done": true, "best": ".../weights/best.pt",
      "last": ".../weights/last.pt"}                 on success (last line)
@@ -39,6 +39,7 @@ a 20-image dataset) and force the file_system sharing strategy as a backstop.
 import argparse
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -116,26 +117,41 @@ def main() -> None:
 
         total = args.epochs
 
-        def on_epoch_end(trainer) -> None:
-            """On epoch end."""
-            metrics = {}
-            try:
-                metrics = {k: float(v) for k, v in (trainer.metrics or {}).items()}
-            except Exception:  # noqa: BLE001 - metrics are best-effort telemetry
-                pass
-            _emit({"epoch": int(trainer.epoch) + 1, "total": total, "metrics": metrics})
-
-        model.add_callback("on_train_epoch_end", on_epoch_end)
-
-        # On a graceful-stop request, flip ultralytics' own early-stop switch at
-        # the fit-epoch boundary (where it also evaluates `patience`); the run
+        # One line per epoch at the fit-epoch boundary, after validation: the
+        # train-epoch-end hook runs before validate(), so its trainer.metrics
+        # would still hold the previous epoch's validation. The keys are the
+        # ones ultralytics writes to results.csv (train/*, val/*, metrics/*).
+        # final_eval() fires the fit-epoch hook once more (best.pt validated at
+        # epoch+1) without a train epoch, so only a hook that follows a train
+        # epoch reports. On a graceful-stop request, also flip ultralytics' own
+        # early-stop switch here (where it evaluates `patience` too); the run
         # then finalizes validation + best.pt and returns normally.
+        trained = {"epoch": False}
+
+        def on_train_epoch_end(trainer) -> None:
+            """Mark that a train epoch ran, so the next fit-epoch hook reports."""
+            trained["epoch"] = True
+
         def on_fit_epoch_end(trainer) -> None:
-            """On fit epoch end."""
+            """Report the finished epoch, then honour a pending graceful stop."""
+            if trained["epoch"]:
+                trained["epoch"] = False
+                metrics = {}
+                try:
+                    losses = trainer.label_loss_items(trainer.tloss, prefix="train")
+                    # A diverged epoch yields NaN/inf, which json.dumps writes
+                    # as bare tokens that the browser's JSON parser rejects.
+                    metrics = {k: float(v)
+                               for k, v in {**losses, **(trainer.metrics or {})}.items()
+                               if math.isfinite(float(v))}
+                except Exception:  # noqa: BLE001 - metrics are best-effort telemetry
+                    pass
+                _emit({"epoch": int(trainer.epoch) + 1, "total": total, "metrics": metrics})
             if _stop_requested and not getattr(trainer, "stop", False):
                 trainer.stop = True
                 _emit({"stopping": True})
 
+        model.add_callback("on_train_epoch_end", on_train_epoch_end)
         model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
 
         results = model.train(

@@ -4,6 +4,7 @@
 
 """Unit tests for the model/conversion gRPC message -> JSON mapper."""
 from types import SimpleNamespace
+from typing import Any, Dict
 
 import pytest
 from gateway.controllers.models import (
@@ -12,6 +13,7 @@ from gateway.controllers.models import (
     _task_from_form,
     _train_geometry_from_form,
 )
+from gateway.grpc_clients import inf
 
 
 def _job(**kw):
@@ -65,16 +67,24 @@ class TestTrainGeometryForm:
 
 class TestModelDict:
     def _model(self, **kw):
-        base = dict(name="m.engine", size=10, modified=1.5, is_active=True,
-                    has_weights=False, task="detect")
+        base: Dict[str, Any] = dict(name="m.engine", size=10, modified=1.5, is_active=True,
+                                    has_weights=False, task="detect")
         base.update(kw)
-        return SimpleNamespace(**base)
+        return inf.ModelInfo(**base)
 
     def test_relays_every_field(self):
         assert _model_dict(self._model()) == {
             "name": "m.engine", "size": 10, "modified": 1.5, "is_active": True,
-            "has_weights": False, "task": "detect",
+            "has_weights": False, "task": "detect", "map50_95": None, "accuracy_top1": None,
         }
+
+    def test_relays_recorded_scores_rounded(self):
+        # The proto fields are float32: 0.62 arrives as 0.6200000047...
+        d = _model_dict(self._model(map50_95=0.62, accuracy_top1=0.9))
+        assert (d["map50_95"], d["accuracy_top1"]) == (0.62, 0.9)
+
+    def test_a_zero_score_is_not_an_unset_one(self):
+        assert _model_dict(self._model(map50_95=0.0))["map50_95"] == 0.0
 
     def test_an_empty_task_is_detect(self):
         # An inference-service that predates application types sends none.

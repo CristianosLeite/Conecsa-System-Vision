@@ -283,9 +283,10 @@ class SegmentPostprocessor:
         # as duplicates of a better row in this tile never get a mask, and
         # the per-tile cap counts distinct objects. Candidates are in
         # score order, so sorted indices keep the best first.
-        keep = nms_indices([c[2] for c in candidates], [float(conf[c[1]]) for c in candidates],
-                           self.config.OVERLAY_THRESHOLD)
-        keep = sorted(int(k) for k in keep)[:self.caps()[1]]
+        survivors = nms_indices([c[2] for c in candidates],
+                                [float(conf[c[1]]) for c in candidates],
+                                self.config.OVERLAY_THRESHOLD)
+        keep = sorted(int(k) for k in survivors)[:self.caps()[1]]
 
         instances = []
         for box_in, row, (x1, y1, x2, y2) in (candidates[k] for k in keep):

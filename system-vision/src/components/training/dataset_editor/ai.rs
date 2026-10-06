@@ -13,8 +13,11 @@ use crate::api::{self, LabelPolygon};
 use crate::i18n::*;
 use crate::models::Task;
 
-use super::actions::{persist_labels, reload_images, write_labels};
-use super::logic::{self, ClassSlot, SamTarget};
+use super::actions::{
+    clear_labels, queue_labels, redo_labels, step_image, undo_labels,
+};
+use super::label_queue::{LabelOp, LabelWrite};
+use super::logic::{self, ClassSlot, ImageStep, SamTarget};
 use super::state::{AiState, Assistant, EditorState, I18n};
 
 // ── shared async steps ────────────────────────────────────────────────────────
@@ -351,10 +354,10 @@ pub(super) fn accept(st: EditorState, i18n: I18n) -> Callback<()> {
                 }));
             }
 
-            // Another image was opened while a class was created: the editor
-            // holds that image's boxes now, and the switch dropped these
-            // suggestions with it.
-            if !is_open(st, &image_id) {
+            // Another image was opened while a class was created (or this
+            // one's labels are not in yet): the editor does not hold this
+            // image's labels, and the switch dropped these suggestions.
+            if !st.images.holds_labels_of(&image_id) {
                 return;
             }
             if st.task == Task::Segment {
@@ -371,17 +374,34 @@ pub(super) fn accept(st: EditorState, i18n: I18n) -> Callback<()> {
                         });
                     }
                 }
-                let _ = st.images.polygons.try_set(polygons);
+                let _ = st.images.polygons.try_set(polygons.clone());
                 ai.clear_suggestions();
-                let bs = st.images.boxes.try_get_untracked().unwrap_or_default();
-                persist_labels(st, locale, &ds, &image_id, &bs, false).await;
+                st.images.record_history();
+                let save = LabelWrite {
+                    image_id,
+                    boxes: st.images.boxes.try_get_untracked().unwrap_or_default(),
+                    polygons,
+                    image_class: st.images.image_class.try_get_untracked().flatten(),
+                    notify: false,
+                    epoch: st.label_queue.epoch(),
+                };
+                queue_labels(st, locale, LabelOp::Write(save));
                 return;
             }
             let mut bs = st.images.boxes.try_get_untracked().unwrap_or_default();
             bs.extend(tagged.into_iter().map(|(b, _)| b));
             let _ = st.images.boxes.try_set(bs.clone());
             ai.clear_suggestions();
-            persist_labels(st, locale, &ds, &image_id, &bs, false).await;
+            st.images.record_history();
+            let save = LabelWrite {
+                image_id,
+                boxes: bs,
+                polygons: st.images.polygons.try_get_untracked().unwrap_or_default(),
+                image_class: st.images.image_class.try_get_untracked().flatten(),
+                notify: false,
+                epoch: st.label_queue.epoch(),
+            };
+            queue_labels(st, locale, LabelOp::Write(save));
         });
     })
 }
@@ -416,14 +436,17 @@ pub(super) fn accept_class(
                 pick_class.run(Some(class_id));
                 return;
             }
-            match write_labels(st, &ds, &image_id, &[], &[], Some(class_id)).await {
-                Ok(()) => {
-                    let _ = reload_images(st, &ds).await;
-                }
-                Err(e) => st
-                    .notices
-                    .error(td_string!(locale, training::failed_save_labels, err = e)),
-            }
+            // Another image is open: queue the class for this one (behind any
+            // save of it still pending).
+            let save = LabelWrite {
+                image_id,
+                boxes: Vec::new(),
+                polygons: Vec::new(),
+                image_class: Some(class_id),
+                notify: false,
+                epoch: st.label_queue.epoch(),
+            };
+            queue_labels(st, locale, LabelOp::Write(save));
         });
     })
 }
@@ -464,10 +487,23 @@ pub(crate) struct LabelActions {
     pub(crate) on_need_class: Callback<()>,
     /// Fired when a drawn or edited polygon ring crosses itself.
     pub(crate) on_refused: Callback<()>,
+    /// Step the open image's labels back / forward through the edit history.
+    pub(crate) on_undo: Callback<()>,
+    pub(crate) on_redo: Callback<()>,
+    /// Remove every label of the open image (one undoable edit).
+    pub(crate) on_clear_labels: Callback<()>,
+    /// Open another image of the gallery (arrow keys, Home / End, PageUp /
+    /// PageDown) through the gallery's own select callback.
+    pub(crate) on_step_image: Callback<ImageStep>,
 }
 
 impl LabelActions {
-    pub(super) fn new(st: EditorState, i18n: I18n, on_save: Callback<bool>) -> Self {
+    pub(super) fn new(
+        st: EditorState,
+        i18n: I18n,
+        on_save: Callback<bool>,
+        on_select: Callback<String>,
+    ) -> Self {
         Self {
             on_assistant_change: assistant_change(st, i18n),
             on_sam_suggest: sam_suggest(st, i18n),
@@ -477,6 +513,10 @@ impl LabelActions {
             on_save,
             on_need_class: need_class(st, i18n),
             on_refused: refused(st, i18n),
+            on_undo: undo_labels(st, i18n),
+            on_redo: redo_labels(st, i18n),
+            on_clear_labels: clear_labels(st, on_save),
+            on_step_image: step_image(st, on_select),
         }
     }
 }

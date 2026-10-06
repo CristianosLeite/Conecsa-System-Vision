@@ -30,6 +30,7 @@ subprocess, no base or federated weights and nothing stashed.
 """
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -39,7 +40,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import requests
 from conecsa_common.tasks import FACE
@@ -59,6 +60,20 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL = {"done", "failed", "canceled"}
 
+# Per-epoch history keeps only what the training screen charts: the losses
+# (train/* and val/*) and the headline quality metric of each task.
+_HISTORY_PREFIXES = ("train/", "val/", "metrics/mAP50-95", "metrics/accuracy_top1")
+
+
+def history_entry(epoch: int, metrics: Dict) -> Dict:
+    """One ``history`` row: the epoch plus its charted metrics, rounded."""
+    entry: Dict = {"epoch": epoch}
+    for key, value in metrics.items():
+        if (key.startswith(_HISTORY_PREFIXES) and isinstance(value, (int, float))
+                and math.isfinite(value)):
+            entry[key] = round(float(value), 5)
+    return entry
+
 
 @dataclass
 class TrainingJob:
@@ -74,6 +89,8 @@ class TrainingJob:
     model_name: str = ""
     conversion_job_id: str = ""
     metrics: Dict = field(default_factory=dict)
+    # One ``history_entry`` per finished epoch, oldest first (charted by the UI).
+    history: List[Dict] = field(default_factory=list)
     started_at: float = 0.0
     dataset_id: str = ""
     patience: int = 0
@@ -126,7 +143,7 @@ class TrainingService:
     def get_job(self) -> TrainingJob:
         """Get job."""
         with self._lock:
-            return TrainingJob(**vars(self._job))
+            return TrainingJob(**{**vars(self._job), "history": list(self._job.history)})
 
     def is_active(self) -> bool:
         """Is active."""
@@ -235,8 +252,18 @@ class TrainingService:
         # SAM and training never share the GPU (8GB budget). The TensorRT
         # labeling engine lives in the inference-service, whose runtime the
         # gateway releases before every run.
+        # A SAM worker that will not exit keeps its memory: fail this job (and
+        # free its dataset) rather than train on top of it.
         if self._sam is not None:
-            self._sam.unload()
+            try:
+                self._sam.unload()
+            except Exception as exc:
+                with self._lock:
+                    self._job_dataset = None
+                self._registry.release(dataset)
+                self._set(status="failed", error=str(exc), progress=0,
+                          message="Training failed: SAM3 could not be unloaded")
+                raise DatasetError(f"SAM3 could not be unloaded: {exc}") from exc
 
         threading.Thread(
             target=self._run, args=(job_id, epochs, batch, patience, weights_path),
@@ -480,8 +507,11 @@ class TrainingService:
             elif payload.get("epoch"):
                 epoch = int(payload["epoch"])
                 progress = 5 + int(epoch / max(epochs, 1) * 90)
+                metrics = payload.get("metrics") or {}
+                with self._lock:
+                    history = [*self._job.history, history_entry(epoch, metrics)]
                 self._set(epoch=epoch, progress=min(progress, 95),
-                          metrics=payload.get("metrics") or {},
+                          metrics=metrics, history=history[-max(epochs, 1):],
                           message=f"Epoch {epoch}/{epochs}")
         return best_path, last_path
 
@@ -531,7 +561,9 @@ class TrainingService:
         ride along, so the model's settings sidecar records what it was
         trained on and the inference-service checks the task against the
         exported graph. A face package (``suffix=".faces"``) declares only
-        ``task=face`` and starts the gallery build instead.
+        ``task=face`` and starts the gallery build instead. The job's id rides
+        in ``X-Conecsa-Training-Job``, the gateway's proof that the upload is
+        this job's result.
         """
         job = self.get_job()
         task = job.task or "detect"
@@ -550,6 +582,9 @@ class TrainingService:
                 url,
                 files={"file": (f"{job.model_name}{suffix}", f)},
                 data=data,
+                # Names this job's own result: the gateway lets it past the
+                # GPU block the running job otherwise puts on conversions.
+                headers={"X-Conecsa-Training-Job": job.job_id},
                 timeout=120,
             )
         if resp.status_code not in (200, 202):

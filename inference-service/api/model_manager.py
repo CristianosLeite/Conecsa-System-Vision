@@ -311,8 +311,8 @@ class ModelManager:
         # entry is an interpreter backed by its own worker subprocess / CUDA
         # context, so N pipeline threads calling run_inference run in parallel.
         # ``_pool`` stays None (single-context behavior) unless TENSORRT_CONTEXTS>1.
-        self._extra_interpreters = []
-        self._pool = None
+        self._extra_interpreters: List[Interpreter] = []
+        self._pool: Optional["queue.Queue[Interpreter]"] = None
 
         self._configure_preprocessing(task)
 
@@ -518,7 +518,7 @@ class ModelManager:
         """
         return self._tiling_mode == "grid" and self._task in _TILED_TASKS
 
-    def preprocess_tiles(self, image_original):
+    def preprocess_tiles(self, image_original, regions=None):
         """Preprocess a frame into one or more model inputs.
 
         With ``TILING_MODE=off`` this is exactly ``preprocess_image`` wrapped
@@ -531,7 +531,24 @@ class ModelManager:
         Returns ``(tensors, metas)`` — parallel lists of input tensors and
         :class:`TileMeta` entries the detector uses to map corners back into
         frame space.
+
+        ``regions`` (rectangles with ``x0``/``y0``/``width``/``height``) are
+        the cameras of an IP camera mosaic: each one is preprocessed as if it
+        were the whole frame — tiled by the same rule, or as one input — and
+        its metas are offset to its place in the mosaic. A camera is never cut
+        by another camera's tile, and an empty list yields no input at all.
         """
+        if regions is not None:
+            tensors, metas = [], []
+            for region in regions:
+                crop = image_original[region.y0:region.y0 + region.height,
+                                      region.x0:region.x0 + region.width]
+                crop_tensors, crop_metas = self.preprocess_tiles(crop)
+                tensors.extend(crop_tensors)
+                metas.extend(meta._replace(ox=meta.ox + region.x0, oy=meta.oy + region.y0)
+                             for meta in crop_metas)
+            return tensors, metas
+
         frame_h, frame_w = image_original.shape[:2]
         if not self.tiling_active:
             if self._preprocess_mode == PREPROCESS_FACE:

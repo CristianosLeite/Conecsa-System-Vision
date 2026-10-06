@@ -4,8 +4,10 @@
 
 """GET/PUT /api/v1/application and the application gates on /start and datasets.
 
-The switch must refuse when the GPU is busy (409) and — unlike /start — also
-when a busy probe cannot answer (503, fail-closed). Refusals from the
+The switch goes through the shared GPU release (``gateway.gpu``,
+``Purpose.APPLICATION``): it must refuse while detection, a training or a
+conversion holds the GPU (409) and — unlike /start — also when a busy probe
+cannot answer (503, fail-closed). Refusals from the
 inference-service keep their meaning: FAILED_PRECONDITION → 409,
 INVALID_ARGUMENT → 400, INTERNAL (stop or write failure) → 500.
 """
@@ -15,9 +17,9 @@ import grpc
 import inference_pb2 as inf_pb
 import pytest
 from flask import Flask
+from gateway import gpu
 from gateway.controllers import application, detection
 from gateway.training import datasets
-from gateway.training import helpers as training_helpers
 
 
 class FakeRpcError(grpc.RpcError):
@@ -37,9 +39,16 @@ def app():
     return Flask(__name__)
 
 
-def _wire(monkeypatch, *, task="", job_status="idle", conversions=(), training_raises=False,
-          conversions_raise=False, set_raises=None):
+def _wire(monkeypatch, *, task="", job_status="idle", busy=inf_pb.GPU_HOLDER_NONE,
+          training_raises=False, free_raises=None, set_raises=None, conversions=(),
+          running=False):
     calls = []
+
+    def free_gpu(req):
+        calls.append(("free", req.stop_detection))
+        if free_raises is not None:
+            raise free_raises
+        return inf_pb.FreeGpuResult(success=busy == inf_pb.GPU_HOLDER_NONE, busy=busy)
 
     def get_application(_):
         return inf_pb.ApplicationInfo(task=task, supported_tasks=["detect"], migrated=False)
@@ -55,18 +64,16 @@ def _wire(monkeypatch, *, task="", job_status="idle", conversions=(), training_r
             raise FakeRpcError()
         return SimpleNamespace(status=job_status)
 
-    def list_conversions(_):
-        if conversions_raise:
-            raise FakeRpcError()
-        return SimpleNamespace(jobs=[SimpleNamespace(status=s) for s in conversions])
-
     fake = SimpleNamespace(
         management=SimpleNamespace(GetApplication=get_application,
-                                   SetApplication=set_application),
-        training=SimpleNamespace(GetTraining=get_training),
-        model=SimpleNamespace(ListConversions=list_conversions))
+                                   SetApplication=set_application, FreeGpu=free_gpu),
+        training=SimpleNamespace(GetTraining=get_training,
+                                 GetSamStatus=lambda _: SimpleNamespace(loaded=False)),
+        model=SimpleNamespace(ListConversions=lambda _: SimpleNamespace(
+            jobs=[SimpleNamespace(status=s) for s in conversions])),
+        detection=SimpleNamespace(GetStatus=lambda _: SimpleNamespace(is_running=running)))
     monkeypatch.setattr(application, "clients", fake)
-    monkeypatch.setattr(training_helpers, "clients", fake)
+    monkeypatch.setattr(gpu, "clients", fake)
     return calls
 
 
@@ -90,7 +97,14 @@ class TestPut:
         resp = _put(app, {"task": "detect"})
         assert resp.status_code == 200
         assert resp.get_json()["task"] == "detect"
-        assert calls == [("set", "detect")]
+        # The GPU is freed first, without stopping detection.
+        assert calls == [("free", False), ("set", "detect")]
+
+    def test_the_current_application_needs_no_gpu(self, app, monkeypatch):
+        calls = _wire(monkeypatch, task="detect", busy=inf_pb.GPU_HOLDER_DETECTION)
+        resp = _put(app, {"task": "detect"})
+        assert resp.status_code == 200 and resp.get_json()["task"] == "detect"
+        assert calls == []
 
     @pytest.mark.parametrize("body", [None, {}, {"task": ""}, {"task": 3}, ["detect"]])
     def test_a_task_is_required(self, app, monkeypatch, body):
@@ -98,26 +112,74 @@ class TestPut:
         assert _put(app, body).status_code == 400
         assert calls == []
 
-    @pytest.mark.parametrize("status", training_helpers.ACTIVE_JOB_STATUSES)
+    @pytest.mark.parametrize("status", gpu.ACTIVE_JOB_STATUSES)
     def test_refused_while_training(self, app, monkeypatch, status):
         calls = _wire(monkeypatch, job_status=status)
         resp = _put(app, {"task": "detect"})
-        assert resp.status_code == 409 and "training" in resp.get_json()["error"]
+        assert resp.status_code == 409
+        assert resp.get_json() == {"error": gpu.BUSY_MESSAGES[gpu.TRAINING],
+                                   "gpu_busy": "training"}
         assert calls == []
 
-    def test_refused_while_converting(self, app, monkeypatch):
+    @pytest.mark.parametrize("holder,name", [
+        (inf_pb.GPU_HOLDER_DETECTION, "detection"),
+        (inf_pb.GPU_HOLDER_CONVERSION, "conversion"),
+    ])
+    def test_refused_while_the_inference_service_holds_the_gpu(self, app, monkeypatch,
+                                                                holder, name):
+        calls = _wire(monkeypatch, busy=holder)
+        resp = _put(app, {"task": "detect"})
+        assert resp.status_code == 409
+        assert resp.get_json()["gpu_busy"] == name
+        assert calls == [("free", False)]
+
+    def test_a_running_conversion_refuses_before_anything_is_freed(self, app, monkeypatch):
         calls = _wire(monkeypatch, conversions=("converting_to_engine",))
         resp = _put(app, {"task": "detect"})
-        assert resp.status_code == 409 and "conversion" in resp.get_json()["error"]
+        assert resp.status_code == 409 and resp.get_json()["gpu_busy"] == "conversion"
         assert calls == []
 
-    @pytest.mark.parametrize("kw", [{"training_raises": True}, {"conversions_raise": True}])
-    def test_an_unanswered_probe_fails_closed(self, app, monkeypatch, kw):
-        calls = _wire(monkeypatch, **kw)
+    def test_a_task_the_device_cannot_run_frees_nothing(self, app, monkeypatch):
+        # SetApplication refuses it before touching anything; the gateway must
+        # not have released the GPU first.
+        calls = _wire(monkeypatch, busy=inf_pb.GPU_HOLDER_DETECTION,
+                      set_raises=FakeRpcError(grpc.StatusCode.FAILED_PRECONDITION, "not available"))
+        resp = _put(app, {"task": "segment"})
+        assert resp.status_code == 409 and resp.get_json()["error"] == "not available"
+        assert calls == [("set", "segment")]
+
+    def test_a_running_detection_refuses_before_anything_is_freed(self, app, monkeypatch):
+        calls = _wire(monkeypatch, running=True)
+        resp = _put(app, {"task": "detect"})
+        assert resp.status_code == 409 and resp.get_json()["gpu_busy"] == "detection"
+        assert calls == []
+
+    def test_the_current_task_is_read_under_the_gpu_lock(self, app, monkeypatch):
+        from gateway import gpu as gpu_module
+
+        seen = []
+        _wire(monkeypatch, task="detect")
+        application.clients.management.GetApplication = (  # pyright: ignore[reportAttributeAccessIssue]
+            lambda _: seen.append(gpu_module._GPU_LOCK.locked())
+            or inf_pb.ApplicationInfo(task="detect", supported_tasks=["detect"]))
+        assert _put(app, {"task": "detect"}).status_code == 200
+        assert seen == [True]
+
+    def test_detection_is_asked_to_stop_first(self, app, monkeypatch):
+        _wire(monkeypatch, busy=inf_pb.GPU_HOLDER_DETECTION)
+        assert "stop it first" in _put(app, {"task": "detect"}).get_json()["error"]
+
+    def test_an_unanswered_training_probe_fails_closed(self, app, monkeypatch):
+        calls = _wire(monkeypatch, training_raises=True)
         resp = _put(app, {"task": "detect"})
         assert resp.status_code == 503
         assert "Cannot verify" in resp.get_json()["error"]
         assert calls == []
+
+    def test_an_unreachable_inference_service_changes_nothing(self, app, monkeypatch):
+        calls = _wire(monkeypatch, free_raises=FakeRpcError())
+        assert _put(app, {"task": "detect"}).status_code == 503
+        assert calls == [("free", False)]
 
     @pytest.mark.parametrize("code,status", [
         (grpc.StatusCode.FAILED_PRECONDITION, 409),
@@ -160,7 +222,7 @@ class TestStartGate:
             model=SimpleNamespace(ListConversions=lambda _: SimpleNamespace(jobs=[]),
                                   GetLabelModelStatus=lambda _: SimpleNamespace(loaded=False)))
         monkeypatch.setattr(detection, "clients", fake)
-        monkeypatch.setattr(training_helpers, "clients", fake)
+        monkeypatch.setattr(gpu, "clients", fake)
         monkeypatch.setattr(detection, "_publish_if_success", lambda resp, *a, **kw: resp)
         return started
 

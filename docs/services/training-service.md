@@ -109,7 +109,18 @@ control plane.
   (`image_class`) instead of boxes. This is
   how the hub feeds a record's clean frame back into a dataset for
   retraining; the operator only adjusts the class in the label editor when
-  the model got it wrong.
+  the model got it wrong. The editor zooms the image up to 8× (Ctrl+wheel or
+  a pinch about the cursor, the zoom buttons, `+`/`-`/`0` keys) and pans it
+  (wheel, middle-button or Space+drag, two fingers); labels are stored
+  normalized, so the zoom never changes what is saved. Every completed edit
+  is one undo step (Ctrl+Z / Ctrl+Y or the undo / redo buttons, which appear
+  once there is something to undo; the history is per open image) and
+  **Clear labels** (the eraser button, shown while the image has labels)
+  removes the image's labels as one undoable step. Selecting a label reveals
+  its class list and delete button in the editor's tool strip. The arrow
+  keys nudge the selected box, ring or vertex by one
+  screen pixel (ten with Shift), saved once on release; with nothing selected
+  they step to the previous / next image (Home / End, PageUp / PageDown too).
 - **SAM3-assisted labeling** — an on-demand SAM3 worker
   (`SAM3_CHECKPOINT`, HF-gated and baked into the image at build time) turns a
   user prompt into boxes and, for each, its mask as normalized rings (a
@@ -141,7 +152,11 @@ control plane.
   `initial_weights_id`.
 - **Training job** — one ultralytics run at a time, executed in a child process
   that streams one JSON line per epoch; the service folds those into the job
-  state and publishes `training_progress` events. On success the resulting
+  state and publishes `training_progress` events. Each line is written after
+  the epoch's validation and carries the ultralytics `results.csv` keys
+  (`train/*_loss`, `val/*_loss`, `metrics/mAP50-95(B)` …); the job keeps one
+  row per epoch as `history` (losses plus the task's headline metric), which
+  the device's training screen charts. On success the resulting
   `best.pt` is uploaded through the api-gateway's model-upload route, which renames it to the user-chosen model name and starts
   the `pt → onnx → engine` conversion on the inference-service — the same path a
   manual upload takes.
@@ -192,19 +207,93 @@ per-device mTLS channel. The service-side building blocks:
   cast back, non-float buffers kept from the first checkpoint, optimizer state
   dropped. CPU-only, so it never competes with a GPU training job.
 
-## GPU handover
+## GPU sharing
 
-Training and inference share a single Jetson GPU. Entering training mode hands
-the GPU over from the inference runtime (`ReleaseRuntime` / `ResumeRuntime` on the
-inference-service), and exiting resumes it. The gateway exposes this as
-`/api/v1/training/enter` and `/api/v1/training/exit`. While a training job is
-active the GPU stays with the trainer: `POST /api/v1/start` answers `409`
-(the device UI shows the Start button disabled as "Training model…"), and a
-`/training/exit` neither resumes detection nor ends the handover — leaving the
-training page mid-run keeps inference stopped until the job ends and its model
-conversion finishes. Exiting training mode ends the handover even when
-detection is left stopped for the model conversion, and so does an explicit
-Start; until then the application type cannot change.
+Training and inference share a single Jetson GPU (8 GB, shared with the CPU),
+which cannot hold two heavy workloads at once. Every route that loads
+something onto it first goes through one shared release in the gateway
+(`gateway/gpu.py`, `acquire_gpu`). The release refuses in exactly three states:
+
+- detection is running;
+- a training job is in progress (`preparing`, `training`, `uploading`);
+- a model conversion is in progress (`pending`, `converting_to_onnx`,
+  `converting_to_engine`).
+
+Every other holder is evicted for the caller: the SAM3 checkpoint, the
+labeling engine, idle TensorRT workers, and a training handover left behind by
+a training page that was closed without exiting. On the inference side the
+release is `ManagementControl.FreeGpu`. A job's own result upload (its
+`best.pt` or `.faces`, sent while the job is `uploading`) is not blocked by
+that job: the training-service names the job in an `X-Conecsa-Training-Job`
+header, which nginx clears on every request it relays and the gateway ignores
+on a hub-verified one. A refusal answers `409` with
+`{"error", "gpu_busy": "detection" | "training" | "conversion"}`; `503` when a
+check that must answer cannot reach the training or inference service.
+
+GPU requests run one at a time. The gateway holds a single lock from a
+request's checks through its own call: the Start, the model select or upload,
+the SAM3 or labeling-engine load, a SAM3 segment, a labeling-engine detection,
+the training start, the application switch, and an exit that resumes
+detection. No other GPU request can land in between.
+A request that cannot get the lock within 15 seconds answers `503` ("Another
+GPU operation is in progress; try again in a moment."), for example a Start
+during a SAM3 cold load. A training start that fails outside training mode
+undoes the handover it took, restoring detection if it was running. Leaving
+training mode with a resume first unloads SAM3 and the labeling engine,
+verified: if either stays loaded, the exit fails instead of resuming detection
+beside it (the orphan watchdog retries).
+
+The one GPU consumer outside the gateway is the inference-service's own boot,
+which restores the selected model and starts detection. It asks the
+training-service first (`TRAINING_GRPC_ADDR`, two-second deadline): during a
+job it selects the model without loading it and takes the training handover
+over, so leaving training mode resumes detection. A training-service that does
+not answer (a whole-device boot) counts as no job.
+
+The checks are not only made up front. A conversion and a running detection
+are probed before anything is evicted, so a refused request keeps its
+assistant. Model select, a prebuilt engine upload and Start check again for a
+conversion inside the inference-service, under the same lock a conversion
+takes when it is queued. A build that starts after the gateway's check is
+therefore still refused (`409`). A task the device cannot run is refused
+without freeing anything.
+
+Eviction is verified, not best-effort. An assistant whose unload fails, is
+refused, or still reports loaded afterwards refuses the caller (`500`, with
+`gpu_busy: null`), and so does a TensorRT worker or SAM3 worker that survives
+terminate and kill. A SAM3 status that cannot be read refuses too (`503`); the
+one exception is a training-service nobody answers on at all (`UNAVAILABLE`)
+for the purposes that tolerate an unreachable training-service (Start, model
+select, uploads, entering training): the SAM3 worker is a child process of
+that container and is gone with it.
+
+| Route | Refused while | Frees |
+|---|---|---|
+| `PUT /api/v1/application` | detection, training, conversion | everything |
+| `POST /api/v1/start` | training, conversion | SAM3 and the labeling engine (detection keeps its runtime) |
+| `POST /api/v1/training/enter`, `/training/train` | conversion | everything, stopping detection |
+| `POST /api/v1/training/sam/load` (and a segment that loads SAM3) | detection, training, conversion | everything but SAM3 |
+| `POST /api/v1/training/label-model/load` | detection, training, conversion | everything |
+| `POST /api/v1/model/select` | training, conversion | SAM3 and the labeling engine (a running detection adopts the model) |
+| `POST /api/v1/model` of a `.engine`/`.plan` (activated on arrival) | training, conversion | SAM3 and the labeling engine |
+| `POST /api/v1/model` of a `.pt`/`.onnx`/`.faces` (converted) | training — except the job's own result, `<model_name>.pt` or `.faces` sent while it is `uploading` | SAM3 and the labeling engine |
+
+Changing the application type and loading an assistant never stop detection:
+stop it first. Entering training mode does, because the device UI asks for
+that confirmation.
+
+Entering training mode hands the GPU over: one `FreeGpu` call with
+`stop_detection` and `begin_handover` stops detection, frees the GPU and marks
+the handover under a single inference-side lock, so no Start or conversion can
+land in between. Exiting resumes detection (`ResumeRuntime`). The
+gateway exposes this as `/api/v1/training/enter` and `/api/v1/training/exit`.
+While a training job is active the GPU stays with the trainer:
+`POST /api/v1/start` answers `409` (the device UI shows the Start button
+disabled as "Training model…"), and a `/training/exit` does not resume
+detection — leaving the training page mid-run keeps inference stopped until
+the job ends and its model conversion finishes. The handover never locks the
+device: the next GPU consumer's release ends it, as do exiting training mode
+and an explicit Start.
 
 !!! note "Sizing for the Orin Nano 8 GB"
     `TRAIN_BATCH` defaults to 4 and `TRAIN_WORKERS` to 0 (single-process

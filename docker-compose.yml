@@ -30,7 +30,8 @@ services:
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket  # systemd-networkd D-Bus
       # Clock floor shared with the host's conecsa-fake-hwclock units: the agent
       # rewrites it whenever it accepts a time from the hub, so the acquired
-      # time survives a power cut (this board has no RTC battery).
+      # time survives a power cut (this board has no RTC battery). Also holds
+      # access-point.json, so an access point that was on survives a reboot.
       - /var/lib/conecsa:/var/lib/conecsa
       # GPIO: the agent owns the pins. Mounts the SHM channel shared with
       # inference-service and the host Jetson.GPIO library.
@@ -56,6 +57,10 @@ services:
       dockerfile: webcam-server/Dockerfile.webcam-server
     container_name: conecsa-webcam-server
     ipc: shareable
+    # /dev/shm of the shared IPC namespace. Docker's 64 MB default holds the
+    # main ring (2 x 16 MB slots) but not four IP camera rings next to it
+    # (2 x 1920x1080x3 each, ~50 MB): a full tmpfs used to SIGBUS the server.
+    shm_size: 256m
     environment:
       - CAMERA_INDEX=0
       - CAPTURE_WIDTH=2560
@@ -309,7 +314,7 @@ services:
       - GATEWAY_PORT=5000
       # Device software version, surfaced on /api/v1/status + /api/v1/health for
       # the conecsa-hub-vision hub to display.
-      - DEVICE_VERSION=2026.6-LTS
+      - DEVICE_VERSION=2026.7-LTS
       # Thread-per-connection: above the worst-case concurrent MJPEG + SSE
       # streams (per web tab: processed video + unified SSE; plus Node-RED).
       - WAITRESS_THREADS=32

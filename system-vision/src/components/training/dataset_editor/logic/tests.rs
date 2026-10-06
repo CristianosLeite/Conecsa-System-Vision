@@ -326,3 +326,42 @@ fn an_accepted_suggestion_keeps_its_mask_or_promotes_its_box() {
     assert_eq!((promoted.len(), promoted[0].len()), (1, 4));
     assert_eq!(suggestion_rings(&b, Some(&Vec::new())), promoted);
 }
+
+// ── neighbor_image ───────────────────────────────────────────────────────────
+
+fn images(ids: &[&str]) -> Vec<TrainingImageInfo> {
+    let items: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| serde_json::json!({"image_id": id, "created_at": 0.0, "labeled": false, "box_count": 0}))
+        .collect();
+    serde_json::from_value(serde_json::Value::Array(items)).unwrap()
+}
+
+#[wasm_bindgen_test]
+fn arrows_step_through_the_gallery_without_wrapping() {
+    let list = images(&["a", "b", "c"]);
+    assert_eq!(neighbor_image(&list, Some("b"), ImageStep::Previous), Some("a".into()));
+    assert_eq!(neighbor_image(&list, Some("b"), ImageStep::Next), Some("c".into()));
+    assert_eq!(neighbor_image(&list, Some("a"), ImageStep::Previous), None);
+    assert_eq!(neighbor_image(&list, Some("c"), ImageStep::Next), None);
+}
+
+#[wasm_bindgen_test]
+fn home_and_end_jump_to_the_ends() {
+    let list = images(&["a", "b", "c"]);
+    assert_eq!(neighbor_image(&list, Some("b"), ImageStep::First), Some("a".into()));
+    assert_eq!(neighbor_image(&list, Some("b"), ImageStep::Last), Some("c".into()));
+    assert_eq!(neighbor_image(&list, Some("a"), ImageStep::First), None);
+    assert_eq!(neighbor_image(&list, Some("c"), ImageStep::Last), None);
+}
+
+#[wasm_bindgen_test]
+fn with_nothing_open_a_step_opens_an_end() {
+    let list = images(&["a", "b", "c"]);
+    assert_eq!(neighbor_image(&list, None, ImageStep::Previous), Some("a".into()));
+    assert_eq!(neighbor_image(&list, None, ImageStep::Next), Some("c".into()));
+    // A deleted image is no longer in the list: same as nothing open.
+    assert_eq!(neighbor_image(&list, Some("zz"), ImageStep::Next), Some("c".into()));
+    assert_eq!(neighbor_image(&[], Some("a"), ImageStep::Next), None);
+    assert_eq!(neighbor_image(&[], None, ImageStep::First), None);
+}

@@ -10,7 +10,7 @@
 # (IDEs, mkdocstrings/griffe, linters) resolve the `agent` and `shm` packages.
 [project]
 name = "conecsa-os"
-version = "2026.6-LTS"
+version = "2026.7-LTS"
 description = "Base CUDA/ML image and privileged hardware gRPC agent (network/Wi-Fi/GPIO/metrics) + shared-memory ring helpers."
 requires-python = ">=3.10"
 license = "AGPL-3.0-only"

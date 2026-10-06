@@ -2,24 +2,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Unit tests for the 3D-camera detection used to gate the stereo overlay
-//! (headless browser).
-use super::*;
+//! Unit tests for the Camera Settings form helpers (headless browser).
 use wasm_bindgen_test::*;
-
-#[wasm_bindgen_test]
-fn recognises_a_3d_camera_by_name() {
-    assert!(is_stereo_camera("3D USB Camera"));
-    assert!(is_stereo_camera("3d usb camera"));
-    assert!(is_stereo_camera("USB 3D Webcam: USB 3D Webcam"));
-}
-
-#[wasm_bindgen_test]
-fn ordinary_cameras_are_not_3d() {
-    assert!(!is_stereo_camera("C270 HD WEBCAM"));
-    assert!(!is_stereo_camera("video0"));
-    assert!(!is_stereo_camera(""));
-}
 
 // ── remote camera form ────────────────────────────────────────────────────────
 
@@ -86,7 +70,6 @@ fn ap(active: bool, stations: Vec<ApStation>) -> ApStatus {
         address: if active { "10.98.76.1".into() } else { String::new() },
         prefix: if active { 24 } else { 0 },
         stations,
-        join_deadline_remaining_secs: 0,
         wired_ready: true,
         message: String::new(),
         channels: vec![36, 40, 44],
@@ -126,4 +109,136 @@ fn the_one_joined_remote_camera_with_a_lease_is_suggested() {
         None,
         "a stale station list on an inactive access point suggests nothing",
     );
+}
+
+// ── IP cameras ───────────────────────────────────────────────────────────────
+
+use super::{
+    mosaic_changes, mosaic_grid, parse_ip_form, rtsp_url_has_credentials, IpCameraDraft,
+    IpFieldError, IpFormError,
+};
+
+fn ip_row(id: Option<&str>, url: &str) -> IpCameraDraft {
+    IpCameraDraft {
+        id: id.map(str::to_string),
+        name: " Dock 1 ".into(),
+        url: url.into(),
+        username: "operator".into(),
+        password_set: id.is_some(),
+        ..Default::default()
+    }
+}
+
+#[wasm_bindgen_test]
+fn a_valid_ip_list_is_sent_in_order_and_trimmed() {
+    let rows = vec![
+        ip_row(Some("cam-0001"), " rtsp://192.0.2.10:554/cam/realmonitor?channel=1&subtype=0 "),
+        ip_row(None, "rtsp://192.0.2.11/stream1"),
+    ];
+    let list = parse_ip_form(&rows, 4).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].id.as_deref(), Some("cam-0001"));
+    assert_eq!(list[0].name, "Dock 1");
+    assert_eq!(list[0].url, "rtsp://192.0.2.10:554/cam/realmonitor?channel=1&subtype=0");
+    assert_eq!(list[1].id, None);
+}
+
+#[wasm_bindgen_test]
+fn an_ip_password_is_kept_replaced_or_cleared() {
+    let mut row = ip_row(Some("cam-0001"), "rtsp://192.0.2.10/stream1");
+    assert_eq!(parse_ip_form(&[row.clone()], 4).unwrap()[0].password, None, "blank keeps it");
+    row.clear_password = true;
+    assert_eq!(parse_ip_form(&[row.clone()], 4).unwrap()[0].password.as_deref(), Some(""));
+    row.password = "example-only".into();
+    assert_eq!(
+        parse_ip_form(&[row], 4).unwrap()[0].password.as_deref(),
+        Some("example-only"),
+        "a typed password wins over a removal",
+    );
+    let mut new = ip_row(None, "rtsp://192.0.2.11/stream1");
+    new.clear_password = true;
+    assert_eq!(parse_ip_form(&[new], 4).unwrap()[0].password, None, "a new camera has none to clear");
+}
+
+#[wasm_bindgen_test]
+fn the_ip_list_needs_one_to_max_cameras() {
+    assert_eq!(parse_ip_form(&[], 4), Err(IpFormError::Empty));
+    let rows = vec![ip_row(None, "rtsp://192.0.2.10/s"); 5];
+    assert_eq!(parse_ip_form(&rows, 4), Err(IpFormError::TooMany));
+}
+
+#[wasm_bindgen_test]
+fn an_ip_url_must_be_rtsp_with_a_host() {
+    for url in ["", "http://192.0.2.10/s", "rtsp://", "rtsp:///stream", "192.0.2.10:554", "RTSP://"] {
+        assert_eq!(
+            parse_ip_form(&[ip_row(None, url)], 4),
+            Err(IpFormError::Field(0, IpFieldError::UrlScheme)),
+            "{url:?}",
+        );
+    }
+    // The device takes the scheme in any case, so the form must too.
+    assert!(parse_ip_form(&[ip_row(None, "RTSP://192.0.2.10/s")], 4).is_ok());
+    assert!(rtsp_url_has_credentials("RTSP://a:b@192.0.2.10/s"));
+    let long = format!("rtsp://192.0.2.10/{}", "a".repeat(250));
+    assert_eq!(
+        parse_ip_form(&[ip_row(None, &long)], 4),
+        Err(IpFormError::Field(0, IpFieldError::UrlTooLong)),
+    );
+}
+
+#[wasm_bindgen_test]
+fn credentials_in_the_url_are_refused() {
+    assert!(rtsp_url_has_credentials("rtsp://operator:example-only@192.0.2.10:554/s"));
+    assert!(rtsp_url_has_credentials("rtsp://operator@192.0.2.10/s"));
+    assert!(!rtsp_url_has_credentials("rtsp://192.0.2.10/s?user=a@b"), "only the authority counts");
+    let rows = [ip_row(None, "rtsp://192.0.2.10/s"), ip_row(None, "rtsp://a:b@192.0.2.11/s")];
+    assert_eq!(parse_ip_form(&rows, 4), Err(IpFormError::Field(1, IpFieldError::UrlCredentials)));
+}
+
+#[wasm_bindgen_test]
+fn ip_field_lengths_are_checked() {
+    let mut row = ip_row(None, "rtsp://192.0.2.10/s");
+    row.name = "n".repeat(41);
+    assert_eq!(parse_ip_form(&[row.clone()], 4), Err(IpFormError::Field(0, IpFieldError::NameTooLong)));
+    // Limits are UTF-8 bytes, as on the device: "ç" takes two.
+    row.name = "ç".repeat(20);
+    assert!(parse_ip_form(&[row.clone()], 4).is_ok());
+    row.name = "ç".repeat(21);
+    assert_eq!(parse_ip_form(&[row.clone()], 4), Err(IpFormError::Field(0, IpFieldError::NameTooLong)));
+    row.name.clear();
+    row.username = "u".repeat(65);
+    assert_eq!(parse_ip_form(&[row.clone()], 4), Err(IpFormError::Field(0, IpFieldError::UsernameTooLong)));
+    row.username.clear();
+    row.password = "p".repeat(65);
+    assert_eq!(parse_ip_form(&[row], 4), Err(IpFormError::Field(0, IpFieldError::PasswordTooLong)));
+}
+
+#[wasm_bindgen_test]
+fn the_mosaic_grid_follows_the_camera_count() {
+    assert_eq!(mosaic_grid(1), (1, 1));
+    assert_eq!(mosaic_grid(2), (2, 1));
+    assert_eq!(mosaic_grid(3), (2, 2));
+    assert_eq!(mosaic_grid(4), (2, 2));
+}
+
+#[wasm_bindgen_test]
+fn a_mosaic_change_is_a_new_grid_or_another_camera_in_a_cell() {
+    let url = "rtsp://192.0.2.10/s";
+    let applied: Vec<(String, String)> =
+        ["a", "b", "c"].iter().map(|id| (id.to_string(), url.to_string())).collect();
+    let row = |id: Option<&str>| ip_row(id, url);
+    // Same cameras, same order.
+    assert!(!mosaic_changes(Some(&applied), &[row(Some("a")), row(Some("b")), row(Some("c"))]));
+    // A fourth camera fills the empty cell of the same 2 x 2 grid.
+    assert!(!mosaic_changes(Some(&applied), &[row(Some("a")), row(Some("b")), row(Some("c")), row(None)]));
+    // Reordered, or down to a side-by-side pair.
+    assert!(mosaic_changes(Some(&applied), &[row(Some("b")), row(Some("a")), row(Some("c"))]));
+    assert!(mosaic_changes(Some(&applied), &[row(Some("a")), row(Some("b"))]));
+    // The same entry pointed at another camera.
+    let mut moved = row(Some("b"));
+    moved.url = "rtsp://192.0.2.99/s".to_string();
+    assert!(mosaic_changes(Some(&applied), &[row(Some("a")), moved, row(Some("c"))]));
+    // From a local or remote camera the scene changes even with one camera.
+    assert!(mosaic_changes(None, &[row(None)]));
+    assert!(mosaic_changes(None, &[row(None), row(None)]));
 }

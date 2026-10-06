@@ -37,6 +37,17 @@ N viewers cost the same as one.
 The trigger/GPIO-gate/freeze/"Detection Off" logic lives here too (Stage A/C),
 computed once and shared.
 
+IP cameras
+----------
+With the IP camera source stage A receives the latest frame of every camera
+and composes them into one mosaic (``conecsa_shm.mosaic``). The mosaic is the
+frame everything downstream sees — drawing, detection areas, the published
+stream, the snapshot — while inference runs per camera: each camera's
+rectangle is preprocessed on its own (tiled like a single camera would be), so
+a model sees every camera at the cell's resolution and boxes never merge
+across cameras. Stage C tags the result with the camera layout so the snapshot
+can name each detection's camera.
+
 Runtime transitions
 -------------------
 Frames on the detection path (A → B → C) hold a reference to the live runtime:
@@ -54,13 +65,14 @@ import os
 import queue
 import threading
 import time
-from typing import Optional
+from typing import Any, List, Optional
 
 # noinspection PyPackageRequirements
 import cv2  # ships in conecsa-os-base:base
 
 # noinspection PyPackageRequirements
 import numpy as np  # ships in conecsa-os-base:base
+from conecsa_shm.mosaic import cell_rects, cell_size_from_env, compose
 
 from .detection_service import StaleGeneration
 
@@ -166,6 +178,8 @@ class ProcessingPipelineService:
 
         # Published-frame downscale factor, read once (see output_scale_from_env).
         self._output_scale = output_scale_from_env()
+        # IP camera mosaic cell, read once (MOSAIC_CELL_WIDTH/HEIGHT).
+        self._cell = cell_size_from_env()
 
         # Last successfully encoded frame — re-emitted while output is frozen
         # (GPIO trigger pin low, or detection trigger disabled). Written by the
@@ -363,15 +377,15 @@ class ProcessingPipelineService:
         """Claim the freshest not-yet-claimed camera frame (shared across lanes).
 
         Holding the lock across the wait makes decode threads naturally alternate
-        frames: each waits for the next frame, claims it, releases. Returns
-        ``(seq, jpg, npy)`` or ``None`` on timeout.
+        frames: each waits for the next frame, claims it, releases. Returns a
+        ``CapturedFrame`` or ``None`` on timeout.
         """
         with self._grab_lock:
-            seq, jpg, npy = self._consumer.wait_for(self._last_grabbed, timeout=1.0)
-            if seq <= self._last_grabbed:
+            got = self._consumer.wait_for_frame(self._last_grabbed, timeout=1.0)
+            if got.seq <= self._last_grabbed:
                 return None
-            self._last_grabbed = seq
-            return seq, jpg, npy
+            self._last_grabbed = got.seq
+            return got
 
     def _stage_prepare(self) -> None:
         """Stage A loop: grab the latest frame, apply the trigger/freeze gates,
@@ -383,7 +397,7 @@ class ProcessingPipelineService:
                 grabbed = self._grab_next()
                 if grabbed is None:
                     continue  # timed out — re-check the run gate
-                seq, jpg, npy = grabbed
+                seq = grabbed.seq
                 # Frame age runs from here: the ring carries no capture
                 # timestamp (and the wall clock is stepped by the hub).
                 t_grab = time.monotonic()
@@ -394,11 +408,16 @@ class ProcessingPipelineService:
                         self._publish(self._frozen, seq)
                     continue
 
-                # Decode (reduced scale) + software RGB + stereo combine.
-                frame = self._decode(jpg, npy)
-                if frame is None:
-                    continue
-                frame = self._codec.combine_stereo(frame)
+                regions = cameras = None
+                if grabbed.cameras is not None:
+                    # IP cameras: one mosaic, one inference region per camera.
+                    frame, regions, cameras = self._compose_cameras(grabbed.cameras)
+                else:
+                    # Decode (reduced scale) + software RGB + stereo combine.
+                    decoded = self._decode(grabbed.jpg, grabbed.npy)
+                    if decoded is None:
+                        continue
+                    frame = self._codec.combine_stereo(decoded)
 
                 # Detection trigger disabled → freeze (re-emit, or make one).
                 if not self._detection.get_trigger_status():
@@ -412,7 +431,7 @@ class ProcessingPipelineService:
                 # while draining: the runtime is about to change under us.
                 if (self._detection.is_running and self._detection.is_model_loaded()
                         and not self._draining):
-                    self._dispatch_detection(frame, seq, t_grab)
+                    self._dispatch_detection(frame, seq, t_grab, regions, cameras)
                 else:
                     # Detection off → "Detection Off" overlay.
                     self._emit_off(frame, seq)
@@ -421,27 +440,50 @@ class ProcessingPipelineService:
                 self._stage_error("prepare", ex)
 
     def _dispatch_detection(self, frame: np.ndarray, seq: int,
-                            t_grab: Optional[float] = None) -> None:
+                            t_grab: Optional[float] = None, regions=None,
+                            cameras: Optional[List[dict]] = None) -> None:
         """Preprocess ``frame`` and hand it to the inference stage.
 
         The frame counts as in flight from before ``prepare`` (which touches
         the runtime) until the hand-off succeeds, at which point stage B owns
         the count; every other exit releases it. ``t_grab`` (monotonic) rides
         along so stage D can report the frame's age at publication.
+        ``regions``/``cameras`` describe an IP camera mosaic (see
+        :meth:`_compose_cameras`); ``None`` for a single camera.
         """
         self._begin_inflight()
         handed = False
         try:
-            prepared = self._detection.prepare(frame)
+            prepared = self._detection.prepare(frame, regions=regions)
             if prepared is None:
                 self._emit_off(frame, seq)
                 return
             generation, input_data, meta = prepared
             handed = self._handoff(
-                self._q_infer, (seq, generation, frame, input_data, meta, t_grab))
+                self._q_infer, (seq, generation, frame, input_data, meta, t_grab, cameras))
         finally:
             if not handed:
                 self._end_inflight()
+
+    def _compose_cameras(self, frames: List[Optional[np.ndarray]]):
+        """The IP cameras' mosaic, the region each live camera fills, and the layout.
+
+        Returns ``(mosaic, regions, cameras)``: ``regions`` lists the picture
+        rectangle of every camera with a frame (offline cameras get no
+        inference), ``cameras`` names each cell for the snapshot
+        (``[{id, name, rect}]``, ids from the device's stored camera list).
+        """
+        cell_w, cell_h = self._cell
+        mosaic, content = compose(frames, cell_w, cell_h)
+        identities = self._video.ip_camera_identities()
+        cameras: List[dict] = []
+        for index, cell in enumerate(cell_rects(len(frames), cell_w, cell_h)):
+            ident: Any = identities[index] if index < len(identities) else {}
+            cameras.append({"id": ident.get("id", f"ip{index}"),
+                            "name": ident.get("name", f"Camera {index + 1}"),
+                            "rect": cell})
+        regions = [rect for rect in content if rect is not None]
+        return mosaic, regions, cameras
 
     def _decode(self, jpg, npy) -> Optional[np.ndarray]:
         """Return a BGR frame from a raw-RGB array or a JPEG (decoded + RGB levels)."""
@@ -470,11 +512,12 @@ class ProcessingPipelineService:
                 continue
             handed = False
             try:
-                seq, generation, frame, input_data, meta, t_grab = item
+                seq, generation, frame, input_data, meta, t_grab, cameras = item
                 output_data, inference_time = self._detection.infer(input_data, generation)
                 handed = self._handoff(
                     self._q_finish,
-                    (seq, generation, frame, output_data, meta, inference_time, t_grab))
+                    (seq, generation, frame, output_data, meta, inference_time, t_grab,
+                     cameras))
                 self._progress("infer")
             except StaleGeneration as ex:
                 self.stale_drops += 1
@@ -497,7 +540,8 @@ class ProcessingPipelineService:
             if item is None:
                 continue
             try:
-                seq, generation, frame, output_data, meta, inference_time, t_grab = item
+                (seq, generation, frame, output_data, meta, inference_time, t_grab,
+                 cameras) = item
 
                 # Drop frames a faster infer lane has already superseded (out-of-order
                 # completion): no stats/GPIO churn, no wasted postprocess/encode.
@@ -508,7 +552,8 @@ class ProcessingPipelineService:
 
                 try:
                     result = self._detection.finish(
-                        output_data, frame, meta, inference_time, generation)
+                        output_data, frame, meta, inference_time, generation,
+                        cameras=cameras)
                 except StaleGeneration as ex:
                     self.stale_drops += 1
                     logger.info("[Pipeline] finish: dropped stale frame (%s)", ex)

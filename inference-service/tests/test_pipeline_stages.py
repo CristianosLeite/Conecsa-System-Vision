@@ -45,7 +45,7 @@ class FailingOnceDetection(FakeDetection):
         self.release.set()
         self.finish_calls = 0
 
-    def finish(self, outputs, frame, metas, inference_time=0.0, generation=None):
+    def finish(self, outputs, frame, metas, inference_time=0.0, generation=None, cameras=None):
         self.finish_calls += 1
         if self.finish_calls == 1:
             raise RuntimeError("postprocess blew up")
@@ -165,7 +165,7 @@ class ScriptedDetection(FakeDetection):
         self.script = list(script)
         self.increments = []
 
-    def finish(self, outputs, frame, metas, inference_time=0.0, generation=None):
+    def finish(self, outputs, frame, metas, inference_time=0.0, generation=None, cameras=None):
         count, increment = self.script.pop(0)
         result = SimpleNamespace(processed_image=frame, num_detections=count)
         if increment is not None:

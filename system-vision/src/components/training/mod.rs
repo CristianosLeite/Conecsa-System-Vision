@@ -30,6 +30,7 @@ mod label_model_panel;
 mod label_sam_panel;
 mod label_shapes;
 mod label_toolbar;
+mod metrics_chart;
 mod progress_overlay;
 mod replicate_modal;
 mod train_modal;

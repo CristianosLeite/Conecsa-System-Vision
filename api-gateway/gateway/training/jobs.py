@@ -4,20 +4,37 @@
 
 """Training-job routes: start (with GPU-handover re-assert), status polling,
 cancel and finish."""
+import logging
+
 import grpc
 from flask import request
 
-from ..grpc_clients import clients, trn
+from ..gpu import GpuBusy, Purpose, acquire_gpu, busy_response, gpu_lock
+from ..grpc_clients import clients, inf, trn
 from . import training_bp
-from .helpers import (
-    _grpc_error,
-    _job_dict,
-    _json,
-    _json_error,
-    _release_runtime,
-    _result,
-)
+from .helpers import _grpc_error, _job_dict, _json, _json_error, _result
 from .orphan import tracker
+
+logger = logging.getLogger(__name__)
+
+def _detection_running() -> bool:
+    """Whether detection runs now (False when it cannot be asked)."""
+    try:
+        return bool(clients.detection.GetStatus(inf.Empty()).is_running)
+    except grpc.RpcError:
+        return False
+
+
+def _undo_handover(resume_detection: bool) -> None:
+    """End the handover a failed start began, restoring detection if it ran."""
+    from .session import _do_exit
+
+    try:
+        ok, message = _do_exit(resume_detection)
+    except grpc.RpcError as exc:
+        ok, message = False, str(exc)
+    if not ok:
+        logger.warning("Could not undo the GPU handover of a failed start: %s", message)
 
 
 @training_bp.route("/api/v1/training/train", methods=["POST"])
@@ -32,17 +49,10 @@ def training_start():
     dataset_id = (body.get("dataset_id") or "").strip()
     if not dataset_id:
         return _json_error("'dataset_id' is required")
-    # Re-assert the GPU handover: idempotent, and protects against a client
-    # that skipped /training/enter.
+    # Every local check first: the GPU is taken only for a request that can
+    # actually start.
     try:
-        r = _release_runtime()
-        if not r.success:
-            return _json_error(r.message, 409)
-    except grpc.RpcError as exc:
-        detail = exc.details() if hasattr(exc, "details") else str(exc)
-        return _json_error(f"Could not release inference runtime: {detail}", 503)
-    try:
-        job = clients.training.StartTraining(trn.TrainRequest(
+        train_request = trn.TrainRequest(
             model_name=model_name,
             dataset_id=dataset_id,
             epochs=int(body.get("epochs") or 0),
@@ -51,14 +61,36 @@ def training_start():
             initial_weights_id=(body.get("initial_weights_id") or "").strip(),
             federated=federated,
             base_model=str(body.get("base_model") or "").strip(),
-        ))
-    except grpc.RpcError as exc:
-        return _grpc_error(exc)
+        )
     except (TypeError, ValueError):
         return _json_error("'epochs', 'batch' and 'patience' must be non-negative integers")
-    # Covers clients that skipped /training/enter (the handover was re-asserted
-    # above): a run is active, so the orphan watchdog must be armed.
-    tracker.arm()
+    try:
+        with gpu_lock():
+            # Read under the lock (an enter or exit may have run while this
+            # request waited): a client inside training mode keeps it when the
+            # start fails; one that skipped /training/enter must not be left
+            # with a handover and no job.
+            entered = tracker.armed
+            was_running = not entered and _detection_running()
+            # Re-assert the GPU handover (the shared release): idempotent,
+            # and protects against a client that skipped /training/enter.
+            try:
+                acquire_gpu(Purpose.TRAINING)
+            except grpc.RpcError as exc:
+                detail = exc.details() if hasattr(exc, "details") else str(exc)
+                return _json_error(f"Could not release inference runtime: {detail}", 503)
+            try:
+                job = clients.training.StartTraining(train_request)
+            except grpc.RpcError as exc:
+                if not entered:
+                    _undo_handover(was_running)
+                return _grpc_error(exc)
+            # Covers clients that skipped /training/enter (the handover was
+            # re-asserted above): a run is active, so the orphan watchdog must
+            # be armed — inside the lock, so an exit cannot land in between.
+            tracker.arm()
+    except GpuBusy as exc:
+        return busy_response(exc)
     return _json(_job_dict(job), 202)
 
 

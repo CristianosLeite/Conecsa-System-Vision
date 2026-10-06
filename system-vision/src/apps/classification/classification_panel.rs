@@ -8,6 +8,10 @@
 //! the threshold with the top-k candidates. It polls the snapshot — without
 //! frames, as a passive reader that never counts as the hub's heartbeat — only
 //! while it is mounted, which is only while detection runs.
+//!
+//! With IP cameras the device classifies each camera of the mosaic on its own
+//! and reports `per_camera`: the panel then lists one row per camera (its name
+//! and top candidate) instead of the single-frame result.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,7 +22,7 @@ use leptos::task::spawn_local;
 
 use crate::api;
 use crate::i18n::*;
-use crate::models::Snapshot;
+use crate::models::{CameraClassification, Snapshot};
 
 /// Poll period: a glance-level panel, at the rate the hub records at.
 const POLL_MS: u32 = 1_000;
@@ -26,6 +30,21 @@ const POLL_MS: u32 = 1_000;
 /// A probability as a whole percentage (0..=100).
 fn percent(confidence: f32) -> f32 {
     (confidence.clamp(0.0, 1.0) * 100.0).round()
+}
+
+/// What one per-camera row shows: the camera's name (`None` when the device
+/// sent none; the row then names its mosaic position) and its top candidate
+/// as `(class, percent)`.
+fn camera_row(entry: &CameraClassification) -> (Option<String>, Option<(String, f32)>) {
+    let name = entry
+        .camera_name
+        .clone()
+        .filter(|name| !name.trim().is_empty());
+    let top = entry
+        .candidates
+        .first()
+        .map(|c| (c.class_name.clone(), percent(c.confidence)));
+    (name, top)
 }
 
 /// The class above the threshold and the top-k candidates, refreshed live.
@@ -118,16 +137,67 @@ pub fn ClassificationPanel() -> impl IntoView {
             .collect_view()
     };
 
+    // One row per IP camera: its name and top candidate.
+    let per_camera_rows = move || {
+        let s = snapshot.get().unwrap_or_default();
+        s.per_camera()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let (name, top) = camera_row(entry);
+                let name = name.unwrap_or_else(|| {
+                    t_string!(i18n, stream::camera_fallback, n = index + 1).to_string()
+                });
+                match top {
+                    Some((class_name, pct)) => view! {
+                        <li class="ui-classify-candidate">
+                            <span class="ui-classify-candidate-name">
+                                {format!("{name} · {class_name}")}
+                            </span>
+                            <span class="ui-classify-bar" aria-hidden="true">
+                                <span class="ui-classify-bar-fill" style=format!("width: {pct}%")></span>
+                            </span>
+                            <span class="ui-classify-candidate-score">{format!("{pct:.0}%")}</span>
+                        </li>
+                    }
+                    .into_any(),
+                    None => view! {
+                        <li class="ui-classify-candidate">
+                            <span class="ui-classify-candidate-name">{name}</span>
+                            <span class="ui-classify-muted">{t!(i18n, stream::camera_no_result)}</span>
+                        </li>
+                    }
+                    .into_any(),
+                }
+            })
+            .collect_view()
+    };
+    let has_per_camera = move || snapshot.with(|s| s.as_ref().is_some_and(|s| s.per_camera().is_some()));
+
     view! {
         <section class="ui-classify-panel">
-            <div class="ui-classify-result" aria-live="polite">
-                <span class="ui-label-xs">{t!(i18n, stream::classification_result)}</span>
-                {result}
-            </div>
-            <div class="ui-classify-top">
-                <span class="ui-label-xs">{t!(i18n, stream::top_candidates)}</span>
-                <ol class="ui-classify-candidates">{candidates}</ol>
-            </div>
+            {move || if has_per_camera() {
+                view! {
+                    <div class="ui-classify-top" aria-live="polite">
+                        <span class="ui-label-xs">{t!(i18n, stream::classification_per_camera)}</span>
+                        <ol class="ui-classify-candidates">{per_camera_rows}</ol>
+                    </div>
+                }
+                .into_any()
+            } else {
+                view! {
+                    <div class="ui-classify-result" aria-live="polite">
+                        <span class="ui-label-xs">{t!(i18n, stream::classification_result)}</span>
+                        {result}
+                    </div>
+                    <div class="ui-classify-top">
+                        <span class="ui-label-xs">{t!(i18n, stream::top_candidates)}</span>
+                        <ol class="ui-classify-candidates">{candidates}</ol>
+                    </div>
+                }
+                .into_any()
+            }}
         </section>
     }
 }

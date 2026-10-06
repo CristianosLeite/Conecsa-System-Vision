@@ -117,11 +117,12 @@ message ApStatus {
   string address = 4;          // the device's address on the access point
   uint32 prefix = 5;
   repeated ApStation stations = 6;
-  // Seconds left before the access point stops for lack of a remote camera. 0
-  // once one has joined (a later disconnect does not stop it) and when inactive.
-  uint32 join_deadline_remaining_secs = 7;
-  bool wired_ready = 8;        // the wired precondition (carrier + an IPv4 address) holds now
-  string message = 9;          // why the last start or stop ended the way it did
+  // Field 7 was join_deadline_remaining_secs: the access point no longer
+  // stops by itself when no remote camera joins.
+  reserved 7;
+  reserved "join_deadline_remaining_secs";
+  bool wired_ready = 8;        // the admin-start precondition (carrier + an IPv4 address) holds now
+  string message = 9;          // why the last start, stop or restore ended the way it did
   // Channels (36, 40, 44, 48) the radio may start a network on right now. The
   // regulatory NO_IR flag moves with the beacons the driver has heard, so this
   // changes over time; empty when the daemon cannot say.
@@ -219,7 +220,10 @@ service HardwareService {
   rpc ConnectWifi(WifiConnectRequest) returns (WifiConnectResult);
   rpc ForgetWifi(WifiForgetRequest) returns (Result);
   // Wi-Fi access point for the remote camera (see ApStatus). StartAp is
-  // rollback-safe: any failed step returns the radio to station mode.
+  // rollback-safe: any failed step returns the radio to station mode. A
+  // started access point stays on until StopAp: nothing turns it off by
+  // itself, and a restart of the agent or the device brings it back (retried
+  // until it is up, whatever the wired port's state).
   rpc GetApStatus(Empty) returns (ApStatus);
   rpc StartAp(ApRequest) returns (Result);
   rpc StopAp(Empty) returns (Result);

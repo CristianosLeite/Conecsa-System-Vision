@@ -29,6 +29,11 @@ class FakeLabeling:
         self.candidates = []
         self.task = "detect"
 
+    @property
+    def is_loaded(self):
+        # A property, as on LabelingService: calling it would be a TypeError.
+        return bool(self.loaded)
+
     def status(self):
         return {"loaded": bool(self.loaded), "model_name": self.loaded,
                 "class_names": ["logo", "person"] if self.loaded else [], "message": "",
@@ -61,7 +66,8 @@ def app(tmp_path):
         config=Config(),
         model_service=models,
         labeling_service=FakeLabeling(),
-        detection_service=SimpleNamespace(stop=lambda: True),
+        detection_service=SimpleNamespace(is_running=False, stop=lambda: True,
+                                          unload_runtime=lambda: None),
         conversion_service=SimpleNamespace(get_active_jobs=lambda: []),
         event_service=SimpleNamespace(publish=lambda *a, **k: None),
     )
@@ -202,13 +208,204 @@ class TestReleaseRuntime:
         assert r.success, r.message
         assert order == ["labeling", "workers"]
         assert app.labeling_service.loaded == ""
-        # Until ResumeRuntime the GPU belongs to training: no application change.
+        # The handover is marked, so leaving training mode can resume detection.
         assert app.model_service.runtime_released is True
 
     def test_refused_while_a_conversion_runs(self, app, monkeypatch):
         import api.runtime_management.worker_client as wc
         monkeypatch.setattr(wc, "release_all_workers", lambda: None)
-        app.conversion_service.get_active_jobs = lambda: ["job"]
+        app.conversion_service.get_active_jobs = lambda: [SimpleNamespace(job_id="job")]
         r = ig.ManagementControlServicer(app).ReleaseRuntime(pb.Empty(), None)
         assert not r.success and "conversion" in r.message
         assert app.model_service.runtime_released is False
+
+
+class TestFreeGpu:
+    @pytest.fixture
+    def released(self, monkeypatch):
+        calls = []
+        import api.runtime_management.worker_client as wc
+        monkeypatch.setattr(wc, "release_all_workers", lambda: calls.append("workers"))
+        return calls
+
+    def test_frees_every_idle_holder(self, app, released):
+        app.labeling_service.loaded = "Teste.engine"
+        r = ig.ManagementControlServicer(app).FreeGpu(pb.FreeGpuRequest(), None)
+        assert r.success and r.busy == pb.GPU_HOLDER_NONE
+        assert app.labeling_service.loaded == ""
+        assert released == ["workers"]
+
+    def test_names_a_running_detection(self, app, released):
+        app.detection_service.is_running = True
+        r = ig.ManagementControlServicer(app).FreeGpu(pb.FreeGpuRequest(), None)
+        assert not r.success and r.busy == pb.GPU_HOLDER_DETECTION
+        assert "stop it first" in r.message
+        assert released == []
+
+    def test_stops_detection_on_request(self, app, released):
+        app.detection_service.is_running = True
+
+        def stop():
+            was, app.detection_service.is_running = app.detection_service.is_running, False
+            return was
+
+        app.detection_service.stop = stop
+        r = ig.ManagementControlServicer(app).FreeGpu(
+            pb.FreeGpuRequest(stop_detection=True), None)
+        assert r.success and app.detection_service.is_running is False
+        assert released == ["workers"]
+
+    def test_names_a_running_conversion(self, app, released):
+        app.conversion_service.get_active_jobs = lambda: [SimpleNamespace(job_id="job")]
+        r = ig.ManagementControlServicer(app).FreeGpu(
+            pb.FreeGpuRequest(stop_detection=True), None)
+        assert not r.success and r.busy == pb.GPU_HOLDER_CONVERSION
+        assert released == []
+
+    def test_ends_a_leftover_handover_and_says_so(self, app, released):
+        events = []
+        app.event_service = SimpleNamespace(
+            publish=lambda event_type, keys=None, data=None: events.append((event_type, data)))
+        servicer = ig.ManagementControlServicer(app)
+        assert servicer.ReleaseRuntime(pb.Empty(), None).success
+        events.clear()
+        assert servicer.FreeGpu(pb.FreeGpuRequest(), None).success
+        assert app.model_service.runtime_released is False
+        assert events == [("runtime_changed", {"runtime_released": False})]
+        # Nothing to end the second time: no event.
+        events.clear()
+        assert servicer.FreeGpu(pb.FreeGpuRequest(), None).success
+        assert events == []
+
+    def test_begins_a_handover_in_the_same_call(self, app, released):
+        events = []
+        app.event_service = SimpleNamespace(
+            publish=lambda event_type, keys=None, data=None: events.append((event_type, data)))
+        app.detection_service.is_running = True
+
+        def stop():
+            was, app.detection_service.is_running = app.detection_service.is_running, False
+            return was
+
+        app.detection_service.stop = stop
+        servicer = ig.ManagementControlServicer(app)
+        r = servicer.FreeGpu(pb.FreeGpuRequest(stop_detection=True, begin_handover=True), None)
+        assert r.success and app.model_service.runtime_released is True
+        assert app.detection_service.is_running is False
+        assert released == ["workers"]
+        assert events == [("runtime_changed", {"runtime_released": True})]
+        # Re-entering keeps the handover: no second event.
+        events.clear()
+        assert servicer.FreeGpu(
+            pb.FreeGpuRequest(stop_detection=True, begin_handover=True), None).success
+        assert events == []
+
+    def test_a_worker_that_will_not_exit_fails_the_release(self, app, monkeypatch):
+        import api.runtime_management.worker_client as wc
+
+        def stuck():
+            raise RuntimeError("Could not terminate the TensorRT workers on ports 5501")
+
+        monkeypatch.setattr(wc, "release_all_workers", stuck)
+        servicer = ig.ManagementControlServicer(app)
+        r = servicer.FreeGpu(pb.FreeGpuRequest(begin_handover=True), None)
+        assert not r.success and r.busy == pb.GPU_HOLDER_NONE and "5501" in r.message
+        assert app.model_service.runtime_released is False
+
+    def test_a_failed_release_restarts_the_detection_it_stopped(self, app, monkeypatch):
+        import api.runtime_management.worker_client as wc
+
+        def stuck():
+            raise RuntimeError("Could not terminate the TensorRT workers on ports 5501")
+
+        monkeypatch.setattr(wc, "release_all_workers", stuck)
+        # The worker did exit after all: nothing is left beside a restart.
+        monkeypatch.setattr(wc, "live_worker_ports", lambda: [])
+        detection = app.detection_service
+        detection.is_running = True
+        calls = []
+
+        def stop():
+            calls.append("stop")
+            was, detection.is_running = detection.is_running, False
+            return was
+
+        def start():
+            calls.append("start")
+            detection.is_running = True
+            return True
+
+        detection.stop, detection.start = stop, start
+        detection.unload_runtime = lambda: calls.append("unload")
+        r = ig.ManagementControlServicer(app).FreeGpu(
+            pb.FreeGpuRequest(stop_detection=True, begin_handover=True), None)
+        assert not r.success and "5501" in r.message
+        # Entering training mode was refused: detection runs again, as before.
+        assert detection.is_running is True
+        assert calls[-2:] == ["unload", "start"]
+        assert app.model_service.runtime_released is False
+
+    def test_a_failed_release_leaves_a_stopped_detection_stopped(self, app, monkeypatch):
+        import api.runtime_management.worker_client as wc
+
+        def stuck():
+            raise RuntimeError("Could not terminate the TensorRT workers on ports 5501")
+
+        monkeypatch.setattr(wc, "release_all_workers", stuck)
+        started = []
+        app.detection_service.start = lambda: started.append(True)
+        r = ig.ManagementControlServicer(app).FreeGpu(
+            pb.FreeGpuRequest(stop_detection=True), None)
+        assert not r.success
+        assert started == []
+
+    def test_a_resident_labeling_engine_keeps_detection_stopped(self, app, monkeypatch):
+        import api.runtime_management.worker_client as wc
+        monkeypatch.setattr(wc, "release_all_workers", lambda: None)
+        labeling = app.labeling_service
+        labeling.loaded = "Teste.engine"
+
+        def stuck_unload():
+            raise RuntimeError("labeling worker did not exit")
+
+        labeling.unload = stuck_unload
+        detection = app.detection_service
+        detection.is_running = True
+        started = []
+
+        def stop():
+            was, detection.is_running = detection.is_running, False
+            return was
+
+        detection.stop = stop
+        detection.start = lambda: started.append(True)
+        r = ig.ManagementControlServicer(app).FreeGpu(
+            pb.FreeGpuRequest(stop_detection=True, begin_handover=True), None)
+        assert not r.success and "did not exit" in r.message
+        # Its worker still holds CUDA memory: no detection is started beside it.
+        assert started == [] and detection.is_running is False
+
+    def test_a_surviving_worker_keeps_detection_stopped(self, app, monkeypatch):
+        import api.runtime_management.worker_client as wc
+
+        def stuck():
+            raise RuntimeError("Could not terminate the TensorRT workers on ports 5517")
+
+        monkeypatch.setattr(wc, "release_all_workers", stuck)
+        # E.g. the face embedder's private worker, which the labeling
+        # service knows nothing about.
+        monkeypatch.setattr(wc, "live_worker_ports", lambda: [5517])
+        detection = app.detection_service
+        detection.is_running = True
+        started = []
+
+        def stop():
+            was, detection.is_running = detection.is_running, False
+            return was
+
+        detection.stop = stop
+        detection.start = lambda: started.append(True)
+        r = ig.ManagementControlServicer(app).FreeGpu(
+            pb.FreeGpuRequest(stop_detection=True, begin_handover=True), None)
+        assert not r.success and "5517" in r.message
+        assert started == [] and detection.is_running is False

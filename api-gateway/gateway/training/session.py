@@ -11,15 +11,18 @@ from flask import Response, request
 
 from .. import media
 from ..events import event_service
-from ..grpc_clients import clients, inf, trn
-from . import training_bp
-from .helpers import (
-    _grpc_error,
-    _json,
-    _json_error,
-    _release_runtime,
+from ..gpu import (
+    GpuBusy,
+    Purpose,
+    busy_response,
+    gpu_lock,
+    gpu_session,
     training_job_active,
+    unload_assistants,
 )
+from ..grpc_clients import clients, inf
+from . import training_bp
+from .helpers import _grpc_error, _json, _json_error
 from .orphan import tracker
 
 logger = logging.getLogger(__name__)
@@ -33,20 +36,21 @@ def _do_exit(resume_detection: bool) -> tuple[bool, str]:
     itself fails (callers map/log it). While a training job is active the
     handover is left alone, whatever ``resume_detection`` asks: the trainer
     owns the GPU, so leaving the training page mid-run keeps detection stopped
-    (the dashboard's Start stays disabled until the job ends) and the
-    application type locked, exactly like the post-training conversion handover.
+    (the dashboard's Start stays disabled until the job ends). The handover
+    left behind locks nothing: the next consumer's shared GPU release
+    (``gateway.gpu``) ends it once the job is over.
     """
-    # Best-effort unload of both labeling assistants first (SAM3 in the
-    # training-service, the labeling engine in the inference-service);
-    # freeing inference is what matters.
+    # Both labeling assistants go first (SAM3 in the training-service, the
+    # labeling engine in the inference-service), verified: a resume must not
+    # load the detection runtime beside one that is still resident, so an
+    # unconfirmed unload refuses it (the orphan watchdog retries). Without a
+    # resume nothing is loaded here, so the handover still ends.
     try:
-        clients.training.UnloadSam(trn.Empty())
-    except grpc.RpcError as exc:
-        logger.warning("UnloadSam on exit failed: %s", exc)
-    try:
-        clients.model.UnloadLabelModel(inf.Empty())
-    except grpc.RpcError as exc:
-        logger.warning("UnloadLabelModel on exit failed: %s", exc)
+        unload_assistants()
+    except GpuBusy as exc:
+        if resume_detection:
+            return False, exc.message
+        logger.warning("Assistant unload on exit failed: %s", exc.message)
 
     if training_job_active():
         event_service.publish("detection_state_changed", keys=["status"],
@@ -76,17 +80,25 @@ def _do_exit(resume_detection: bool) -> tuple[bool, str]:
 
 @training_bp.route("/api/v1/training/enter", methods=["POST"])
 def training_enter():
-    """POST /api/v1/training/enter — gateway relay."""
+    """POST /api/v1/training/enter — hand the GPU over to training.
+
+    The shared GPU release for ``Purpose.TRAINING``: detection stops (the
+    device UI confirms it first), every other holder goes, and the handover is
+    marked so that leaving resumes detection. Refused only while a model
+    conversion runs.
+    """
     try:
-        r = _release_runtime()
+        with gpu_session(Purpose.TRAINING):
+            # Armed inside the lock: a /training/train that follows sees
+            # training mode, and an exit cannot slip between handover and arm.
+            tracker.arm()
+    except GpuBusy as exc:
+        return busy_response(exc)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
-    if not r.success:
-        return _json_error(r.message, 409)
     event_service.publish("detection_state_changed", keys=["status"],
                           data={"is_running": False})
-    tracker.arm()
-    return _json({"status": "success", "message": r.message})
+    return _json({"status": "success", "message": "Runtime released"})
 
 
 @training_bp.route("/api/v1/training/exit", methods=["POST"])
@@ -101,13 +113,19 @@ def training_exit():
     resume_detection = bool(body.get("resume_detection", True))
 
     try:
-        ok, message = _do_exit(resume_detection)
+        # A resume loads the engine: it takes the GPU lock like any consumer.
+        with gpu_lock():
+            ok, message = _do_exit(resume_detection)
+            # Disarmed inside the lock, like the enter arms it; a failed exit
+            # is still in training mode and keeps the watchdog armed.
+            if ok:
+                tracker.disarm()
+    except GpuBusy as exc:
+        return busy_response(exc)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     if not ok:
-        # Still in training mode — keep the orphan watchdog armed.
         return _json_error(message, 500)
-    tracker.disarm()
     return _json({"status": "success", "message": message})
 
 

@@ -4,16 +4,13 @@
 
 """SAM (Segment Anything) assisted-labeling routes: status, load/unload of the
 checkpoint and point/text-prompted segmentation."""
-import logging
-
 import grpc
 from flask import request
 
-from ..grpc_clients import clients, inf, trn
+from ..gpu import GpuBusy, Purpose, acquire_gpu, busy_response, gpu_lock, gpu_session
+from ..grpc_clients import clients, trn
 from . import training_bp
 from .helpers import _grpc_error, _json, _json_error, _pairs, _result
-
-logger = logging.getLogger(__name__)
 
 
 @training_bp.route("/api/v1/training/sam", methods=["GET"])
@@ -30,19 +27,19 @@ def training_sam_status():
 def training_sam_load():
     """POST /api/v1/training/sam/load — gateway relay.
 
-    One labeling assistant at a time: the SAM3 cold load peaks near the
-    Orin's whole memory, so the TensorRT labeling engine (inference-service)
-    is dropped first, best-effort and status-probed.
+    The SAM3 cold load peaks near the Orin's whole memory, so the GPU is
+    freed first through the shared release (``Purpose.SAM``): the labeling
+    engine and every idle TensorRT worker go; refused while detection, a
+    training or a conversion runs. The gateway GPU lock is held through the
+    load, so no Start can begin between the release and the load.
     """
     try:
-        if clients.model.GetLabelModelStatus(inf.Empty()).loaded:
-            clients.model.UnloadLabelModel(inf.Empty())
-    except grpc.RpcError as exc:
-        logger.warning("Best-effort label-model unload before SAM load failed: %s", exc)
-    try:
-        # Cold load reads the multi-GB checkpoint; allow well beyond the
-        # default control-call deadline.
-        return _result(clients.training.LoadSam(trn.Empty(), timeout=300))
+        with gpu_session(Purpose.SAM):
+            # Cold load reads the multi-GB checkpoint; allow well beyond the
+            # default control-call deadline.
+            return _result(clients.training.LoadSam(trn.Empty(), timeout=300))
+    except GpuBusy as exc:
+        return busy_response(exc)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
 
@@ -84,7 +81,15 @@ def training_sam_segment():
     except (TypeError, ValueError):
         return _json_error("Malformed point entry or threshold")
     try:
-        r = clients.training.SamSegment(msg, timeout=300)
+        # Under the GPU lock, so a Start cannot evict SAM3 (and a segment then
+        # reload it lazily beside detection) between the check and the
+        # segment. A segment that loads SAM3 acquires the GPU like /sam/load.
+        with gpu_lock():
+            if not clients.training.GetSamStatus(trn.Empty()).loaded:
+                acquire_gpu(Purpose.SAM)
+            r = clients.training.SamSegment(msg, timeout=300)
+    except GpuBusy as exc:
+        return busy_response(exc)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     if not r.success:

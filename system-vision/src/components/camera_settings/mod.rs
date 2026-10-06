@@ -6,6 +6,7 @@ mod ap_confirm_modal;
 mod apply_button;
 mod component;
 mod device_select;
+mod ip_cameras_form;
 mod loading_state;
 mod network_source_form;
 mod resolution_controls;
@@ -18,7 +19,7 @@ mod tests;
 
 pub use component::CameraSettings;
 
-use crate::api::{self, ApStatus};
+use crate::api::{self, ApStatus, IpCamera, IpCameraUpdate};
 
 /// Preset resolutions shown in the UI.
 /// Tuples: (width, height, label, aspect-ratio badge)
@@ -36,19 +37,6 @@ struct Resolution {
 }
 
 type CameraFormat = (u32, u32, Vec<u32>);
-
-/// V4L2 name marker for a side-by-side 3D camera ("3D USB Camera" & friends).
-const STEREO_NAME_MARKER: &str = "3d";
-
-/// Whether a V4L2 device name identifies a 3D (side-by-side stereo) camera.
-///
-/// The overlay blends the left|right halves of one frame into a single image,
-/// so offering it for an ordinary camera would split a normal picture in two.
-/// The camera model is the only reliable signal: resolution alone cannot tell a
-/// side-by-side frame from a wide one.
-fn is_stereo_camera(name: &str) -> bool {
-    name.to_ascii_lowercase().contains(STEREO_NAME_MARKER)
-}
 
 /// What is wrong with the remote camera form, checked before anything is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,4 +126,173 @@ fn station_suggestion(status: Option<&ApStatus>) -> Option<String> {
         [only] if !only.address.is_empty() => Some(only.address.clone()),
         _ => None,
     }
+}
+
+// ── IP cameras ───────────────────────────────────────────────────────────────
+
+/// Limits the device enforces on an IP camera; checked here first so the
+/// operator gets a precise message instead of a round trip. Like the device,
+/// they count UTF-8 bytes, so an accented letter takes two.
+const IP_NAME_MAX_BYTES: usize = 40;
+const IP_URL_MAX_BYTES: usize = 256;
+const IP_CREDENTIAL_MAX_BYTES: usize = 64;
+const RTSP_SCHEME: &str = "rtsp://";
+
+/// The URL after its `rtsp://` scheme, which the device accepts in any case.
+fn strip_rtsp_scheme(url: &str) -> Option<&str> {
+    let scheme = url.get(..RTSP_SCHEME.len())?;
+    scheme.eq_ignore_ascii_case(RTSP_SCHEME).then(|| &url[RTSP_SCHEME.len()..])
+}
+
+/// One row of the IP camera form, as the operator is editing it.
+///
+/// `key` only identifies the row on this page (the keyed list needs one before
+/// the device has assigned an `id`). The password is write-only: `password`
+/// is what the operator typed, `password_set` whether the device has one
+/// stored, and `clear_password` the explicit request to remove it.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct IpCameraDraft {
+    key: u32,
+    id: Option<String>,
+    name: String,
+    url: String,
+    username: String,
+    password: String,
+    password_set: bool,
+    clear_password: bool,
+    status: String,
+    detail: String,
+}
+
+impl IpCameraDraft {
+    fn from_stored(key: u32, cam: &IpCamera) -> Self {
+        Self {
+            key,
+            id: (!cam.id.is_empty()).then(|| cam.id.clone()),
+            name: cam.name.clone(),
+            url: cam.url.clone(),
+            username: cam.username.clone(),
+            password: String::new(),
+            password_set: cam.password_set,
+            clear_password: false,
+            status: cam.status.clone(),
+            detail: cam.detail.clone(),
+        }
+    }
+}
+
+/// What is wrong with one IP camera row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpFieldError {
+    UrlScheme,
+    UrlCredentials,
+    UrlTooLong,
+    NameTooLong,
+    UsernameTooLong,
+    PasswordTooLong,
+}
+
+/// What is wrong with the IP camera form, checked before anything is sent.
+/// `Field` carries the 0-based row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpFormError {
+    Empty,
+    TooMany,
+    Field(usize, IpFieldError),
+}
+
+/// Whether an `rtsp://` URL carries credentials in its authority
+/// (`rtsp://user:pass@host/...`): they belong in the username and password
+/// fields, where the password stays write-only.
+fn rtsp_url_has_credentials(url: &str) -> bool {
+    let rest = strip_rtsp_scheme(url).unwrap_or("");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority.contains('@')
+}
+
+fn check_ip_row(row: &IpCameraDraft) -> Result<IpCameraUpdate, IpFieldError> {
+    let url = row.url.trim();
+    let host = strip_rtsp_scheme(url).unwrap_or("");
+    if host.is_empty() || host.starts_with(['/', '?', '#', ':']) {
+        return Err(IpFieldError::UrlScheme);
+    }
+    if url.len() > IP_URL_MAX_BYTES {
+        return Err(IpFieldError::UrlTooLong);
+    }
+    if rtsp_url_has_credentials(url) {
+        return Err(IpFieldError::UrlCredentials);
+    }
+    let name = row.name.trim();
+    if name.len() > IP_NAME_MAX_BYTES {
+        return Err(IpFieldError::NameTooLong);
+    }
+    let username = row.username.trim();
+    if username.len() > IP_CREDENTIAL_MAX_BYTES {
+        return Err(IpFieldError::UsernameTooLong);
+    }
+    if row.password.len() > IP_CREDENTIAL_MAX_BYTES {
+        return Err(IpFieldError::PasswordTooLong);
+    }
+    // A typed password wins; otherwise an explicit removal sends "", and
+    // nothing at all keeps the stored one (a new camera has none to keep).
+    let password = if !row.password.is_empty() {
+        Some(row.password.clone())
+    } else if row.clear_password && row.id.is_some() {
+        Some(String::new())
+    } else {
+        None
+    };
+    Ok(IpCameraUpdate {
+        id: row.id.clone(),
+        name: name.to_string(),
+        url: url.to_string(),
+        username: username.to_string(),
+        password,
+    })
+}
+
+/// Validate the IP camera form into the complete, ordered list the device
+/// takes. The device validates again.
+fn parse_ip_form(rows: &[IpCameraDraft], max: usize) -> Result<Vec<IpCameraUpdate>, IpFormError> {
+    if rows.is_empty() {
+        return Err(IpFormError::Empty);
+    }
+    if rows.len() > max {
+        return Err(IpFormError::TooMany);
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| check_ip_row(row).map_err(|e| IpFormError::Field(i, e)))
+        .collect()
+}
+
+/// The mosaic grid `(columns, rows)` for a camera count: one camera fills
+/// the frame, two sit side by side, three or four share a 2 x 2 grid.
+fn mosaic_grid(count: usize) -> (usize, usize) {
+    match count {
+        0 | 1 => (1, 1),
+        2 => (2, 1),
+        _ => (2, 2),
+    }
+}
+
+/// Whether applying `rows` changes what the frame shows under the detection
+/// areas: a different mosaic grid, or a cell that shows another camera —
+/// moved, new in that position, or the same entry pointed at another URL.
+/// `applied` is the stored cameras as `(id, url)` in mosaic order when the IP
+/// cameras are the applied source, and `None` for a single-frame source
+/// (local or remote camera): switching from it always changes the scene.
+fn mosaic_changes(applied: Option<&[(String, String)]>, rows: &[IpCameraDraft]) -> bool {
+    let Some(applied) = applied else {
+        return true;
+    };
+    if mosaic_grid(applied.len()) != mosaic_grid(rows.len()) {
+        return true;
+    }
+    rows.iter().enumerate().any(|(i, row)| match (applied.get(i), row.id.as_deref()) {
+        // A new camera in a cell that was empty does not move the others.
+        (None, _) => false,
+        (Some((id, url)), Some(row_id)) => id != row_id || url.trim() != row.url.trim(),
+        (Some(_), None) => true,
+    })
 }

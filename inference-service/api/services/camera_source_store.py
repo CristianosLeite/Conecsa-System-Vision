@@ -5,14 +5,14 @@
 """
 Device-level capture source, persisted beside the models.
 
-Which camera a device inspects — its local V4L2 camera or a remote camera's stream —
-belongs to the device, not to a model: it must survive a model switch and apply
+Which camera a device inspects — its local V4L2 camera, a remote camera's
+stream or its RTSP IP cameras — belongs to the device, not to a model: it must survive a model switch and apply
 at boot with no model selected. So it lives in its own file,
 ``camera_source.json`` in the models directory, and never in a model's
 ``*.settings.json``.
 
-The file holds the stream token, a secret: it is written owner-only (0600) and
-nothing here logs its content.
+The file holds the stream token and the IP cameras' passwords, secrets: it is
+written owner-only (0600) and nothing here logs its content.
 """
 import logging
 import os
@@ -26,10 +26,15 @@ logger = logging.getLogger(__name__)
 
 
 class CameraSourceStore:
-    """Reads and writes ``camera_source.json`` (schema version 1)."""
+    """Reads and writes ``camera_source.json``.
+
+    Schema version 2 added the IP camera list; a version-1 file (no list)
+    still loads, and the next save writes version 2.
+    """
 
     FILENAME = "camera_source.json"
-    VERSION = 1
+    VERSION = 2
+    _READABLE = (1, 2)
 
     def __init__(self, directory: str):
         self._path = os.path.join(directory, self.FILENAME)
@@ -44,7 +49,7 @@ class CameraSourceStore:
         data = read_json(self._path, None)
         if data is None:
             return None
-        if not isinstance(data, dict) or data.get("version") != self.VERSION:
+        if not isinstance(data, dict) or data.get("version") not in self._READABLE:
             logger.error("Ignoring %s: unsupported format", self._path)
             return None
         try:

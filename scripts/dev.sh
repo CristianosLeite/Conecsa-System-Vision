@@ -251,11 +251,11 @@ if [ "$RUN_FLOW" -eq 1 ]; then
 fi
 
 if [ "$RUN_APP" -eq 1 ]; then
-    # Tailwind watch: shared input styles/input.css → system-vision/styles.css
+    # Tailwind watch: shared input shared/styles/input.css → system-vision/styles.css
     # (the file index.html loads). Trunk serve proxies /api to the gateway :5000.
     run_svc "tailwind" "$YELLOW" \
         "$PROJECT_ROOT/bin/tailwindcss" \
-        -i "$PROJECT_ROOT/styles/input.css" -o "$PROJECT_ROOT/system-vision/styles.css" --watch
+        -i "$PROJECT_ROOT/shared/styles/input.css" -o "$PROJECT_ROOT/system-vision/styles.css" --watch
     run_svc "system-vision" "$GREEN" \
         bash -c "cd '$PROJECT_ROOT/system-vision' && exec trunk serve --proxy-rewrite=/api --proxy-backend=http://localhost:5000 --port=18080"
 fi

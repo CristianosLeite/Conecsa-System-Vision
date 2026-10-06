@@ -514,7 +514,7 @@ wasm-pack test --headless --firefox system-vision
     the `ruff`, `clippy` and pinned-input lint gates on every pull request and on
     every push to `main`, as parallel jobs split by toolchain. The two Rust jobs
     (`cargo test` + `wasm-pack test`, and `clippy`) are skipped on a pull request
-    that touches no Rust crate and none of the Rust build inputs (`proto/`, `i18n/`,
+    that touches no Rust crate and none of the Rust build inputs (`proto/`, `shared/i18n/`,
     the lockfiles; the list is `.github/paths-filter.yml`), so a docs- or Python-only
     PR shows them as skipped rather than green. Pushes to `main` always run everything.
 

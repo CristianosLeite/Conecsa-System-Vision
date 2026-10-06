@@ -18,8 +18,9 @@ SPDX-License-Identifier = "AGPL-3.0-only"
 [[annotations]]
 path = [
     "proto/**",
-    "styles/**",
-    "i18n/**",
+    "shared/styles/**",
+    "shared/i18n/**",
+    "shared/ui-view/**",
     "os-base/conecsa_shm/**",
     "os-base/conecsa_common/**",
     "flow/nodes/conecsa-system-vision/**",

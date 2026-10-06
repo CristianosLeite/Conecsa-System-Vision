@@ -304,6 +304,12 @@ message TrainingJob {
                                     // built: "frames" | "tiles:auto" | "tiles:<px>" (the
                                     // ModelUploadMeta.train_geometry vocabulary); empty
                                     // while preparing
+  // Per-epoch metrics of the run, oldest first: a JSON array of objects, each
+  // with an "epoch" (1-based) plus that epoch's losses ("train/box_loss",
+  // "val/cls_loss", …) and headline metric ("metrics/mAP50-95(B)",
+  // "metrics/mAP50-95(M)" or "metrics/accuracy_top1"), using the same keys as
+  // metrics_json. Empty array before the first epoch and for face jobs.
+  string metrics_history_json = 17;
 }
 
 // ── Federated training (hub-orchestrated FedAvg) ─────────────────────────────

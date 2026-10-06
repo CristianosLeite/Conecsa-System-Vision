@@ -58,13 +58,17 @@ class LabelingService:
         self._manager: Optional[ModelManager] = None
         self._detector: Optional[Postprocessor] = None
         self._task: Optional[str] = None
+        # A private worker that did not exit when a failed load cleaned it up:
+        # no engine, but still GPU memory. Reported as loaded until an unload
+        # confirms it gone, so no GPU acquisition forgets it.
+        self._stray_worker = False
 
     # ── status ────────────────────────────────────────────────────────────────
 
     @property
     def is_loaded(self) -> bool:
         with self._lock:
-            return self._manager is not None
+            return self._manager is not None or self._stray_worker
 
     @property
     def model_name(self) -> str:
@@ -82,10 +86,11 @@ class LabelingService:
             loaded = self._manager is not None
             names = list(self._detector.class_labels) if loaded and self._detector else []
             return {
-                "loaded": loaded,
+                "loaded": loaded or self._stray_worker,
                 "model_name": self._model_name if loaded else "",
                 "class_names": names,
-                "message": "",
+                "message": ("A labeling worker did not exit; unload it to free the GPU"
+                            if self._stray_worker and not loaded else ""),
                 "task": (self._task or "") if loaded else "",
             }
 
@@ -134,12 +139,19 @@ class LabelingService:
         self._publish()
 
     def unload(self) -> None:
-        """Drop the engine and terminate the private worker (frees its CUDA memory)."""
+        """Drop the engine and terminate the private worker (frees its CUDA memory).
+
+        The worker is closed before the state is dropped: one that does not
+        exit raises and leaves the engine reported loaded, so neither the
+        status nor the gateway's confirmation claims memory that is still held.
+        """
         with self._lock:
-            had_engine = self._manager is not None
-            self._drop()
+            had_engine = self._manager is not None or self._stray_worker
+            if had_engine:
+                self._close_worker(strict=True)
+                self._drop()
+                self._stray_worker = False
         if had_engine:
-            self._close_worker()
             logger.info("Labeling engine unloaded")
         self._publish()
 
@@ -150,14 +162,22 @@ class LabelingService:
         self._model_name = ""
         self._task = None
 
-    def _close_worker(self) -> None:
+    def _close_worker(self, strict: bool = False) -> None:
         # The cached client stays (like every other worker); only its
         # subprocess goes away, so the next load restarts it cleanly.
+        # ``strict`` (an unload) propagates a worker that would not exit; a
+        # failed load's cleanup records it as a stray worker instead, so the
+        # load's own error surfaces.
         from api.runtime_management.worker_client import get_worker_client
 
         try:
             get_worker_client(self._port).close()
-        except Exception as exc:  # noqa: BLE001 - freeing must never fail the caller
+        except Exception as exc:  # noqa: BLE001 - see above
+            if strict:
+                raise
+            # Remembered, not forgotten: the status reports it until an unload
+            # confirms the worker gone.
+            self._stray_worker = True
             logger.warning("Could not close the labeling worker on port %d: %s",
                            self._port, exc)
 

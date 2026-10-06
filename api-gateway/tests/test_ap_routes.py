@@ -24,7 +24,7 @@ START, STOP, STATUS = "/api/v1/network/ap/start", "/api/v1/network/ap/stop", "/a
 PASSPHRASE = "test-passphrase-not-real"
 STATUS_BODY = {"active": True, "ssid": "conecsa-000001", "frequency_mhz": 5180, "address": "10.98.76.1",
                "prefix": 24, "stations": [{"address": "10.98.76.11", "hostname": "pixel", "signal": -50}],
-               "join_deadline_remaining_secs": 0, "wired_ready": True, "message": "Access point started",
+               "wired_ready": True, "message": "Access point started",
                "channels": [44]}
 
 

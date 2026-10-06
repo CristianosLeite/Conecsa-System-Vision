@@ -265,18 +265,22 @@ class WorkerClient:
             try:
                 self._process.terminate()
                 self._process.wait(timeout=timeout)
-            except TimeoutExpired:
-                self._process.kill()
-                self._process.wait()
-            except OSError as e:
-                logger.warning("Error terminating process: %s", e)
+            except (TimeoutExpired, OSError) as e:
+                logger.warning("Worker on port %s did not terminate (%s); killing it",
+                               self.port, e)
                 try:
                     self._process.kill()
-                    self._process.wait()
-                except OSError:
+                    # Bounded: an unreapable worker (stuck in the driver) must
+                    # not hang the caller, which may hold the model lock.
+                    self._process.wait(timeout=timeout)
+                except (TimeoutExpired, OSError):
                     logger.exception("Failed to kill worker process")
-            finally:
-                self._process = None
+            if self._process.poll() is None:
+                # Still alive (its CUDA memory with it): keep the handle, so the
+                # caller learns the GPU was not freed instead of forgetting it.
+                raise RuntimeError(
+                    f"TensorRT worker on port {self.port} did not exit")
+            self._process = None
 
         # The shared tensor file belonged to that process; the next start makes
         # a new one.
@@ -519,6 +523,22 @@ class WorkerClient:
             self._close_connection()
             self._terminate_process(timeout=5.0)
 
+    def release(self) -> None:
+        """Close the worker for a GPU release: the next start loads nothing.
+
+        A transparent restart re-loads the remembered engine; after a
+        deliberate release that would bring the old engine back beside the
+        next GPU consumer (a conversion's engine build runs in this worker).
+        So the engine is forgotten here, once the worker has exited — a
+        worker that could not be closed raises first and keeps it. Every
+        later user loads its engine explicitly (``load_model``).
+        """
+        with self._lock:
+            self.close()
+            self._model_path = None
+            self._input_details = None
+            self._output_details = None
+
 
 _client_cache: Dict[int, WorkerClient] = {}
 
@@ -549,14 +569,31 @@ def get_worker_client(port: Optional[int] = None) -> WorkerClient:
 def release_all_workers() -> None:
     """Terminate every cached worker subprocess, freeing its CUDA memory.
 
-    Used by the training-service GPU handover (ManagementControl.ReleaseRuntime):
+    Used by the shared GPU release (``ModelService.free_gpu``):
     the worker processes exit so the kernel reclaims their TensorRT contexts and
-    engine memory. The cache entries are kept on purpose — each client remembers
-    its ``_model_path`` and transparently restarts + reloads the engine on the
-    next request, so resuming inference needs no special casing here.
+    engine memory. The cache entries are kept, but each client forgets its
+    engine (``WorkerClient.release``): the next request starts an empty worker,
+    so a conversion's engine build does not reload the old engine first, and a
+    resumed detection loads its model explicitly.
+
+    Every worker is tried; if any could not be closed, ``RuntimeError`` names
+    them afterwards, so the shared GPU release never reports a GPU it did not
+    free.
     """
+    failed = []
     for client in list(_client_cache.values()):
         try:
-            client.close()
+            client.release()
         except Exception as e:  # noqa: BLE001 - releasing must not wedge on one worker
             logger.warning("Failed to close worker on port %s: %s", client.port, e)
+            failed.append(client.port)
+    if failed:
+        raise RuntimeError(
+            "Could not terminate the TensorRT workers on ports "
+            + ", ".join(str(port) for port in failed))
+
+
+def live_worker_ports() -> List[int]:
+    """Ports whose worker process is still alive (it keeps its CUDA memory)."""
+    return [client.port for client in list(_client_cache.values())
+            if client._process is not None and client._process.poll() is None]

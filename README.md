@@ -32,7 +32,7 @@ behind it on **gRPC** (control) and **POSIX shared memory** (frames) — see
 - **System monitoring**: real-time CPU, RAM, disk, temperature and GPU usage
 - **Web frontend**: Leptos compiled to WASM, served by Nginx
 - **Multilingual UI**: English (default), Brazilian Portuguese and Spanish in
-  both frontends (`leptos_i18n`, compile-time catalogs under `i18n/`). The
+  both frontends (`leptos_i18n`, compile-time catalogs under `shared/i18n/`). The
   language is chosen in the hub's **Settings** and propagates to embedded
   device pages via `?lang=` (persisted in the device UI's localStorage)
 - **Fleet hub**: a separate native (Tauri) `hub-vision` app logs operators in,
@@ -126,9 +126,10 @@ scripts/build-docs.sh
 system-vision/
 ├── proto/                  # Protocol Buffers (single source): detection, shm,
 │                           #   inference, hardware, training
-├── i18n/                   # Shared translation catalogs (en/pt-BR/es) for
-│                           #   system-vision + hub-vision (see i18n/README.md)
-├── styles/                 # Shared Tailwind v4 design system (entry styles/input.css)
+├── shared/                 # Apache-2.0 assets shared by system-vision and hub-vision
+│   ├── i18n/               #   Translation catalogs (en/pt-BR/es) (see shared/i18n/README.md)
+│   ├── styles/             #   Tailwind v4 design system (entry shared/styles/input.css)
+│   └── ui-view/            #   Leptos crate: zoomable image view + page-zoom guard
 ├── os-base/                # Base CUDA/ML image + privileged hardware agent + SHM helpers
 ├── system-vision/          # Rust web frontend (Leptos WASM, served by Nginx)
 ├── webcam-server/          # Camera server (Rust) — camera SHM producer
@@ -174,8 +175,8 @@ Conecsa System Vision is licensed in layers, and every file declares its own
 license with an SPDX header or an annotation in [`REUSE.toml`](REUSE.toml)
 ([REUSE](https://reuse.software/) compliant; `scripts/check-licenses.sh` checks it):
 
-- **Apache-2.0**: the gRPC contracts (`proto/`), the design system (`styles/`),
-  the translation catalogs (`i18n/`), the shared Python libraries
+- **Apache-2.0**: the gRPC contracts (`proto/`), the design system (`shared/styles/`),
+  the translation catalogs (`shared/i18n/`), the shared Leptos crate (`shared/ui-view/`), the shared Python libraries
   (`os-base/conecsa_shm`, `os-base/conecsa_common`), the Node-RED node package
   (`flow/nodes/conecsa-system-vision`), `scripts/`, `yocto/` and `docs/`. These
   never import AGPL code.
@@ -184,6 +185,7 @@ license with an SPDX header or an annotation in [`REUSE.toml`](REUSE.toml)
 
 License texts live in [`LICENSES/`](LICENSES); Apache-2.0 directories also carry
 their own `LICENSE` file. Third-party dependencies are listed in
-`os-base/THIRD-PARTY-NOTICES.md` and `api-gateway/THIRD-PARTY-NOTICES.md`.
+`os-base/THIRD-PARTY-NOTICES.md`, `api-gateway/THIRD-PARTY-NOTICES.md` and
+`webcam-server/THIRD-PARTY-NOTICES.md` (the Debian `ffmpeg` the IP camera source runs).
 The Conecsa names and logo are covered by [TRADEMARKS.md](TRADEMARKS.md), not by
 these licenses.

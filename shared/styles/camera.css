@@ -1,0 +1,187 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Camera source selection, setup forms and applied capture status. */
+
+@layer components {
+  .camera-panel {
+    container: camera-settings / inline-size;
+    scroll-padding-bottom: 10rem;
+  }
+
+  .camera-source-picker {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .camera-source-picker legend { margin-bottom: 0.75rem; }
+  .camera-source-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 1rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+    background: var(--surface-control);
+    cursor: pointer;
+  }
+  .camera-source-card:hover { border-color: var(--border-strong); }
+  .camera-source-card:has(input:checked) {
+    border-color: var(--accent-cyan);
+    background: var(--state-primary-bg);
+  }
+  /* Keyboard focus only; a click already shows the checked state. */
+  .camera-source-card:has(input:focus-visible) {
+    outline: 2px solid var(--accent-cyan);
+    outline-offset: 3px;
+  }
+  .camera-source-card .ui-radio { flex-shrink: 0; margin-top: 0.125rem; }
+  .camera-source-copy { display: grid; gap: 0.375rem; min-width: 0; }
+  .camera-setup, .camera-ip-card {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+    padding: 1rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+  }
+  .camera-ip-card { background: var(--surface-control); }
+  .camera-credentials { display: grid; gap: 0.75rem; }
+  .camera-guide summary { color: var(--text-muted); cursor: pointer; font-size: 0.875rem; }
+  .camera-guide p { margin-top: 0.5rem; }
+  .camera-mosaic {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.375rem;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .camera-mosaic-single { grid-template-columns: minmax(0, 1fr); }
+  .camera-mosaic-cell {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.25rem;
+    min-height: 4rem;
+    padding: 0.75rem;
+    text-align: center;
+    overflow-wrap: anywhere;
+    border: 1px solid var(--border-accent);
+    border-radius: 0.375rem;
+    background: var(--state-primary-bg);
+  }
+  .camera-mosaic-cell .ui-help:empty { display: none; }
+  .camera-inline-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+  /* Pinned to the card's bottom edge; the -1.5rem offsets cancel .ui-card-pad. */
+  .camera-apply-bar {
+    position: sticky;
+    bottom: -1.5rem;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin: 0 -1.5rem -1.5rem;
+    padding: 1rem 1.5rem;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--surface-panel);
+  }
+  .camera-apply-button { width: 100%; }
+  @container camera-settings (min-width: 32rem) {
+    .camera-credentials { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .camera-apply-bar { flex-direction: row; align-items: center; justify-content: space-between; }
+    .camera-apply-action { flex-shrink: 0; }
+  }
+
+  .camera-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .camera-field {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
+  .camera-source-options {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.5rem;
+  }
+
+  /* Three sources (local, remote, IP cameras) fit one row when there is room. */
+  @container camera-settings (min-width: 38rem) {
+    .camera-source-options {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+
+  .camera-network-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  /* Address grows, the port stays narrow; they stack on a phone-width card. */
+  .camera-endpoint {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.75rem;
+  }
+
+  @container camera-settings (min-width: 26rem) {
+    .camera-endpoint {
+      grid-template-columns: minmax(0, 1fr) 7rem;
+    }
+  }
+
+  .camera-token-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .camera-token-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  /* The device's access point while it is on: badge, network name, who joined. */
+  .camera-ap-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* Inside the confirmation: warning, network, wired link, passphrase, channel. */
+  .camera-ap-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+
+  /* Own line under the status badge; long translations wrap. */
+  .camera-status-detail {
+    width: 100%;
+    min-width: 0;
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+  .camera-status {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+}

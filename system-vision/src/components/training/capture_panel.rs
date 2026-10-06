@@ -2,14 +2,18 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use leptos::html;
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::api::training_preview_url;
 use crate::components::image_adjust_overlay::ImageAdjustOverlay;
 use crate::components::stereo_overlay::StereoOverlay;
 use crate::i18n::*;
 
-/// Live combined-camera preview + capture button. The preview MJPEG comes from
+/// Live combined-camera preview + capture button, with an icon button beside it
+/// that uploads image files from the operator's computer instead (stored like
+/// a capture, the last one opening in the editor). The preview MJPEG comes from
 /// the gateway (CPU-only stereo combine), so it works while inference is
 /// stopped; captured frames land in the dataset at its storage geometry
 /// (640×640 letterboxed for older datasets, or the native 16:9 frame for
@@ -20,8 +24,38 @@ use crate::i18n::*;
 /// camera config flows through the inference-service's management gRPC, which
 /// stays up while the detection runtime is released.
 #[component]
-pub(super) fn CapturePanel(on_capture: Callback<()>, capturing: ReadSignal<bool>) -> impl IntoView {
+pub(super) fn CapturePanel(
+    on_capture: Callback<()>,
+    capturing: ReadSignal<bool>,
+    on_upload: Callback<Vec<web_sys::File>>,
+    uploading: ReadSignal<bool>,
+) -> impl IntoView {
     let i18n = use_i18n();
+    let file_input_ref = NodeRef::<html::Input>::new();
+    let on_files_chosen = move |ev: leptos::ev::Event| {
+        let Some(input) = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+        else {
+            return;
+        };
+        let files: Vec<web_sys::File> = input
+            .files()
+            .map(|list| (0..list.length()).filter_map(|i| list.get(i)).collect())
+            .unwrap_or_default();
+        // Cleared so picking the same file again still fires `change`.
+        input.set_value("");
+        if !files.is_empty() {
+            on_upload.run(files);
+        }
+    };
+    let upload_label = move || {
+        if uploading.get() {
+            t_string!(i18n, training::uploading_images)
+        } else {
+            t_string!(i18n, training::upload_images)
+        }
+    };
     let (reload_key, set_reload_key) = signal(0u32);
     let preview_url = move || training_preview_url(reload_key.get());
 
@@ -71,21 +105,47 @@ pub(super) fn CapturePanel(on_capture: Callback<()>, capturing: ReadSignal<bool>
                     panel=panel
                 />
             </div>
-            <button
-                class="ui-button ui-button-primary ui-button-md w-full"
-                disabled=move || capturing.get()
-                on:click=move |_| on_capture.run(())
-            >
-                <svg class="w-4 h-4 stroke-current" viewBox="0 0 24 24" fill="none">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-                {move || if capturing.get() {
-                    t_string!(i18n, training::capturing)
-                } else {
-                    t_string!(i18n, training::capture_image)
-                }}
-            </button>
+            <div class="ui-capture-actions">
+                <button
+                    class="ui-button ui-button-primary ui-button-md ui-capture-main"
+                    disabled=move || capturing.get()
+                    on:click=move |_| on_capture.run(())
+                >
+                    <svg class="w-4 h-4 stroke-current" viewBox="0 0 24 24" fill="none">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    {move || if capturing.get() {
+                        t_string!(i18n, training::capturing)
+                    } else {
+                        t_string!(i18n, training::capture_image)
+                    }}
+                </button>
+                <button
+                    class="ui-button ui-button-neutral ui-button-md ui-capture-upload"
+                    disabled=move || uploading.get()
+                    title=upload_label
+                    aria-label=upload_label
+                    aria-busy=move || uploading.get().to_string()
+                    on:click=move |_| {
+                        if let Some(input) = file_input_ref.get_untracked() {
+                            input.click();
+                        }
+                    }
+                >
+                    <svg class="w-4 h-4 stroke-current" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                </button>
+                <input
+                    type="file"
+                    multiple
+                    accept="image/jpeg,image/png,image/webp,image/bmp"
+                    node_ref=file_input_ref
+                    on:change=on_files_chosen
+                    hidden
+                />
+            </div>
         </div>
     }
 }

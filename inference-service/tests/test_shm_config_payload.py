@@ -4,9 +4,9 @@
 
 """Serialized ``CameraConfig`` size against the SHM config region.
 
-The config region of the camera segment header holds 128 bytes and
-``write_config_bytes`` drops anything larger, so the message size is part of the
-contract. The same figures are pinned on the producer side in
+The config region of the camera segment header holds 4 KiB (protocol version
+3) and ``write_config_bytes`` drops anything larger, so the message size is part
+of the contract. The same figures are pinned on the producer side in
 ``webcam-server/src/webcam_server/shm.rs``.
 """
 import shm_pb2
@@ -37,31 +37,33 @@ def test_validated_maxima_take_exactly_119_bytes():
     assert len(cfg.SerializeToString()) == 119
 
 
-def test_every_number_at_uint32_max_still_fits_the_region():
-    # The worst case leaves 3 bytes and tag 16 onward costs a two-byte tag, so
-    # the next CameraConfig field needs a larger region: a layout change and an
-    # SHM_VERSION bump.
+def _four_ip_cameras_at_their_maxima() -> list:
+    return [
+        shm_pb2.IpCamera(url="rtsp://" + "h" * 249, username="u" * 64, password="p" * 64)
+        for _ in range(4)
+    ]
+
+
+def test_the_worst_case_config_fits_the_region_with_room_to_spare():
+    # Every number at its wire maximum, the network fields and four IP cameras
+    # at their validated maxima: under half of the region.
     cfg = _config(
         source=INT32_MAX,
         network_host="255.255.255.255",
         network_port=UINT32_MAX,
         network_token="Z" * 32,
+        ip_cameras=_four_ip_cameras_at_their_maxima(),
     )
-    assert len(cfg.SerializeToString()) == 125
-    assert len(cfg.SerializeToString()) <= CONFIG_PAYLOAD_MAX
+    assert len(cfg.SerializeToString()) == 1705
+    assert len(cfg.SerializeToString()) <= CONFIG_PAYLOAD_MAX // 2
 
 
-def test_a_negative_source_does_not_fit_so_writers_validate_the_enum():
-    # A negative enum value is a 10-byte varint. The size check in
-    # write_config_bytes is the backstop; rejecting unknown values is the rule.
-    cfg = _config(
-        source=-1,
-        network_host="255.255.255.255",
-        network_port=UINT32_MAX,
-        network_token="Z" * 32,
-    )
-    assert len(cfg.SerializeToString()) == 130
-    assert len(cfg.SerializeToString()) > CONFIG_PAYLOAD_MAX
+def test_a_negative_source_is_a_ten_byte_varint_so_writers_validate_the_enum():
+    # The size check in write_config_bytes is only a backstop; rejecting
+    # unknown values is the rule.
+    positive = _config(source=INT32_MAX)
+    negative = _config(source=-1)
+    assert len(negative.SerializeToString()) == len(positive.SerializeToString()) + 5
 
 
 def test_a_message_without_source_carries_no_source_on_the_wire():
@@ -83,3 +85,17 @@ def test_health_with_a_detail_fits_its_region():
         status="no_camera", detail=shm_pb2.CAMERA_HEALTH_DETAIL_BAD_STREAM
     )
     assert len(health.SerializeToString()) <= HEALTH_PAYLOAD_MAX
+
+
+def test_the_protobuf_free_count_reader_matches_the_stubs():
+    # conecsa_shm.mosaic scans the health payload by hand (no protobuf there).
+    from conecsa_shm.mosaic import ip_camera_count_of
+
+    assert ip_camera_count_of(None) == 0
+    assert ip_camera_count_of(shm_pb2.HealthStatus(status="capturing").SerializeToString()) == 0
+    for count in (1, 4, 300):
+        health = shm_pb2.HealthStatus(
+            status="no_camera", detail=shm_pb2.CAMERA_HEALTH_DETAIL_BAD_STREAM,
+            ip_camera_count=count)
+        assert ip_camera_count_of(health.SerializeToString()) == count
+    assert ip_camera_count_of(b"\x0a\xff") == 0  # truncated

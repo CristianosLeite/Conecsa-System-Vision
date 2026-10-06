@@ -4,7 +4,7 @@
 
 use leptos::prelude::*;
 
-use crate::api::{training_image_url, DatasetSummary};
+use crate::api::{DatasetSummary, training_image_url};
 use crate::components::application_select::task_label;
 use crate::i18n::*;
 use crate::models::Task;
@@ -33,8 +33,11 @@ pub(super) fn DatasetCard(
     on_delete: Callback<DatasetSummary>,
 ) -> impl IntoView {
     let i18n = use_i18n();
-    let (image_count, labeled_count, class_count) =
-        (dataset.image_count, dataset.labeled_count, dataset.class_count);
+    let (image_count, labeled_count, class_count) = (
+        dataset.image_count,
+        dataset.labeled_count,
+        dataset.class_count,
+    );
     // The task the dataset is labeled for, named in text.
     let task = Task::parse(&dataset.task);
     let ds_open = dataset.clone();
@@ -80,40 +83,43 @@ pub(super) fn DatasetCard(
             } else {
                 view! { <span/> }.into_any()
             }}
-            <div class="ui-thumb-actions">
-                <button
+            <div class="ui-thumb-actions ui-thumb-actions-compact">
+                <button type="button"
                     class="ui-thumb-action"
                     title=move || t_string!(i18n, training::export_dataset_title)
+                    aria-label=move || t_string!(i18n, training::export_dataset_title)
                     on:click=move |ev| {
                         ev.stop_propagation();
                         on_export.run(ds_export.clone());
                     }
                 >
-                    <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none">
+                    <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                     </svg>
                 </button>
-                <button
+                <button type="button"
                     class="ui-thumb-action"
                     title=move || t_string!(i18n, training::rename_dataset)
+                    aria-label=move || t_string!(i18n, training::rename_dataset)
                     on:click=move |ev| {
                         ev.stop_propagation();
                         on_rename.run(ds_rename.clone());
                     }
                 >
-                    <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none">
+                    <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                     </svg>
                 </button>
-                <button
+                <button type="button"
                     class="ui-thumb-action ui-thumb-action-danger"
                     title=move || t_string!(i18n, training::delete_dataset)
+                    aria-label=move || t_string!(i18n, training::delete_dataset)
                     on:click=move |ev| {
                         ev.stop_propagation();
                         on_delete.run(ds_delete.clone());
                     }
                 >
-                    <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none">
+                    <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                     </svg>
                 </button>

@@ -261,9 +261,18 @@ class Application:
         # no usable model never applies any model settings that would.
         self.video_service.publish_startup_source()
 
+        # A restart of this container alone can land in the middle of a
+        # training: the trainer then owns the GPU, so nothing is loaded. The
+        # answer holds until initialize() has run: a job starts only after
+        # this service's FreeGpu succeeded (gateway/training/jobs.py), and
+        # main.py serves gRPC only once initialize() returned.
+        from api.services.training_probe import training_job_active
+        self._training_at_boot = training_job_active()
+
         # Pre-warm the TensorRT worker so the CUDA context is ready before
         # the first .pt upload arrives
-        _bootstrap_tensorrt_worker()
+        if not self._training_at_boot:
+            _bootstrap_tensorrt_worker()
 
     def initialize(self):
         """Initialize the application.
@@ -286,6 +295,15 @@ class Application:
             return
 
         persisted = self.model_service.load_persisted_current_model()
+        if self._training_at_boot:
+            # Select without loading and take the handover over: leaving
+            # training mode resumes detection with this model.
+            if persisted:
+                self.model_service.select_model(persisted)
+            self.model_service.hold_for_training()
+            logger.warning("A training job holds the GPU: detection not started; "
+                           "it resumes when training mode ends")
+            return
         if persisted:
             logger.info(f"Restoring last-selected model: {persisted}")
             try:

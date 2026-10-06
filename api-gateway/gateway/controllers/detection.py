@@ -13,7 +13,8 @@ import detection_pb2 as det_pb  # noqa: E402
 import grpc
 from flask import Response, request
 
-from ..grpc_clients import clients, inf, trn
+from ..gpu import GpuBusy, Purpose, busy_response, gpu_session
+from ..grpc_clients import clients, inf
 from ..helpers import (
     DEVICE_VERSION,
     _accepts_protobuf,
@@ -25,7 +26,6 @@ from ..helpers import (
     _protobuf,
     _publish_if_success,
 )
-from ..training.helpers import conversion_active, training_job_active
 from . import api_bp
 
 logger = logging.getLogger(__name__)
@@ -157,38 +157,19 @@ def start_detection():
         # build while one runs; starting detection would re-spawn the TensorRT
         # workers on top of it. The device UI disables Start for the same
         # states, but the hub, Node-RED and a second tab reach this route
-        # directly, so the gateway is the authority.
-        if training_job_active():
-            msg = ("A model training is in progress; wait for it to finish "
-                   "before starting detection.")
-            if _accepts_protobuf():
-                return _protobuf(det_pb.StartDetectionResponse(success=False, message=msg), 409)
-            return _json_error(msg, 409)
-        if conversion_active():
-            msg = ("A model conversion is in progress; wait for it to finish "
-                   "before starting detection.")
-            if _accepts_protobuf():
-                return _protobuf(det_pb.StartDetectionResponse(success=False, message=msg), 409)
-            return _json_error(msg, 409)
-        # Training's labeling assistants (SAM3 in the training-service, the
-        # labeling engine on the inference-service's private worker) must
-        # never stay GPU-pinned once detection runs. Best-effort with their
-        # own except: an unreachable training-service must not block the
-        # start (nor be mistaken for an inference failure), and the status
-        # probes avoid a spurious *_changed event from unloading nothing.
+        # directly, so the gateway is the authority. The shared release also
+        # drops training's labeling assistants (SAM3, the labeling engine),
+        # which must never stay GPU-pinned once detection runs. The session
+        # holds the gateway GPU lock through the Start, so no SAM3 load or
+        # training start can land between the checks and the start.
         try:
-            if clients.training.GetSamStatus(trn.Empty()).loaded:
-                clients.training.UnloadSam(trn.Empty())
-        except grpc.RpcError as sam_exc:
-            logger.warning("Best-effort SAM unload before start failed: %s",
-                           sam_exc)
-        try:
-            if clients.model.GetLabelModelStatus(inf.Empty()).loaded:
-                clients.model.UnloadLabelModel(inf.Empty())
-        except grpc.RpcError as lm_exc:
-            logger.warning("Best-effort label-model unload before start failed: %s",
-                           lm_exc)
-        r = clients.detection.Start(inf.Empty())
+            with gpu_session(Purpose.DETECTION):
+                r = clients.detection.Start(inf.Empty())
+        except GpuBusy as busy:
+            if _accepts_protobuf():
+                return _protobuf(det_pb.StartDetectionResponse(
+                    success=False, message=busy.message), busy.status)
+            return busy_response(busy)
     except grpc.RpcError as exc:
         return _grpc_error(exc)
     if not r.success:

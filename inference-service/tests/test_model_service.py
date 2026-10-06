@@ -3,8 +3,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 """Unit tests for ModelService path helpers and validation."""
+import json
+
+import pytest
 from api.config import Config
-from api.services.model_service import ModelService
+from api.services.model_service import ModelService, model_scores
 
 
 class TestSiblingPathHelpers:
@@ -65,6 +68,27 @@ class TestListModels:
         (tmp_path / "notes.TXT").write_bytes(b"x")
         names = [m.name for m in ModelService(Config(), str(tmp_path)).list_models()]
         assert names == ["yard.ENGINE"]
+
+    def test_lists_the_recorded_scores(self, tmp_path):
+        (tmp_path / "seg.engine").write_bytes(b"x")
+        (tmp_path / "seg.settings.json").write_text(json.dumps(
+            {"task": "segment", "metrics": {"map50_95_box": 0.7, "map50_95_mask": 0.6}}))
+        (tmp_path / "old.engine").write_bytes(b"x")
+        models = {m.name: m for m in ModelService(Config(), str(tmp_path)).list_models()}
+        assert (models["seg.engine"].map50_95, models["seg.engine"].accuracy_top1) == (0.6, None)
+        assert (models["old.engine"].map50_95, models["old.engine"].accuracy_top1) == (None, None)
+
+
+@pytest.mark.parametrize("task,metrics,expected", [
+    ("detect", {"map50_95_box": 0.6, "map50_95_mask": 0.5}, (0.6, None)),
+    ("segment", {"map50_95_box": 0.6, "map50_95_mask": 0.5}, (0.5, None)),
+    ("segment", {"map50_95_box": 0.6}, (0.6, None)),
+    ("classify", {"accuracy_top1": 0.9, "map50_95_box": 0.6}, (None, 0.9)),
+    ("face", {"map50_95_box": 0.6}, (None, None)),
+    ("detect", {}, (None, None)),
+])
+def test_model_scores_pick_the_task_metric(task, metrics, expected):
+    assert model_scores(task, metrics) == expected
 
 
 class TestDeleteModel:

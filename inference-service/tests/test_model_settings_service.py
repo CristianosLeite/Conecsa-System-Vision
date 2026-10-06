@@ -10,6 +10,7 @@ import pytest
 from api.services.model_settings_service import (
     ModelSettingsService,
     geometry_mismatch,
+    parse_metrics,
     parse_train_geometry,
 )
 
@@ -294,6 +295,52 @@ class TestTrainingGeometry:
     ])
     def test_parse(self, raw, expected):
         assert parse_train_geometry(raw) == expected
+
+
+class TestMetrics:
+    def test_record_training_merges_the_scores(self, tmp_path):
+        path = tmp_path / "weights.settings.json"
+        ModelSettingsService.record_training(str(path), 640, "frames", task="detect")
+        ModelSettingsService.record_training(str(path), 640, None,
+                                             metrics={"map50_95_box": 0.62})
+        assert json.loads(path.read_text()) == {
+            "imgsz": 640, "training": {"geometry": "frames"}, "task": "detect",
+            "metrics": {"map50_95_box": 0.62}}
+        assert ModelSettingsService.metrics_of(str(path)) == {"map50_95_box": 0.62}
+
+    def test_none_keeps_and_empty_drops_the_scores(self, tmp_path):
+        path = tmp_path / "weights.settings.json"
+        ModelSettingsService.record_training(str(path), 640, metrics={"map50_95_box": 0.5})
+        ModelSettingsService.record_training(str(path), 640)
+        assert ModelSettingsService.metrics_of(str(path)) == {"map50_95_box": 0.5}
+        ModelSettingsService.record_training(str(path), None, metrics={})
+        assert "metrics" not in json.loads(path.read_text())
+
+    def test_save_carries_the_scores_over(self, config, tmp_path):
+        path = tmp_path / "weights.settings.json"
+        ModelSettingsService.record_training(str(path), 640, metrics={"accuracy_top1": 0.9})
+        svc = ModelSettingsService(config)
+        svc.switch_model(str(path))
+        config.CONFIDENCE_THRESHOLD = 0.3
+        svc.save()
+        assert json.loads(path.read_text())["metrics"] == {"accuracy_top1": 0.9}
+
+    def test_metrics_of_a_missing_or_broken_file_is_empty(self, tmp_path):
+        assert ModelSettingsService.metrics_of(str(tmp_path / "absent.json")) == {}
+        broken = tmp_path / "broken.settings.json"
+        broken.write_text("{not json")
+        assert ModelSettingsService.metrics_of(str(broken)) == {}
+
+    @pytest.mark.parametrize("raw,expected", [
+        ({"map50_95_box": 0.5, "map50_95_mask": 1, "accuracy_top1": 0.0},
+         {"map50_95_box": 0.5, "map50_95_mask": 1.0, "accuracy_top1": 0.0}),
+        ({"map50_95_box": True}, {}), ({"map50_95_box": 1.01}, {}),
+        ({"map50_95_box": float("inf")}, {}), ({"map50_95_box": "0.5"}, {}),
+        ({"precision": 0.5}, {}), ([0.5], {}), (None, {}),
+        ({"map50_95_box": 10 ** 400, "accuracy_top1": 0.9}, {"accuracy_top1": 0.9}),
+    ])
+    def test_parse(self, raw, expected):
+        assert parse_metrics(raw) == expected
 
 
 class TestGeometryMismatch:

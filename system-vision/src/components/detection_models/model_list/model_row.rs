@@ -4,6 +4,7 @@
 
 use crate::app::{format_size, ModelInfo};
 use crate::i18n::*;
+use crate::models::ModelScore;
 use leptos::prelude::*;
 
 use wasm_bindgen::JsCast;
@@ -28,6 +29,14 @@ pub(super) fn ModelRow(
     // A package under construction (or left by an interrupted build) is not
     // a model to select: the device refuses it, so offer nothing but delete.
     let building = model.is_enrollment_package();
+    // The validation score recorded at conversion, hidden when there is none.
+    let score = model.score().map(|(kind, pct)| {
+        let label = match kind {
+            ModelScore::Map50_95 => t!(i18n, models::score_map50_95).into_any(),
+            ModelScore::AccuracyTop1 => t!(i18n, models::score_accuracy_top1).into_any(),
+        };
+        view! { " · " {label} {format!(" {pct:.1}%")} }
+    });
 
     view! {
         <div
@@ -58,7 +67,7 @@ pub(super) fn ModelRow(
         >
             <div class="flex flex-col gap-1">
                 <span class="ui-value text-sm">{model.name.clone()}</span>
-                <span class="ui-help">{format_size(model.size)}</span>
+                <span class="ui-help">{format_size(model.size)}{score}</span>
             </div>
             {if model.is_active {
                 view! {

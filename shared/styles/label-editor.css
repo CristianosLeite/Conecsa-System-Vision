@@ -1,0 +1,276 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Label editor canvas (training) SVG presentation. */
+
+@layer components {
+  /* ── Canvas slot ────────────────────────────────────────────────────────── */
+  /* The canvas (or the placeholder) over the status line. In the editor card
+     (a flex column that shrinks to the training column) the slot is the
+     shrinkable item: while everything fits it is as tall as its content;
+     otherwise it takes what is left and the `minmax(0, 1fr)` row hands that
+     height to the canvas, whose `max-height: 100%` transfers through the
+     aspect ratio into a max-width, so the picture shrinks to fit and stays
+     centred. On a scrolling page (below 768 px) the percentages resolve to
+     nothing and the canvas is width-driven. `min-height` keeps a short
+     viewport from squashing the canvas: the column scrolls instead. */
+  .ui-label-canvas {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    row-gap: 0.75rem;
+    flex: 0 1 auto;
+    min-height: 12rem;
+  }
+
+  .ui-label-canvas-fit {
+    min-height: 0;
+  }
+
+  /* No image yet: a square, sized like the canvas. */
+  .ui-label-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 1 / 1;
+    width: auto;
+    max-width: 100%;
+    max-height: 100%;
+    margin-inline: auto;
+    font-size: 0.875rem;
+  }
+
+  /* ── Canvas viewport and stage ──────────────────────────────────────────── */
+  /* The viewport keeps the layout size it is given (the image's aspect ratio
+     as an inline style, the height from the slot above) and clips the stage:
+     the image plus its SVG overlay, laid out `--label-zoom` times as large
+     and offset so the normalized image point (`--label-ox`, `--label-oy`)
+     sits at the top-left corner. Percentages resolve against the viewport,
+     so the stage needs no measurement; the component derives the overlay's
+     px space from the viewport size × zoom. Layout, not `transform:
+     scale()`: the picture stays crisp and the overlay keeps drawing in real
+     screen pixels. */
+  .ui-label-viewport {
+    position: relative;
+    width: auto;
+    max-width: 100%;
+    max-height: 100%;
+    margin-inline: auto;
+    border-radius: 0.25rem;
+    overflow: hidden;
+    user-select: none;
+    /* Every touch is ours: a finger draws, two fingers zoom and pan. */
+    touch-action: none;
+  }
+
+  /* Space held: a press will pan, not draw. */
+  .ui-label-viewport-pan {
+    cursor: grab;
+  }
+
+  .ui-label-viewport-panning {
+    cursor: grabbing;
+  }
+
+  .ui-label-stage {
+    position: absolute;
+    left: calc(var(--label-ox, 0) * var(--label-zoom, 1) * -100%);
+    top: calc(var(--label-oy, 0) * var(--label-zoom, 1) * -100%);
+    width: calc(var(--label-zoom, 1) * 100%);
+    height: calc(var(--label-zoom, 1) * 100%);
+  }
+
+  .ui-label-stage > img,
+  .ui-label-stage > svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .ui-label-stage > img {
+    pointer-events: none;
+  }
+
+  .ui-label-stage > svg {
+    cursor: crosshair;
+  }
+
+  .ui-label-viewport-pan .ui-label-stage > svg,
+  .ui-label-viewport-pan .ui-label-stage > svg * {
+    cursor: inherit;
+  }
+
+  .ui-label-viewport-panning .ui-label-stage > svg,
+  .ui-label-viewport-panning .ui-label-stage > svg * {
+    cursor: grabbing;
+  }
+
+  /* ── Label editor canvas (training) ─────────────────────────────────────── */
+  /* SVG presentation: static styling lives here; per-class colors and the
+     selection-driven fill/stroke-width stay as element attributes (which CSS
+     here intentionally does not set, so they take effect). The overlay's
+     viewBox is sized in CSS pixels to the rendered canvas, so every width
+     below is a real on-screen pixel; non-scaling-stroke guards the one frame
+     where the viewBox lags a resize. */
+  .ui-label-box {
+    pointer-events: all;
+    cursor: move;
+    vector-effect: non-scaling-stroke;
+  }
+
+  /* SAM mode: boxes are click-through so a click becomes a point prompt. */
+  .ui-label-box-locked {
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .ui-label-text {
+    pointer-events: none;
+    paint-order: stroke;
+    stroke: rgba(0, 0, 0, 0.67);
+    stroke-width: 2.5px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  /* Hollow: the translucent fill keeps the whole square a hit target while
+     the object underneath stays visible. */
+  .ui-label-handle {
+    fill: rgba(255, 255, 255, 0.25);
+    stroke-width: 1.25;
+    pointer-events: all;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .ui-label-handle-nwse {
+    cursor: nwse-resize;
+  }
+
+  .ui-label-handle-nesw {
+    cursor: nesw-resize;
+  }
+
+  .ui-label-suggestion {
+    fill: none;
+    stroke: var(--accent-yellow);
+    stroke-width: 1.25;
+    stroke-dasharray: 6 4;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .ui-label-point {
+    stroke: #fff;
+    stroke-width: 1.5;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .ui-label-point-positive {
+    fill: var(--color-success);
+  }
+
+  .ui-label-point-negative {
+    fill: var(--color-danger);
+  }
+
+  .ui-label-draft {
+    fill: none;
+    stroke-width: 1.25;
+    stroke-dasharray: 4 3;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  /* ── Polygons (segmentation) ────────────────────────────────────────────── */
+  /* Same contract as the boxes: class colours and the selection fill arrive as
+     attributes; every width is a real on-screen pixel. */
+  .ui-label-polygon {
+    pointer-events: all;
+    cursor: move;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+  }
+
+  /* SAM mode: click-through so a click becomes a point prompt. */
+  .ui-label-polygon-locked {
+    pointer-events: none;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+  }
+
+  /* The selected polygon's edges: a wide invisible hit stroke, so a click
+     near an edge (not only exactly on it) inserts a vertex there. */
+  .ui-label-polygon-edge {
+    fill: none;
+    stroke: transparent;
+    stroke-width: 12px;
+    pointer-events: stroke;
+    cursor: copy;
+    vector-effect: non-scaling-stroke;
+  }
+
+  /* A vertex is two circles: an invisible hit target sized to the vertex hit
+     radius (VERTEX_HIT_PX) and, right after it, the small visible handle. */
+  .ui-label-vertex-hit {
+    fill: transparent;
+    stroke: none;
+    pointer-events: all;
+    cursor: grab;
+  }
+
+  .ui-label-vertex {
+    fill: rgba(255, 255, 255, 0.85);
+    stroke-width: 1.5;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .ui-label-vertex-hit:hover + .ui-label-vertex {
+    fill: #fff;
+    stroke-width: 2.5;
+  }
+
+  .ui-label-vertex-selected {
+    stroke-width: 3;
+  }
+
+  /* The first vertex of a click-placed draft: the target that closes it. */
+  .ui-label-vertex-close {
+    fill: var(--accent-yellow);
+    stroke: rgba(0, 0, 0, 0.67);
+    stroke-width: 1;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .ui-label-polygon-draft {
+    fill: none;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+    stroke-linejoin: round;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  /* From the last placed vertex to the pointer while placing points. */
+  .ui-label-polygon-rubber {
+    stroke-width: 1;
+    stroke-dasharray: 2 3;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .ui-label-polygon-suggestion {
+    fill: none;
+    stroke: var(--accent-yellow);
+    stroke-width: 1.25;
+    stroke-dasharray: 6 4;
+    stroke-linejoin: round;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+}

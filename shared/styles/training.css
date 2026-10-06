@@ -1,0 +1,545 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Training pages (device UI): dataset list and dataset editor layout. */
+
+@layer components {
+  /* ── Top bars ──────────────────────────────────────────────────────────── */
+  /* Colors come from `.ui-topbar`; this only lays the bar out. Both halves
+     wrap, so a long dataset name or a localized counter never collides with
+     the actions on a narrow screen. */
+  .ui-training-topbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    padding: 0.75rem 1rem;
+  }
+
+  /* ── Label editor toolbar ─────────────────────────────────────────────── */
+  /* Two rows. The head holds the title and the selects, whose content never
+     depends on the editor state, and wraps like the top bars. The tool strip
+     below shows the selection, history and zoom controls only when they
+     apply (the `hidden` attribute): every control is a fixed 2rem box in one
+     non-wrapping row, so a state change alters the strip's scroll width and
+     never its height — the canvas below does not move. On a narrow screen
+     the strip scrolls horizontally instead of wrapping. */
+  .ui-label-toolbar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  /* ── Label editor card ────────────────────────────────────────────────── */
+  /* A column: toolbar, the optional assistant panel, then the canvas slot.
+     From 768 px the work column has a fixed height (the page does not
+     scroll), so the card is a shrinkable flex item of that column and its
+     canvas slot (`.ui-label-canvas`) shrinks in turn — the canvas is sized
+     from the height that is really left (see label-editor.css), not from a
+     guessed `100dvh - n rem`, so the column never grows a scrollbar for
+     the editor. Below 768 px the page scrolls and the canvas is
+     width-driven. */
+  .ui-label-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .ui-label-toolbar-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .ui-label-toolbar-head-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* A caption and its select. */
+  .ui-label-toolbar-field {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .ui-label-toolbar-hint-idle {
+    visibility: hidden;
+  }
+
+  .ui-label-tools {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.25rem;
+    min-height: max(2rem, 32px);
+    overflow-x: auto;
+    overflow-y: hidden;
+    /* Room for the select's focus ring, which the overflow would clip. */
+    padding: 0.125rem;
+    margin: -0.125rem;
+    scrollbar-width: thin;
+  }
+
+  .ui-label-tools-group {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .ui-label-tools .ui-icon-button:focus-visible {
+    outline-offset: -2px;
+  }
+
+  /* A divider before a group, only when a visible group precedes it. */
+  .ui-label-tools-group:not([hidden]) ~ .ui-label-tools-group:not([hidden])::before {
+    content: "";
+    width: 1px;
+    height: 1.25rem;
+    margin-inline: 0.25rem;
+    background: var(--border-subtle);
+  }
+
+  /* The selected label's class: the buttons' height and a fixed width, so
+     reassigning a class never resizes the strip. */
+  .ui-label-tools-class {
+    width: 10rem;
+    height: max(2rem, 32px);
+    padding-block: 0;
+    text-overflow: ellipsis;
+  }
+
+  /* The zoom readout (click resets): fixed width so 100% → 800% never shifts
+     the buttons around it. */
+  .ui-label-tools-readout {
+    width: auto;
+    min-width: 3.5rem;
+    padding-inline: 0.375rem;
+    font-size: 0.75rem;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+  }
+
+  @media (max-width: 639px) {
+    .ui-label-tools-class {
+      width: 7rem;
+    }
+  }
+
+  /* Touch: 44 px targets, independent of the root density. Per device, never
+     per state, so the strip height still never changes while editing. */
+  @media (any-pointer: coarse) {
+    .ui-label-tools {
+      min-height: 44px;
+    }
+
+    .ui-label-tools .ui-icon-button-md,
+    .ui-label-tools-class {
+      height: 44px;
+    }
+
+    .ui-label-tools .ui-icon-button-md {
+      width: 44px;
+    }
+  }
+
+  .ui-training-topbar-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    min-width: 0;
+  }
+
+  .ui-training-topbar-title {
+    min-width: 0;
+    font-size: 1.125rem;
+    line-height: 1.75rem;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  /* A card header whose actions drop under the title when they don't fit. */
+  .ui-training-panel-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .ui-training-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* ── Dataset editor ────────────────────────────────────────────────────── */
+  /* Mobile-first: below 768 px the capture/classes column, the editor and the
+     gallery stack and `.app-main` scrolls the page. */
+  .ui-training-editor {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+    width: 100%;
+  }
+
+  .ui-training-side {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  /* Camera panel actions: the capture button fills the row, the icon-only
+     upload button beside it keeps a square footprint (same height). */
+  .ui-capture-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .ui-capture-actions > .ui-capture-main {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .ui-capture-actions > .ui-capture-upload {
+    flex: none;
+    padding-inline: 0.75rem;
+  }
+
+  .ui-class-name {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .ui-class-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Stacked below the editor the gallery is as wide as the page, so more
+     thumbnails fit a row; in a side column it keeps two. */
+  .ui-training-thumbs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+    padding-right: 0.25rem;
+  }
+
+  @media (min-width: 640px) {
+    .ui-training-thumbs {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+
+  /* From 768 px the page fills the viewport (the app shell does not scroll)
+     and each panel scrolls on its own: the editor on the right, the capture
+     and classes panels over the gallery on the left. */
+  @media (min-width: 768px) {
+    .ui-training-editor {
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+      height: 100%;
+      min-height: 0;
+    }
+
+    .ui-training-side,
+    .ui-training-work,
+    .ui-training-gallery {
+      min-height: 0;
+      max-height: 100%;
+      overflow-y: auto;
+    }
+
+    /* The editor card shrinks to the column (a flex item with a definite
+       container, so percentages inside it resolve); it is never taller than
+       its content. */
+    .ui-training-work {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .ui-label-editor {
+      flex: 0 1 auto;
+      min-height: 0;
+    }
+
+    .ui-training-side {
+      grid-column: 1 / span 4;
+      grid-row: 1;
+    }
+
+    .ui-training-work {
+      grid-column: 5 / span 8;
+      grid-row: 1 / span 2;
+    }
+
+    .ui-training-gallery {
+      grid-column: 1 / span 4;
+      grid-row: 2;
+    }
+
+    .ui-training-thumbs {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  /* From 1280 px: three full-height columns, the gallery on the right. */
+  @media (min-width: 1280px) {
+    .ui-training-editor {
+      grid-template-rows: minmax(0, 1fr);
+    }
+
+    .ui-training-side {
+      grid-column: 1 / span 3;
+    }
+
+    .ui-training-work {
+      grid-column: 4 / span 6;
+      grid-row: 1;
+    }
+
+    .ui-training-gallery {
+      grid-column: 10 / span 3;
+      grid-row: 1;
+    }
+  }
+
+  /* Touch: a thumb's three 32 px actions sit in one row along the top edge
+     (`.ui-thumb-actions-compact`), which needs a 116 px thumb (3 × 32 + two
+     4 px gaps + 8 px insets + 4 px border), or the first action is clipped.
+     Below that the gallery drops columns instead. After the breakpoints
+     above so it overrides their fixed column counts. */
+  @media (any-pointer: coarse) {
+    .ui-training-thumbs {
+      grid-template-columns: repeat(auto-fill, minmax(116px, 1fr));
+    }
+  }
+
+  /* Training run screen: status header above the per-epoch charts. */
+  .ui-training-run {
+    overflow-y: auto;
+    border-radius: 0;
+  }
+
+  .ui-training-run-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 100%;
+    max-width: 72rem;
+    margin: 0 auto;
+    padding: 1rem;
+  }
+
+  .ui-training-run-compact {
+    max-width: 32rem;
+    min-height: 100%;
+    justify-content: center;
+  }
+
+  .ui-training-run-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .ui-training-run-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ui-training-run-epoch {
+    flex-shrink: 0;
+    border: 1px solid var(--state-primary-border);
+    border-radius: 9999px;
+    background: var(--state-primary-bg);
+    color: var(--state-primary-text);
+    padding: 0.125rem 0.625rem;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ui-training-run-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+  }
+
+  .ui-training-run-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-left: auto;
+  }
+
+  .ui-training-run-charts {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  @media (min-width: 768px) {
+    .ui-training-run-charts {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  .ui-chart-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    padding: 0.75rem;
+    min-width: 0;
+  }
+
+  .ui-chart-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .ui-chart-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+
+  .ui-chart-latest {
+    display: flex;
+    gap: 0.625rem;
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ui-chart-latest-train {
+    color: var(--accent-cyan);
+  }
+
+  .ui-chart-latest-val {
+    color: var(--accent-yellow);
+  }
+
+  .ui-chart-latest:not(:has(.ui-chart-latest-train)) .ui-chart-latest-val {
+    color: var(--accent-green);
+  }
+
+  .ui-chart-svg {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .ui-chart-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 320 / 150;
+    border: 1px dashed var(--border-subtle);
+    border-radius: 0.375rem;
+  }
+
+  .ui-chart-grid {
+    stroke: var(--border-subtle);
+    stroke-width: 1;
+  }
+
+  .ui-chart-tick {
+    fill: var(--text-faint);
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ui-chart-line {
+    fill: none;
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+
+  .ui-chart-line-train {
+    stroke: var(--accent-cyan);
+  }
+
+  .ui-chart-line-val {
+    stroke: var(--accent-yellow);
+    stroke-dasharray: 5 3;
+  }
+
+  .ui-chart-line-metric {
+    stroke: var(--accent-green);
+  }
+
+  .ui-chart-dot-train {
+    fill: var(--accent-cyan);
+  }
+
+  .ui-chart-dot-val {
+    fill: var(--accent-yellow);
+  }
+
+  .ui-chart-dot-metric {
+    fill: var(--accent-green);
+  }
+
+  .ui-chart-legend {
+    display: flex;
+    gap: 1rem;
+    color: var(--text-muted);
+    font-size: 0.6875rem;
+  }
+
+  .ui-chart-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+  }
+
+  .ui-chart-key::before {
+    content: "";
+    width: 1rem;
+    border-top: 2px solid currentColor;
+  }
+
+  .ui-chart-key-train::before {
+    color: var(--accent-cyan);
+  }
+
+  .ui-chart-key-val::before {
+    color: var(--accent-yellow);
+    border-top-style: dashed;
+  }
+
+  /* A chart's values for screen readers: visually hidden, still announced. */
+  .ui-chart-data {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+}

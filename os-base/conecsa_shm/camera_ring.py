@@ -8,7 +8,7 @@ Single source of the camera-ring header layout — must match
 ``webcam-server/src/webcam_server/shm.rs``. Used by:
 
 - **inference-service** (``ConsumerService``): ``get_latest_frame`` returns the
-  raw form (BGR ``np.ndarray`` for RAW_RGB producers, JPEG ``bytes`` for MJPEG),
+  raw form (BGR ``np.ndarray`` for RAW producers, JPEG ``bytes`` for MJPEG),
   plus the camera config/health byte exchange (``writable=True``).
 - **api-gateway** (``media``): ``get_latest`` returns a ready-to-stream JPEG
   (RAW frames are encoded), read-only, lock-free across many MJPEG generators.
@@ -16,7 +16,8 @@ Single source of the camera-ring header layout — must match
 Readers are stateless (the caller passes the last seq it saw), so any number of
 consumers fan out from the same segment.
 
-Publication protocol (header version 2): ``FRAME_WRITE_SEQ`` is an odd/even
+Publication protocol (header version 3, the seqlock of version 2 plus a
+4 KiB config region): ``FRAME_WRITE_SEQ`` is an odd/even
 generation counter (a seqlock). The writer bumps it odd, writes the inactive
 slot and ALL frame metadata (dimensions included), then bumps it even; a
 reader loads the seq (odd → a write is in flight → retry), copies the frame
@@ -43,20 +44,23 @@ logger = logging.getLogger(__name__)
 
 # Header constants — must match webcam-server/src/webcam_server/shm.rs.
 SHM_MAGIC = 0xC04E5A01
-# Version 2 = the seqlock publication protocol above. A version-1 producer is
-# rejected at open() so mismatched services fail loudly, not by tearing.
-SHM_VERSION = 2
+# Version 2 = the seqlock publication protocol above; version 3 grew the config
+# region to 4 KiB (the IP camera list) and added FORMAT_RAW_BGR. An older
+# producer is rejected at open() so mismatched services fail loudly, not by
+# tearing.
+SHM_VERSION = 3
 
 # Torn reads are rare (the writer's window is one memcpy); a handful of
 # retries with a short pause outlasts it without spinning.
 _READ_RETRIES = 4
 _RETRY_PAUSE_S = 0.0005
-HEADER_SIZE = 256
-CONFIG_PAYLOAD_MAX = 128
+HEADER_SIZE = 4352
+CONFIG_PAYLOAD_MAX = 4096
 HEALTH_PAYLOAD_MAX = 64
 
 FORMAT_RAW_RGB = 0
 FORMAT_JPEG = 1
+FORMAT_RAW_BGR = 2
 
 OFF_MAGIC = 0
 OFF_VERSION = 4
@@ -71,9 +75,9 @@ OFF_FRAME_SIZE = 40
 OFF_CONFIG_WRITE_SEQ = 44
 OFF_CONFIG_SIZE = 48
 OFF_CONFIG_PAYLOAD = 52
-OFF_HEALTH_WRITE_SEQ = 180
-OFF_HEALTH_SIZE = 184
-OFF_HEALTH_PAYLOAD = 188
+OFF_HEALTH_WRITE_SEQ = 4148
+OFF_HEALTH_SIZE = 4152
+OFF_HEALTH_PAYLOAD = 4156
 
 
 class CameraRingReader:
@@ -96,6 +100,10 @@ class CameraRingReader:
         # segment on start, which discards the config region: a writer compares
         # this to know it must publish its config again.
         self._attach_generation = 0
+        # The segment last refused for its magic/version: logged once, not on
+        # every poll (a producer creates the header right after the file, and
+        # a mismatched peer would otherwise flood the journal).
+        self._rejected: Optional[Tuple[int, int]] = None
         self.open()
 
     def open(self) -> None:
@@ -120,7 +128,12 @@ class CameraRingReader:
             magic, version = struct.unpack_from("<II", mm, OFF_MAGIC)
             if magic != SHM_MAGIC or version != SHM_VERSION:
                 mm.close()
-                logger.warning("[camera-shm] bad magic/version on %s", self._path)
+                identity = (stat.st_dev, stat.st_ino)
+                if identity != self._rejected:
+                    self._rejected = identity
+                    logger.warning("[camera-shm] bad magic/version on %s (magic %#x, "
+                                   "version %d; expected version %d)", self._path, magic,
+                                   version, SHM_VERSION)
                 return
             self._width = struct.unpack_from("<I", mm, OFF_WIDTH)[0]
             self._height = struct.unpack_from("<I", mm, OFF_HEIGHT)[0]
@@ -167,6 +180,11 @@ class CameraRingReader:
         self._seq_offset = self._max_adj_seq + 2
         self.open()
 
+    @property
+    def is_mapped(self) -> bool:
+        """Whether a segment is mapped right now (no ``stat``; see ``is_available``)."""
+        return self._mm is not None
+
     def is_available(self) -> bool:
         """True while the mapped camera segment is the live one."""
         self._reopen_if_recreated()
@@ -188,7 +206,8 @@ class CameraRingReader:
     ) -> Optional[Tuple[Union[np.ndarray, bytes], int]]:
         """Return ``(frame, seq)`` for the newest frame when ``seq > last_seq``.
 
-        RAW_RGB producers → BGR ``np.ndarray``; MJPEG producers → JPEG ``bytes``.
+        RAW producers (RGB or BGR) → BGR ``np.ndarray``; MJPEG producers →
+        JPEG ``bytes``.
         """
         self._reopen_if_recreated()
         if self._mm is None:
@@ -228,7 +247,7 @@ class CameraRingReader:
                     # Torn: the writer lapped us while we copied.
                     continue
                 self._max_adj_seq = max(self._max_adj_seq, seq)
-                if fmt == FORMAT_RAW_RGB:
+                if fmt in (FORMAT_RAW_RGB, FORMAT_RAW_BGR):
                     self._width = width
                     self._height = height
                     if size != width * height * self._channels:
@@ -236,6 +255,10 @@ class CameraRingReader:
                     arr = np.frombuffer(raw, dtype=np.uint8).reshape(
                         height, width, self._channels
                     )
+                    if fmt == FORMAT_RAW_BGR:
+                        # frombuffer over bytes is read-only and consumers draw
+                        # on frames: hand out a writable copy.
+                        return arr.copy(), seq
                     return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR), seq
                 return bytes(raw), seq
             return None

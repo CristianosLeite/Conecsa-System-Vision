@@ -26,19 +26,21 @@ trained at, and ``--imgsz`` only when the checkpoint records none.
 
 Stdout (last line, JSON):
     {"class_names": ["person", ...], "task": "detect", "output_shapes": [[1, 300, 6]],
-     "imgsz": 640}
+     "imgsz": 640, "metrics": {"map50_95_box": 0.62}}
     {"output_shapes": [[1, 300, 6]]}                      (--inspect-onnx)
 ``task`` is ultralytics' ``model.task`` (``null`` on the torch fallback);
 ``output_shapes`` is ``null`` when the ``onnx`` package cannot read the graph;
-``imgsz`` is the size the export used.
+``imgsz`` is the size the export used; ``metrics`` holds the checkpoint's
+validation scores (see ``checkpoint_metrics``, ``{}`` when it records none).
 """
 import argparse
 import json
 import logging
+import math
 import os
 import shutil
 import sys
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -78,19 +80,56 @@ def checkpoint_imgsz(ckpt: object) -> Optional[int]:
     return size if type(size) is int and size > 0 else None
 
 
+# ultralytics' validation keys in a checkpoint's ``train_metrics`` → the names
+# recorded in the model's settings sidecar.
+_CHECKPOINT_METRICS = {
+    "metrics/mAP50-95(B)": "map50_95_box",
+    "metrics/mAP50-95(M)": "map50_95_mask",
+    "metrics/accuracy_top1": "accuracy_top1",
+}
+
+
+def checkpoint_metrics(ckpt: object) -> Dict[str, float]:
+    """The validation scores a checkpoint was saved with (``{}`` when it records none).
+
+    ultralytics stores the saving epoch's validation metrics (``train_metrics``)
+    in every checkpoint, so a run's ``best.pt`` carries its best epoch's mAP.
+    Only finite fractions in 0..1 are kept, under the sidecar's names.
+    """
+    raw = ckpt.get("train_metrics") if isinstance(ckpt, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    metrics: Dict[str, float] = {}
+    for key, name in _CHECKPOINT_METRICS.items():
+        # A bool would pass float() as 1.0 (a 100% score), and an int too
+        # large for a float raises OverflowError: both are invalid scores.
+        if isinstance(raw.get(key), bool):
+            continue
+        try:
+            value = float(raw[key])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value) and 0.0 <= value <= 1.0:
+            metrics[name] = value
+    return metrics
+
+
 def convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640,
-                       from_checkpoint: bool = False) -> Tuple[List[str], Optional[str], int]:
+                       from_checkpoint: bool = False
+                       ) -> Tuple[List[str], Optional[str], int, Dict[str, float]]:
     """Export a YOLO .pt to ONNX. Falls back to raw torch.onnx.export.
 
     Returns the class names, ultralytics' ``model.task`` (both empty on the
-    torch fallback, which knows neither) and the size the export used:
+    torch fallback, which knows neither), the size the export used:
     ``imgsz``, or with ``from_checkpoint`` the checkpoint's training size when
-    it records one.
+    it records one, and the checkpoint's validation scores
+    (``checkpoint_metrics``; ``{}`` on the fallback).
     """
     try:
         # noinspection PyPackageRequirements
         from ultralytics import YOLO  # type: ignore
         model = YOLO(pt_path)
+        metrics = checkpoint_metrics(getattr(model, "ckpt", None))
         if from_checkpoint:
             imgsz = checkpoint_imgsz(getattr(model, "ckpt", None)) or imgsz
         log.info("Converting %s -> %s (imgsz=%d)", pt_path, onnx_path, imgsz)
@@ -108,7 +147,7 @@ def convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640,
             shutil.move(auto_onnx, onnx_path)
 
         log.info("ONNX conversion complete: %s (task %s)", onnx_path, task)
-        return class_names, task, imgsz
+        return class_names, task, imgsz, metrics
 
     except ImportError:
         log.warning("ultralytics not installed, trying torch.onnx.export fallback")
@@ -132,7 +171,7 @@ def convert_pt_to_onnx(pt_path: str, onnx_path: str, imgsz: int = 640,
         dynamic_axes=None,
     )
     log.info("ONNX fallback export complete: %s", onnx_path)
-    return [], None, imgsz
+    return [], None, imgsz, {}
 
 
 def main() -> None:
@@ -161,7 +200,7 @@ def main() -> None:
         parser.error("--pt and --onnx are required unless --inspect-onnx is given")
 
     try:
-        class_names, task, imgsz = convert_pt_to_onnx(
+        class_names, task, imgsz, metrics = convert_pt_to_onnx(
             args.pt, args.onnx, args.imgsz, args.imgsz_from_checkpoint)
         shapes = onnx_output_shapes(args.onnx)
     except Exception as exc:
@@ -171,7 +210,7 @@ def main() -> None:
 
     # Last stdout line is the machine-readable result for the parent.
     print(json.dumps({"class_names": class_names, "task": task, "output_shapes": shapes,
-                      "imgsz": imgsz}),
+                      "imgsz": imgsz, "metrics": metrics}),
           flush=True)
 
 

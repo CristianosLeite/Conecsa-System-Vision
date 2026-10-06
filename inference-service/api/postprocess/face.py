@@ -130,6 +130,19 @@ class FacePostprocessor:
 
     # ── per frame ──
 
+    @staticmethod
+    def _bounds(meta: Any, frame: np.ndarray) -> Tuple[int, int, int, int]:
+        """``(x0, y0, x1, y1)``, exclusive, of the picture an input came from.
+
+        The whole frame, or one camera's rectangle of an IP camera mosaic: a
+        face found in a camera must stay inside that camera.
+        """
+        height, width = frame.shape[:2]
+        if meta is None or not getattr(meta, "width", 0) or not getattr(meta, "height", 0):
+            return 0, 0, width, height
+        x0, y0 = int(meta.ox), int(meta.oy)
+        return x0, y0, min(width, x0 + int(meta.width)), min(height, y0 + int(meta.height))
+
     def _faces(self, outputs: Sequence[np.ndarray], meta: Any, frame: np.ndarray):
         if self._indices is None:
             raise ContractError("the face detector outputs were not bound")
@@ -139,10 +152,10 @@ class FacePostprocessor:
             meta)
         if len(faces.scores) == 0:
             return faces
-        height, width = frame.shape[:2]
+        x0, y0, x1, y1 = self._bounds(meta, frame)
         boxes = faces.boxes.copy()
-        boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, width - 1)
-        boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, height - 1)
+        boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(x0, x1 - 1)
+        boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(y0, y1 - 1)
         sides = np.minimum(boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1])
         keep = np.flatnonzero(sides >= int(self.config.FACE_MIN_SIZE_PX))
         if keep.size:
@@ -167,9 +180,23 @@ class FacePostprocessor:
 
     def process(self, tile_outputs: Sequence[Sequence[np.ndarray]], frame: np.ndarray,
                 metas: Sequence[Any], tiled: bool) -> PostprocessResult:
-        # Faces are found on the whole frame: one entry, never tiled.
-        meta = metas[0] if metas else None
-        faces = self._faces(tile_outputs[0], meta, frame)
+        # Faces are found on the whole frame — one entry, never tiled — or on
+        # each camera of an IP camera mosaic, one entry per camera.
+        inputs = list(zip(tile_outputs, metas if metas else [None] * len(tile_outputs),
+                          strict=True))
+        found = [self._faces(outputs, meta, frame) for outputs, meta in inputs]
+        # Each face keeps the bounds of the picture it was found in: its
+        # aligned crop samples that picture only, never a neighbouring camera.
+        bounds = []
+        for (_, meta), faces_in in zip(inputs, found, strict=True):
+            bounds.extend([self._bounds(meta, frame)] * len(faces_in.scores))
+        if len(found) == 1:
+            faces = found[0]
+        else:
+            faces = _yunet.Faces(
+                np.concatenate([f.boxes.reshape(-1, 4) for f in found]),
+                np.concatenate([f.scores.reshape(-1) for f in found]),
+                np.concatenate([f.landmarks.reshape(-1, 5, 2) for f in found]))
         height, width = frame.shape[:2]
 
         chosen = []
@@ -184,7 +211,7 @@ class FacePostprocessor:
         items: List[Detection] = []
         names, colors = self._people
         if chosen:
-            crops = [align_crop(frame, faces.landmarks[i]) for i, _ in chosen]
+            crops = [self._crop(frame, faces.landmarks[i], bounds[i]) for i, _ in chosen]
             classes, sims = _face_gallery.match(self._gallery, self._embedder.embed(crops))
             threshold = float(self.config.FACE_MATCH_THRESHOLD)
             for (i, area), c, sim in zip(chosen, classes, sims, strict=True):
@@ -206,6 +233,16 @@ class FacePostprocessor:
         self._present = present
         return PostprocessResult(self._draw(frame, items, colors), len(items), items,
                                  count_increment=increment)
+
+    @staticmethod
+    def _crop(frame: np.ndarray, landmarks: np.ndarray,
+              bounds: Tuple[int, int, int, int]) -> np.ndarray:
+        """The aligned face, sampled only inside ``bounds`` (outside reads black)."""
+        x0, y0, x1, y1 = bounds
+        if (x0, y0, x1, y1) == (0, 0, frame.shape[1], frame.shape[0]):
+            return align_crop(frame, landmarks)
+        local = np.asarray(landmarks, np.float32) - np.array([x0, y0], np.float32)
+        return align_crop(frame[y0:y1, x0:x1], local)
 
     def _draw(self, frame: np.ndarray, items: List[Detection],
               colors: Sequence[Any]) -> np.ndarray:

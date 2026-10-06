@@ -217,3 +217,143 @@ fn an_invalid_network_state_is_rejected_whole() {
         assert!(cfg.network_host.is_empty() && cfg.network_token.is_empty());
     }
 }
+
+// ── IP camera source ─────────────────────────────────────────────────────────
+
+use super::super::config::IpCameraConfig;
+
+/// Visibly fake camera password.
+const IP_PASSWORD: &str = "FAKE-PASSWORD-123";
+
+fn ip_camera(n: u8) -> proto::IpCamera {
+    proto::IpCamera {
+        url: format!("rtsp://192.0.2.{n}:554/stream"),
+        username: "fake-user".to_string(),
+        password: IP_PASSWORD.to_string(),
+    }
+}
+
+fn ip_message(cfg: &CameraConfig, cameras: Vec<proto::IpCamera>) -> proto::CameraConfig {
+    proto::CameraConfig {
+        source: Some(proto::CameraSource::Ip as i32),
+        ip_cameras: cameras,
+        ..tuning_message(cfg)
+    }
+}
+
+fn ip_config(cameras: &[u8]) -> CameraConfig {
+    CameraConfig {
+        source: CameraSource::Ip,
+        ip_cameras: cameras
+            .iter()
+            .map(|&n| {
+                let c = ip_camera(n);
+                IpCameraConfig { url: c.url, username: c.username, password: c.password }
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn switching_from_local_to_ip_restarts_with_the_whole_list() {
+    let mut cfg = CameraConfig::default();
+    let msg = ip_message(&cfg, vec![ip_camera(1), ip_camera(2)]);
+    assert_eq!(merge_shm_config(&msg, &mut cfg), ConfigOutcome::Restart);
+    assert_eq!(cfg.source, CameraSource::Ip);
+    assert_eq!(cfg.ip_cameras, ip_config(&[1, 2]).ip_cameras);
+}
+
+#[test]
+fn an_unchanged_ip_list_is_just_stored() {
+    let mut cfg = ip_config(&[1, 2]);
+    let mut msg = ip_message(&cfg, vec![ip_camera(1), ip_camera(2)]);
+    msg.width = 320;
+    msg.camera_index = 4;
+    assert_eq!(merge_shm_config(&msg, &mut cfg), ConfigOutcome::Stored);
+    assert_eq!(cfg.width, 320, "the local tuning is still stored");
+}
+
+#[test]
+fn editing_the_ip_list_reconciles_instead_of_restarting() {
+    let mut cfg = ip_config(&[1, 2]);
+    // A changed password at position 1, then a third camera, then one fewer.
+    let mut changed = ip_camera(2);
+    changed.password = "0THER-FAKE-PASSWORD".to_string();
+    for cameras in [
+        vec![ip_camera(1), changed.clone()],
+        vec![ip_camera(1), changed.clone(), ip_camera(3)],
+        vec![ip_camera(1)],
+    ] {
+        let msg = ip_message(&cfg, cameras.clone());
+        assert_eq!(merge_shm_config(&msg, &mut cfg), ConfigOutcome::IpCamerasChanged);
+        assert_eq!(cfg.ip_cameras.len(), cameras.len());
+    }
+    assert_eq!(cfg.source, CameraSource::Ip);
+}
+
+#[test]
+fn switching_from_ip_to_local_restarts_and_keeps_the_list_dormant() {
+    let mut cfg = ip_config(&[1]);
+    let msg = proto::CameraConfig {
+        source: Some(proto::CameraSource::Local as i32),
+        ..ip_message(&cfg, vec![ip_camera(1)])
+    };
+    assert_eq!(merge_shm_config(&msg, &mut cfg), ConfigOutcome::Restart);
+    assert_eq!(cfg.source, CameraSource::Local);
+    assert_eq!(cfg.ip_cameras.len(), 1);
+}
+
+#[test]
+fn switching_from_ip_to_network_restarts() {
+    let mut cfg = ip_config(&[1]);
+    let msg = network_message(&cfg, "192.0.2.1", 8080, TOKEN);
+    assert_eq!(merge_shm_config(&msg, &mut cfg), ConfigOutcome::Restart);
+    assert_eq!(cfg.source, CameraSource::Network);
+    assert!(cfg.ip_cameras.is_empty(), "the message carried no cameras");
+}
+
+#[test]
+fn an_invalid_ip_list_is_ignored_whole_and_never_becomes_local() {
+    let mut credentials_in_url = ip_camera(2);
+    credentials_in_url.url = format!("rtsp://fake-user:{IP_PASSWORD}@192.0.2.2/stream");
+    let mut loopback = ip_camera(2);
+    loopback.url = "rtsp://127.0.0.1/stream".to_string();
+    let mut long_password = ip_camera(2);
+    long_password.password = "p".repeat(65);
+    let invalid_lists = [
+        vec![],
+        (1..=5).map(ip_camera).collect(),
+        vec![ip_camera(1), credentials_in_url],
+        vec![ip_camera(1), loopback],
+        vec![ip_camera(1), long_password],
+    ];
+
+    // From local: stays local.
+    let mut cfg = CameraConfig::default();
+    for cameras in invalid_lists.clone() {
+        let msg = ip_message(&cfg, cameras);
+        assert_eq!(merge_shm_config(&msg, &mut cfg), ConfigOutcome::ApplyControls);
+        assert_eq!(cfg.source, CameraSource::Local);
+        assert!(cfg.ip_cameras.is_empty());
+    }
+    // From IP: the running list stays as it was.
+    let mut cfg = ip_config(&[1, 2]);
+    for cameras in invalid_lists {
+        let msg = ip_message(&cfg, cameras);
+        assert_eq!(merge_shm_config(&msg, &mut cfg), ConfigOutcome::Stored);
+        assert_eq!(cfg.source, CameraSource::Ip);
+        assert_eq!(cfg.ip_cameras, ip_config(&[1, 2]).ip_cameras);
+    }
+}
+
+#[test]
+fn a_message_without_source_leaves_an_active_ip_source_untouched() {
+    let mut cfg = ip_config(&[1, 2]);
+    let mut msg = tuning_message(&cfg);
+    msg.gain = 9;
+    assert_eq!(merge_shm_config(&msg, &mut cfg), ConfigOutcome::Stored);
+    assert_eq!(cfg.source, CameraSource::Ip);
+    assert_eq!(cfg.ip_cameras, ip_config(&[1, 2]).ip_cameras);
+    assert_eq!(cfg.gain, 9);
+}

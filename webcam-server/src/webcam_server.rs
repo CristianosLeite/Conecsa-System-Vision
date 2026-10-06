@@ -60,6 +60,10 @@ pub fn run_server() -> Result<(), Box<dyn std::error::Error>> {
             "[webcam] Capture daemon started — network camera {}:{}",
             cfg.network_host, cfg.network_port
         ),
+        CameraSource::Ip => eprintln!(
+            "[webcam] Capture daemon started — {} IP camera(s)",
+            cfg.ip_cameras.len()
+        ),
     }
     eprintln!("[webcam] Frames written to SHM /{}", cfg.shm_name);
     drop(cfg);

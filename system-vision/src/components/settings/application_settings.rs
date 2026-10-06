@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Settings → Application type (admin only): shows the device's application
-//! and changes it behind a confirmation.
+//! and changes it behind a confirmation. The change needs a free GPU, so it is
+//! offered only while detection is stopped (the gateway refuses it too).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -16,6 +17,7 @@ use crate::models::Task;
 
 #[component]
 pub fn ApplicationSettings(
+    detection_running: Signal<bool>,
     set_error_msg: WriteSignal<String>,
     set_success_msg: WriteSignal<String>,
 ) -> impl IntoView {
@@ -78,6 +80,11 @@ pub fn ApplicationSettings(
                     .filter(|info| info.migrated)
                     .map(|_| view! { <p class="ui-help">{t!(i18n, application::migrated_note)}</p> })
             }}
+            {move || {
+                detection_running
+                    .get()
+                    .then(|| view! { <p class="ui-help">{t!(i18n, application::stop_detection_first)}</p> })
+            }}
             <div class="ui-application-options" role="group" aria-labelledby="application-settings-title">
                 {Task::ALL
                     .into_iter()
@@ -90,7 +97,10 @@ pub fn ApplicationSettings(
                                     type="button"
                                     class="ui-button ui-button-neutral ui-button-sm"
                                     aria-pressed=move || is_current().to_string()
-                                    disabled=move || !supported() || is_current() || busy.get()
+                                    disabled=move || {
+                                        !supported() || is_current() || busy.get()
+                                            || detection_running.get()
+                                    }
                                     title=move || {
                                         if supported() {
                                             String::new()

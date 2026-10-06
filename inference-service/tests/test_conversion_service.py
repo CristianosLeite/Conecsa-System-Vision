@@ -241,6 +241,22 @@ class TestRunJobImgsz:
         assert exports == [(640, False)]
 
 
+class TestRunJobMetrics:
+    def test_the_checkpoint_scores_are_recorded(self, monkeypatch, tmp_path):
+        import api.services.conversion_service as cs
+        job = _run_inline(monkeypatch, tmp_path, task="detect", exported=cs.ConverterOutput(
+            [], "detect", [[1, 300, 6]], 640, {"map50_95_box": 0.62}))
+        assert job.status == ConversionStatus.DONE, job.error
+        assert _sidecar(tmp_path)["metrics"] == {"map50_95_box": 0.62}
+
+    def test_a_rebuild_without_scores_drops_the_old_ones(self, monkeypatch, tmp_path):
+        (tmp_path / "Teste.settings.json").write_text(
+            '{"task": "detect", "metrics": {"map50_95_box": 0.9}}')
+        job = _run_inline(monkeypatch, tmp_path, task="detect")
+        assert job.status == ConversionStatus.DONE, job.error
+        assert "metrics" not in _sidecar(tmp_path)
+
+
 class TestRunJobTask:
     """Declare at upload, verify at conversion."""
 

@@ -1,0 +1,179 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Conecsa
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Hub recipes: the per-device editor (device rail + numbered sections) and
+   the loading panel. Reuses the camera source cards and the application
+   cards; `.recipe-camera` provides the container the camera partial's
+   container queries expect. */
+
+@layer components {
+  /* A container query matches an ancestor container, so the frame — not the
+     grid it lays out — is the container. */
+  .recipe-editor-frame { container: recipe-editor / inline-size; }
+  .recipe-editor {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+
+  .recipe-editor-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .recipe-name-field { flex: 1 1 16rem; min-width: 0; }
+
+  .recipe-rail {
+    display: flex;
+    flex-direction: row;
+    gap: 0.5rem;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+  /* One card = a select button and, beside it, the remove button. */
+  .recipe-rail-item {
+    position: relative;
+    display: flex;
+    flex: 0 0 auto;
+    min-width: 12rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+    background: var(--surface-control);
+    color: var(--text-strong);
+  }
+  .recipe-rail-item:hover { border-color: var(--border-strong); }
+  .recipe-rail-item-active {
+    border-color: var(--accent-cyan);
+    background: var(--state-primary-bg);
+  }
+  .recipe-rail-select {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+    padding: 0.75rem 3rem 0.75rem 0.75rem;
+    border: 0;
+    border-radius: inherit;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .recipe-rail-select:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
+  .recipe-rail-remove { position: absolute; top: 0.5rem; right: 0.5rem; }
+  /* The add-device picker renders the same card as one plain button. */
+  button.recipe-rail-item {
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.75rem;
+    text-align: left;
+    cursor: pointer;
+  }
+  button.recipe-rail-item:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
+  .recipe-rail-name { font-weight: 650; overflow-wrap: anywhere; }
+  .recipe-rail-meta { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; }
+  .recipe-rail-add { flex: 0 0 auto; align-self: flex-start; }
+  /* After the base rail rules: a container query adds no specificity, so an
+     earlier `column` would lose to the later `row`. */
+  @container recipe-editor (min-width: 64rem) {
+    .recipe-editor { grid-template-columns: 16rem minmax(0, 1fr); }
+    .recipe-rail { position: sticky; top: 0; align-self: start; flex-direction: column; overflow: visible; }
+    .recipe-rail-item { width: 100%; }
+  }
+
+  .recipe-sections { display: flex; flex-direction: column; gap: 1.5rem; min-width: 0; }
+  .recipe-section {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+    padding: 1rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+    scroll-margin-top: 3.5rem;
+  }
+  .recipe-section-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+  .recipe-section-number {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 9999px;
+    background: var(--state-primary-bg);
+    color: var(--state-primary-text);
+    font-size: 0.875rem;
+    font-weight: 700;
+  }
+  .recipe-section-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 0.5rem; }
+  .recipe-section-body { display: flex; flex-direction: column; gap: 1rem; }
+  .recipe-section-skipped { color: var(--text-muted); font-size: 0.875rem; }
+
+  /* Chips under the editor head; the -1.5rem cancels .ui-card-pad like the camera apply bar. */
+  .recipe-section-nav {
+    position: sticky;
+    top: -1.5rem;
+    z-index: 1;
+    display: flex;
+    gap: 0.5rem;
+    overflow-x: auto;
+    padding: 0.5rem 0;
+    background: var(--surface-panel);
+  }
+  .recipe-section-chip {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.25rem 0.75rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 9999px;
+    background: var(--surface-control);
+    color: var(--text-strong);
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+  .recipe-section-chip:hover { border-color: var(--border-strong); }
+  .recipe-section-chip-issue { border-color: var(--accent-red); }
+  .recipe-section-chip-skipped { color: var(--text-muted); }
+
+  .recipe-camera { container: camera-settings / inline-size; display: flex; flex-direction: column; gap: 1rem; }
+  .recipe-field-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+    gap: 0.75rem 1rem;
+  }
+  .recipe-task-card-selected,
+  .recipe-task-card-selected:hover:not(:disabled) {
+    border-color: var(--accent-cyan);
+    background: var(--state-primary-bg);
+  }
+
+  .recipe-apply-bar {
+    position: sticky;
+    bottom: -1.5rem;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin: 1rem -1.5rem -1.5rem;
+    padding: 1rem 1.5rem;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--surface-panel);
+  }
+  .recipe-apply-actions { display: inline-flex; gap: 0.5rem; margin-left: auto; }
+
+  .recipe-apply-steps { display: flex; gap: 0.25rem; min-width: 6rem; }
+  .recipe-apply-step { flex: 1; height: 0.375rem; border-radius: 9999px; background: var(--track-muted); }
+  .recipe-apply-step-done { background: var(--accent-cyan); }
+  .recipe-apply-step-failed { background: var(--accent-red); }
+}

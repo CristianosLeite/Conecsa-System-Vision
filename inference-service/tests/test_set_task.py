@@ -5,9 +5,11 @@
 """The application switch transaction and its concurrency contract.
 
 ``ModelService.set_task`` must serialize with model activation and with the
-GPU handover (``release_runtime``) under the model lifecycle lock, apply its
-steps in order, and leave the previous state intact when stopping detection
-or writing ``application.json`` fails.
+GPU handover (``release_runtime``) under the model lifecycle lock, free the GPU
+through the shared release (``free_gpu``: refused while detection or a
+conversion runs, a leftover training handover never blocks it), apply its
+steps in order, and leave the previous state intact when freeing the GPU or
+writing ``application.json`` fails.
 """
 import json
 import threading
@@ -17,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from api.config import Config
 from api.services.application_service import ApplicationService
-from api.services.errors import InvalidTask, PreconditionFailed
+from api.services.errors import GpuBusy, InvalidTask, PreconditionFailed
 from api.services.model_service import ModelService
 
 
@@ -102,7 +104,6 @@ def rig(tmp_path, monkeypatch):
     service.attach_settings_service(SimpleNamespace(switch_model=settings.append))
     ok, _, _ = service.activate_model("det.engine")
     assert ok
-    detection.is_running = True
     detection.calls.clear()
     return SimpleNamespace(service=service, app=app, detection=detection, labeling=labeling,
                            events=events, conversions=conversions, areas=areas,
@@ -122,7 +123,8 @@ class TestSwitch:
 
     def test_switch_deselects_a_model_of_the_previous_task(self, rig):
         assert rig.service.set_task("classify") is True
-        # Ordered steps: stop, persist, deselect, drop runtime/results, notify.
+        # Ordered steps: free the GPU (drain, drop the runtime), persist,
+        # deselect, drop results, notify.
         assert rig.detection.calls == ["stop", "unload_runtime", "reset_results"]
         assert _application_file(rig) == {"task": "classify"}
         assert rig.app.migrated is False
@@ -153,19 +155,25 @@ class TestSwitch:
         assert rig.detection.calls == []
         assert rig.app.task == "detect"
 
-    def test_a_labeling_engine_of_another_task_is_unloaded(self, rig):
-        rig.labeling.task = "detect"
+    def test_the_labeling_engine_is_unloaded_with_the_rest_of_the_gpu(self, rig):
+        rig.labeling.task = "classify"
         rig.service.set_task("classify")
         assert rig.labeling.unloads == 1
 
-    def test_a_labeling_engine_of_the_new_task_stays(self, rig):
-        rig.labeling.task = "classify"
-        rig.service.set_task("classify")
-        assert rig.labeling.unloads == 0
+    def test_refused_while_detection_runs(self, rig):
+        rig.detection.is_running = True
+        with pytest.raises(GpuBusy, match="stop it first") as exc:
+            rig.service.set_task("classify")
+        assert exc.value.holder == "detection"
+        # Detection is never stopped implicitly, and nothing else changed.
+        assert rig.detection.calls == []
+        assert rig.detection.is_running is True
+        assert rig.app.task == "detect"
+        assert rig.service.current_model == "det.engine"
 
 
 class TestFailures:
-    def test_a_stop_failure_leaves_everything_as_it_was(self, rig):
+    def test_a_drain_failure_leaves_everything_as_it_was(self, rig):
         rig.detection.fail_stop = RuntimeError("pipeline wedged")
         with pytest.raises(RuntimeError, match="wedged"):
             rig.service.set_task("classify")
@@ -173,15 +181,16 @@ class TestFailures:
         assert rig.service.current_model == "det.engine"
         assert rig.events.events == []
 
-    def test_a_write_failure_restarts_detection_and_keeps_the_model(self, rig, monkeypatch):
+    def test_a_write_failure_keeps_the_application_and_the_model(self, rig, monkeypatch):
         def refuse(task):
             raise OSError("disk full")
 
         monkeypatch.setattr(rig.app, "persist", refuse)
         with pytest.raises(OSError):
             rig.service.set_task("classify")
-        assert rig.detection.calls == ["stop", "start"]
-        assert rig.detection.is_running is True
+        # The GPU was freed (a start re-initializes the runtime); nothing restarts.
+        assert rig.detection.calls == ["stop", "unload_runtime"]
+        assert rig.detection.is_running is False
         assert rig.app.task == "detect"
         assert rig.service.current_model == "det.engine"
         assert (rig.dir / ".current_model").read_text() == "det.engine"
@@ -189,18 +198,24 @@ class TestFailures:
 
 
 class TestGpuHandover:
-    def test_refused_while_the_runtime_is_released(self, rig):
+    def test_a_leftover_handover_does_not_block_the_switch(self, rig):
+        # A training page closed without /training/exit leaves the handover
+        # behind; the shared GPU release ends it instead of refusing.
         ok, _ = rig.service.release_runtime()
         assert ok and rig.service.runtime_released
-        with pytest.raises(PreconditionFailed, match="training"):
-            rig.service.set_task("classify")
-        ok, _ = rig.service.resume_runtime()
-        assert ok and not rig.service.runtime_released
         assert rig.service.set_task("classify") is True
+        assert not rig.service.runtime_released
+
+    def test_a_release_stops_a_running_detection(self, rig):
+        rig.detection.is_running = True
+        ok, _ = rig.service.release_runtime()
+        assert ok and rig.service.runtime_released
+        assert rig.detection.is_running is False
+        assert rig.labeling.unloads == 1
 
     def test_an_exit_without_restart_ends_the_handover(self, rig):
         # The post-training handoff: the conversion keeps the
-        # GPU, so nothing restarts, but the application type can change again.
+        # GPU, so nothing restarts, but the handover ends.
         rig.service.release_runtime()
         rig.detection.calls.clear()
         ok, _ = rig.service.resume_runtime(restart_detection=False)
@@ -222,7 +237,9 @@ class TestGpuHandover:
         rig.detection.calls.clear()
         assert rig.service.start_detection() is False
         assert rig.detection.calls == ["start"]
-        assert rig.service.set_task("classify") is True
+        # Detection now owns the GPU: the switch waits for a stop.
+        with pytest.raises(GpuBusy):
+            rig.service.set_task("classify")
 
     def test_a_failed_start_keeps_the_handover(self, rig):
         rig.service.release_runtime()
@@ -234,8 +251,9 @@ class TestGpuHandover:
         with pytest.raises(RuntimeError, match="no engine"):
             rig.service.start_detection()
         assert rig.service.runtime_released
-        with pytest.raises(PreconditionFailed, match="training"):
-            rig.service.set_task("classify")
+        # ...until the GPU is freed for someone else.
+        assert rig.service.set_task("classify") is True
+        assert not rig.service.runtime_released
 
     def test_a_release_waits_for_a_start_in_progress(self, rig):
         rig.service.release_runtime()
@@ -266,10 +284,45 @@ class TestGpuHandover:
         assert rig.service.runtime_released is True
         assert rig.detection.is_running is False
 
+    def test_a_start_cannot_slip_between_the_release_and_the_handover_mark(self, rig):
+        # Entering training mode is one critical section: a start that
+        # arrives while the release is stopping detection runs only after the
+        # handover is marked (and then ends it), never in between.
+        rig.detection.is_running = True
+        entered, go = threading.Event(), threading.Event()
+        first_stop = []
+
+        def gate():
+            if not first_stop:
+                first_stop.append(1)
+                entered.set()
+                assert go.wait(5)
+
+        rig.detection.stop_gate = gate
+        seen_by_start = []
+        rig.detection.start_gate = lambda: seen_by_start.append(rig.service.runtime_released)
+        results = {}
+        release = threading.Thread(target=lambda: results.update(
+            release=rig.service.release_runtime()))
+        release.start()
+        assert entered.wait(5)
+        start = threading.Thread(target=lambda: results.update(
+            start=rig.service.start_detection()))
+        start.start()
+        time.sleep(0.2)
+        assert "start" not in results, "the start must wait for the whole release"
+        go.set()
+        release.join(5)
+        start.join(5)
+        assert results["release"][0] is True
+        assert seen_by_start == [True], "the start ran before the handover was marked"
+        assert results["start"] is True and not rig.service.runtime_released
+
     def test_refused_while_a_conversion_runs(self, rig):
-        rig.conversions.jobs = ["job"]
-        with pytest.raises(PreconditionFailed, match="conversion"):
+        rig.conversions.jobs = [SimpleNamespace(job_id="job")]
+        with pytest.raises(GpuBusy, match="conversion") as exc:
             rig.service.set_task("classify")
+        assert exc.value.holder == "conversion"
         assert rig.detection.calls == []
 
     def test_a_release_waits_for_a_switch_in_progress(self, rig):
@@ -330,9 +383,56 @@ class TestGpuHandover:
         assert "'detect' model" in str(results["activate"])
 
 
+class TestConversionGate:
+    """A conversion enqueued after the gateway's probe still cannot be loaded
+    on top of: the checks hold the lock a conversion enqueue takes."""
+
+    def test_a_select_is_refused_and_nothing_stops(self, rig):
+        rig.detection.is_running = True
+        rig.conversions.jobs = [SimpleNamespace(job_id="job")]
+        with pytest.raises(GpuBusy, match="conversion"):
+            rig.service.activate_model("det.engine")
+        assert rig.detection.calls == [] and rig.detection.is_running is True
+
+    def test_the_publication_of_its_own_rebuild_still_activates(self, rig):
+        rig.conversions.jobs = [SimpleNamespace(job_id="job")]
+        ok, _, _ = rig.service.activate_model("det.engine", own_conversion="job")
+        assert ok
+
+    def test_another_running_build_still_refuses_the_publication(self, rig):
+        # Conversions run on their own threads: a second build still holds
+        # TensorRT when the first publishes.
+        rig.conversions.jobs = [SimpleNamespace(job_id="job"),
+                                SimpleNamespace(job_id="other")]
+        with pytest.raises(GpuBusy, match="conversion"):
+            rig.service.activate_model("det.engine", own_conversion="job")
+
+    def test_a_start_is_refused(self, rig):
+        rig.conversions.jobs = [SimpleNamespace(job_id="job")]
+        with pytest.raises(GpuBusy, match="conversion"):
+            rig.service.start_detection()
+        assert "start" not in rig.detection.calls
+
+    def test_a_running_detection_is_not_affected(self, rig):
+        # Start on a running detection is a no-op; it never loads anything.
+        rig.detection.is_running = True
+        rig.conversions.jobs = [SimpleNamespace(job_id="job")]
+        assert rig.service.start_detection() is False
+
+    def test_a_resume_ends_the_handover_but_does_not_load(self, rig):
+        rig.service.release_runtime()
+        rig.detection.calls.clear()
+        rig.conversions.jobs = [SimpleNamespace(job_id="job")]
+        ok, message = rig.service.resume_runtime()
+        assert ok and "conversion" in message
+        assert not rig.service.runtime_released
+        assert rig.detection.calls == []
+
+
 class TestActivationGate:
     def test_a_model_of_another_task_is_refused_before_anything_stops(self, rig):
         _model(rig.dir, "cls.engine", "classify")
+        rig.detection.is_running = True
         with pytest.raises(PreconditionFailed, match="'classify' model.*'detect' application"):
             rig.service.activate_model("cls.engine")
         assert rig.detection.calls == []

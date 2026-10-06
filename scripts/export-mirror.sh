@@ -49,9 +49,10 @@ done
 # ── What is public ────────────────────────────────────────────────────────────
 # Everything NOT listed here stays private. Deliberately absent:
 #   hub-vision/          — the closed fleet hub (code, icons, tauri config)
-#   Cargo.toml/Cargo.lock (root) — workspace of hub-vision and the manual's
-#                          simulator crates; system-vision and webcam-server
-#                          are standalone
+#   Cargo.toml/Cargo.lock (root) — workspace of hub-vision, shared/ui-view and the
+#                          manual's simulator crates; system-vision and
+#                          webcam-server are standalone (shared/ui-view is exported
+#                          and resolves as a plain path dependency there)
 #   manual/              — the interactive user manual (links hub-vision); only
 #                          its published site is public
 #   .github/             — CI runs the hub suites; public CI is authored separately
@@ -59,7 +60,7 @@ done
 #                          base and Claude Code harness stay private
 ALLOWLIST=(
   proto
-  i18n
+  shared/i18n
   os-base
   system-vision
   webcam-server
@@ -70,7 +71,8 @@ ALLOWLIST=(
   scripts
   docs
   yocto
-  styles
+  shared/styles
+  shared/ui-view
   docker-compose.yml
   docker-compose.dev.yml
   requirements-dev.txt
@@ -91,7 +93,7 @@ ALLOWLIST=(
 #   Good Times Rg.otf — commercial Typodermic font; its EULA does not allow
 #   public redistribution (the @font-face falls back silently). Inter is OFL.
 EXCLUDES=(
-  "i18n/hub-vision"
+  "shared/i18n/hub-vision"
   "scripts/build-hub.sh"
   "scripts/build-hub-jetson.sh"
   "scripts/check-hub-builder.sh"
@@ -124,7 +126,7 @@ FORBIDDEN_PATH_PATTERNS=(
   '^hub-vision(/|$)'
   # The interactive user manual (manual/) links the closed hub crate.
   '^manual(/|$)'
-  '^i18n/hub-vision(/|$)'
+  '^shared/i18n/hub-vision(/|$)'
   'src-tauri'
   'build-hub'
   'hub-kiosk'

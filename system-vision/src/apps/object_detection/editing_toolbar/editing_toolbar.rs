@@ -5,7 +5,7 @@
 use crate::i18n::*;
 use leptos::prelude::*;
 
-use super::toolbar_icon::ToolbarIcon;
+use crate::components::common::toolbar_icon::ToolbarIcon;
 
 /// Floating control bar shown at the bottom of the live stream while a
 /// detection area is in editing mode. All actions are emitted as callbacks;
@@ -30,64 +30,64 @@ pub fn EditingToolbar(
     view! {
         <div class="ui-tool-panel absolute bottom-2 left-1/2 -translate-x-1/2 flex flex-wrap items-center justify-center gap-1 px-3 py-2 max-w-[95%]">
             // Movement
-            <button class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::move_up) on:click=move |_| on_command.run("move_up")>
+            <button type="button" class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::move_up) aria-label=move || t_string!(i18n, stream::move_up) on:click=move |_| on_command.run("move_up")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19V5m0 0l-6 6m6-6l6 6" />
                 </ToolbarIcon>
             </button>
-            <button class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::move_down) on:click=move |_| on_command.run("move_down")>
+            <button type="button" class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::move_down) aria-label=move || t_string!(i18n, stream::move_down) on:click=move |_| on_command.run("move_down")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v14m0 0l-6-6m6 6l6-6" />
                 </ToolbarIcon>
             </button>
-            <button class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::move_left) on:click=move |_| on_command.run("move_left")>
+            <button type="button" class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::move_left) aria-label=move || t_string!(i18n, stream::move_left) on:click=move |_| on_command.run("move_left")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 12H5m0 0l6-6m-6 6l6 6" />
                 </ToolbarIcon>
             </button>
-            <button class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::move_right) on:click=move |_| on_command.run("move_right")>
+            <button type="button" class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::move_right) aria-label=move || t_string!(i18n, stream::move_right) on:click=move |_| on_command.run("move_right")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14m0 0l-6-6m6 6l-6 6" />
                 </ToolbarIcon>
             </button>
             <span class="ui-tool-divider">"|"</span>
             // Width
-            <button class="ui-tool-button w-10 h-8" title=move || t_string!(i18n, stream::increase_width) on:click=move |_| on_command.run("grow_horizontal")>
+            <button type="button" class="ui-tool-button w-10 h-8" title=move || t_string!(i18n, stream::increase_width) aria-label=move || t_string!(i18n, stream::increase_width) on:click=move |_| on_command.run("grow_horizontal")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4" />
                 </ToolbarIcon>
             </button>
-            <button class="ui-tool-button w-10 h-8" title=move || t_string!(i18n, stream::decrease_width) on:click=move |_| on_command.run("shrink_horizontal")>
+            <button type="button" class="ui-tool-button w-10 h-8" title=move || t_string!(i18n, stream::decrease_width) aria-label=move || t_string!(i18n, stream::decrease_width) on:click=move |_| on_command.run("shrink_horizontal")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12h7m0 0L6 8m4 4l-4 4M21 12h-7m0 0l4-4m-4 4l4 4" />
                 </ToolbarIcon>
             </button>
             // Height
-            <button class="ui-tool-button w-10 h-8" title=move || t_string!(i18n, stream::increase_height) on:click=move |_| on_command.run("grow_vertical")>
+            <button type="button" class="ui-tool-button w-10 h-8" title=move || t_string!(i18n, stream::increase_height) aria-label=move || t_string!(i18n, stream::increase_height) on:click=move |_| on_command.run("grow_vertical")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v18M8 7l4-4 4 4M8 17l4 4 4-4" />
                 </ToolbarIcon>
             </button>
-            <button class="ui-tool-button w-10 h-8" title=move || t_string!(i18n, stream::decrease_height) on:click=move |_| on_command.run("shrink_vertical")>
+            <button type="button" class="ui-tool-button w-10 h-8" title=move || t_string!(i18n, stream::decrease_height) aria-label=move || t_string!(i18n, stream::decrease_height) on:click=move |_| on_command.run("shrink_vertical")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v7m0 0L8 6m4 4l4-4M12 21v-7m0 0l-4 4m4-4l4 4" />
                 </ToolbarIcon>
             </button>
             // Uniform
             <span class="ui-tool-divider">"|"</span>
-            <button class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::grow) on:click=move |_| on_command.run("grow")>
+            <button type="button" class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::grow) aria-label=move || t_string!(i18n, stream::grow) on:click=move |_| on_command.run("grow")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 3H3v5M3 3l7 7M16 3h5v5M21 3l-7 7M8 21H3v-5M3 21l7-7M16 21h5v-5M21 21l-7-7" />
                 </ToolbarIcon>
             </button>
-            <button class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::shrink) on:click=move |_| on_command.run("shrink")>
+            <button type="button" class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::shrink) aria-label=move || t_string!(i18n, stream::shrink) on:click=move |_| on_command.run("shrink")>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4l6 6M10 4v6H4M20 4l-6 6M14 4v6h6M4 20l6-6M10 20v-6H4M20 20l-6-6M14 20v-6h6" />
                 </ToolbarIcon>
             </button>
             // Shape toggle
             <span class="ui-tool-divider">"|"</span>
-            <button class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::toggle_shape) on:click=move |_| on_toggle_shape.run(())>
+            <button type="button" class="ui-tool-button w-8 h-8" title=move || t_string!(i18n, stream::toggle_shape) aria-label=move || t_string!(i18n, stream::toggle_shape) on:click=move |_| on_toggle_shape.run(())>
                 {move || {
                     if editing_shape.get() == "circle" {
                         view! {
@@ -108,12 +108,12 @@ pub fn EditingToolbar(
             </button>
             // Commit / cancel
             <span class="ui-tool-divider">"|"</span>
-            <button class="ui-tool-button ui-tool-button-success w-8 h-8" title=move || t_string!(i18n, common::save) on:click=move |_| on_save.run(())>
+            <button type="button" class="ui-tool-button ui-tool-button-success w-8 h-8" title=move || t_string!(i18n, common::save) aria-label=move || t_string!(i18n, common::save) on:click=move |_| on_save.run(())>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                 </ToolbarIcon>
             </button>
-            <button class="ui-tool-button ui-tool-button-danger w-8 h-8" title=move || t_string!(i18n, common::cancel) on:click=move |_| on_cancel.run(())>
+            <button type="button" class="ui-tool-button ui-tool-button-danger w-8 h-8" title=move || t_string!(i18n, common::cancel) aria-label=move || t_string!(i18n, common::cancel) on:click=move |_| on_cancel.run(())>
                 <ToolbarIcon>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                 </ToolbarIcon>

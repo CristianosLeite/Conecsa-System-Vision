@@ -22,7 +22,8 @@ application = Application()
 # detection areas, camera config) and auto-start detection BEFORE serving.
 # Done before the gRPC server starts so it only accepts requests once the
 # restore has completed, ensuring clients fetch the correct per-model values
-# on their first call.
+# on their first call. It also keeps the boot's training probe true through
+# the restore: no training can start before this service answers FreeGpu.
 try:
     application.initialize()
 except Exception as ex:  # noqa: BLE001 - never let a restore failure block serving

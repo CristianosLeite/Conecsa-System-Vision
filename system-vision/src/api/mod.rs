@@ -39,9 +39,10 @@ pub use wasm32::services::classes::{
 };
 
 pub use wasm32::services::camera::{
-    camera_source_body, get_camera_devices, update_camera_config, update_camera_source,
-    update_stereo_config, CameraDevice, CameraDevicesResponse, CameraHealth, SOURCE_LOCAL,
-    SOURCE_NETWORK,
+    camera_source_body, get_camera_devices, ip_cameras_body, update_camera_config,
+    update_camera_source, update_ip_cameras, update_stereo_config, CameraDevice,
+    CameraDevicesResponse, CameraHealth, IpCamera, IpCameraUpdate, IP_CAMERAS_MAX_DEFAULT,
+    SOURCE_IP, SOURCE_LOCAL, SOURCE_NETWORK,
 };
 
 pub use wasm32::services::detection_areas::{
@@ -76,9 +77,10 @@ pub use wasm32::services::training::{
     sam_segment, set_dataset_cover, set_training_image_class, set_training_labels,
     set_training_polygons, start_training, training_dataset_export_url, training_enter,
     training_exit, training_heartbeat, training_image_url, training_preview_url,
-    unload_label_model, upload_dataset_zip, DatasetSummary, LabelBox, LabelClassSuggestion,
-    LabelDetectResponse, LabelModelStatusResponse, LabelPolygon, SamStatusResponse,
-    TrainingDatasetInfo, TrainingImageInfo, TrainingJobStatus,
+    unload_label_model, upload_dataset_zip, upload_training_image, DatasetSummary, EpochMetrics,
+    LabelBox,
+    LabelClassSuggestion, LabelDetectResponse, LabelModelStatusResponse, LabelPolygon,
+    LabelsResponse, SamStatusResponse, TrainingDatasetInfo, TrainingImageInfo, TrainingJobStatus,
 };
 
 #[cfg(test)]

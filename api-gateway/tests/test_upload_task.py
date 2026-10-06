@@ -48,6 +48,9 @@ def model_uploads(monkeypatch):
     monkeypatch.setattr(models_controller, "clients",
                         SimpleNamespace(model=SimpleNamespace(UploadModel=upload)))
     monkeypatch.setattr(models_controller, "_publish_event", lambda *a, **k: None)
+    # The shared GPU release is tests/test_gpu.py's subject.
+    from gateway import gpu
+    monkeypatch.setattr(gpu, "acquire_gpu", lambda *a, **k: None)
     return metas
 
 

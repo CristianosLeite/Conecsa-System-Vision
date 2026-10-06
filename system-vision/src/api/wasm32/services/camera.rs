@@ -9,6 +9,10 @@ use crate::api::wasm32::http::{fetch_api, fetch_api_secret_body};
 /// Capture source values of `current_source` / the `source` request field.
 pub const SOURCE_LOCAL: &str = "local";
 pub const SOURCE_NETWORK: &str = "network";
+pub const SOURCE_IP: &str = "ip";
+
+/// How many IP cameras a device takes when the backend does not say.
+pub const IP_CAMERAS_MAX_DEFAULT: u32 = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SupportedFormat {
@@ -84,6 +88,54 @@ pub struct CameraDevicesResponse {
     /// response ever carries it.
     #[serde(default)]
     pub network_token_set: bool,
+    /// How many IP cameras the device accepts (the mosaic holds up to four).
+    #[serde(default = "default_ip_cameras_max")]
+    pub ip_cameras_max: u32,
+    /// The stored IP cameras in mosaic order, kept while another source is
+    /// active. Never carries a password.
+    #[serde(default)]
+    pub ip_cameras: Vec<IpCamera>,
+}
+
+/// One stored IP (RTSP) camera as `GET /api/v1/camera/devices` reports it.
+/// The password is write-only: only `password_set` says whether one is stored.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct IpCamera {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password_set: bool,
+    /// `starting` | `capturing` | `no_camera`.
+    #[serde(default)]
+    pub status: String,
+    /// Same vocabulary as `camera_detail` (`unauthorized`, `unreachable`, ...).
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// One entry of the `ip_cameras` list sent to `POST /api/v1/camera/config`.
+///
+/// `id: None` is a new camera (the device assigns one). `password: None`
+/// keeps the password stored for that `id`; `Some("")` clears it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct IpCameraUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    pub url: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+fn default_ip_cameras_max() -> u32 {
+    IP_CAMERAS_MAX_DEFAULT
 }
 
 fn default_source() -> String {
@@ -141,6 +193,21 @@ pub async fn update_camera_source(
     token: Option<String>,
 ) -> Result<(), String> {
     let body = camera_source_body(source, host.as_deref(), port, token.as_deref()).to_string();
+    fetch_api_secret_body::<serde_json::Value>("/api/v1/camera/config", "POST", &body)
+        .await
+        .map(|_| ())
+}
+
+/// Request body that makes the IP cameras the capture source: the complete,
+/// ordered list (order = mosaic position).
+pub fn ip_cameras_body(cameras: &[IpCameraUpdate]) -> serde_json::Value {
+    serde_json::json!({ "source": SOURCE_IP, "ip_cameras": cameras })
+}
+
+/// POST /api/v1/camera/config — make the IP cameras the capture source. The
+/// body may carry camera passwords, so it bypasses request-body logging.
+pub async fn update_ip_cameras(cameras: &[IpCameraUpdate]) -> Result<(), String> {
+    let body = ip_cameras_body(cameras).to_string();
     fetch_api_secret_body::<serde_json::Value>("/api/v1/camera/config", "POST", &body)
         .await
         .map(|_| ())

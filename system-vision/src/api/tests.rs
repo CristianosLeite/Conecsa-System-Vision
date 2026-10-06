@@ -103,13 +103,75 @@ fn access_point_status_defaults_everything_but_what_the_device_sent() {
     assert!(!st.active);
     assert_eq!(st.ssid, "conecsa-000001");
     assert!(st.stations.is_empty() && st.channels.is_empty());
-    assert_eq!(st.join_deadline_remaining_secs, 0);
     let live: ApStatus = serde_json::from_value(json!({
         "active": true, "ssid": "conecsa-000001", "frequency_mhz": 5180, "address": "10.98.76.1", "prefix": 24,
         "stations": [{"address": "10.98.76.11", "hostname": "pixel", "signal": -50}],
-        "join_deadline_remaining_secs": 0, "wired_ready": true, "message": "", "channels": [36, 40, 44]
+        "wired_ready": true, "message": "", "channels": [36, 40, 44]
     }))
     .unwrap();
     assert_eq!(live.stations[0].address, "10.98.76.11");
     assert_eq!(live.channels, vec![36, 40, 44]);
+}
+
+// ── IP cameras ───────────────────────────────────────────────────────────────
+
+use super::{ip_cameras_body, IpCameraUpdate, IP_CAMERAS_MAX_DEFAULT, SOURCE_IP};
+
+#[wasm_bindgen_test]
+fn a_camera_response_without_ip_fields_has_no_ip_cameras() {
+    let resp: CameraDevicesResponse = serde_json::from_value(json!({
+        "devices": [], "current_device": "/dev/video0", "current_index": 0,
+        "current_width": 1280, "current_height": 720, "current_framerate": 30,
+        "current_auto_exposure": true, "current_exposure_time": 156,
+        "current_rgb_red": 128, "current_rgb_green": 128, "current_rgb_blue": 128,
+        "current_gamma": 100,
+    }))
+    .unwrap();
+    assert!(resp.ip_cameras.is_empty());
+    assert_eq!(resp.ip_cameras_max, IP_CAMERAS_MAX_DEFAULT);
+}
+
+#[wasm_bindgen_test]
+fn ip_cameras_are_read_without_a_password() {
+    let resp: CameraDevicesResponse = serde_json::from_value(json!({
+        "devices": [], "current_device": "", "current_index": 0,
+        "current_width": 1280, "current_height": 720, "current_framerate": 30,
+        "current_auto_exposure": true, "current_exposure_time": 156,
+        "current_rgb_red": 128, "current_rgb_green": 128, "current_rgb_blue": 128,
+        "current_gamma": 100, "current_source": "ip", "ip_cameras_max": 4,
+        "ip_cameras": [{"id": "cam-0001", "name": "Dock 1", "url": "rtsp://192.0.2.10/s",
+            "username": "operator", "password_set": true, "status": "capturing", "detail": "unspecified"}],
+    }))
+    .unwrap();
+    assert_eq!(resp.current_source, SOURCE_IP);
+    assert_eq!(resp.ip_cameras.len(), 1);
+    assert!(resp.ip_cameras[0].password_set);
+    assert_eq!(resp.ip_cameras[0].status, "capturing");
+}
+
+#[wasm_bindgen_test]
+fn the_ip_camera_body_omits_unknown_ids_and_kept_passwords() {
+    let cameras = [
+        IpCameraUpdate {
+            id: Some("cam-0001".into()),
+            name: "Dock 1".into(),
+            url: "rtsp://192.0.2.10/s".into(),
+            username: "operator".into(),
+            password: None,
+        },
+        IpCameraUpdate {
+            id: None,
+            name: "Dock 2".into(),
+            url: "rtsp://192.0.2.11/s".into(),
+            username: String::new(),
+            password: Some(String::new()),
+        },
+    ];
+    assert_eq!(
+        ip_cameras_body(&cameras),
+        json!({"source": "ip", "ip_cameras": [
+            {"id": "cam-0001", "name": "Dock 1", "url": "rtsp://192.0.2.10/s", "username": "operator"},
+            {"name": "Dock 2", "url": "rtsp://192.0.2.11/s", "username": "", "password": ""},
+        ]}),
+    );
 }

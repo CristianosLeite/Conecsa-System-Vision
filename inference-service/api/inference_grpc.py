@@ -33,7 +33,13 @@ from conecsa_common.tasks import (
 )
 
 from .model_paths import validate_model_filename
-from .services.errors import InvalidTask, PreconditionFailed
+from .services.errors import (
+    GPU_HOLDER_CONVERSION,
+    GPU_HOLDER_DETECTION,
+    GpuBusy,
+    InvalidTask,
+    PreconditionFailed,
+)
 
 # Generated *_pb2 / *_pb2_grpc modules do a flat `import inference_pb2`, so their
 # directory must be importable. In the image the stubs are generated next to
@@ -56,6 +62,11 @@ logger = logging.getLogger(__name__)
 LISTEN_ADDR = os.environ.get("INFERENCE_GRPC_LISTEN", "0.0.0.0:50061")
 _EVENT_KEEPALIVE_S = 15.0
 _STATS_INTERVAL_S = 0.25
+#: ``GpuBusy.holder`` → the proto enum FreeGpu reports.
+_GPU_HOLDERS = {
+    GPU_HOLDER_DETECTION: pb.GPU_HOLDER_DETECTION,
+    GPU_HOLDER_CONVERSION: pb.GPU_HOLDER_CONVERSION,
+}
 
 
 def _unimplemented(context, what: str):
@@ -122,6 +133,10 @@ class DetectionControlServicer(pb_grpc.DetectionControlServicer):
                     "runtime_changed", keys=["status"], data={"runtime_released": False}
                 )
             return pb.Result(success=True, message="Detection started")
+        except GpuBusy as exc:
+            # A conversion started after the gateway's probe: 409, not 500.
+            _refuse(context, grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+            return pb.Result(success=False, message=str(exc))
         except Exception as exc:  # noqa: BLE001
             return pb.Result(success=False, message=str(exc))
 
@@ -365,16 +380,22 @@ class ModelControlServicer(pb_grpc.ModelControlServicer):
         return self._app.conversion_service
 
     def ListModels(self, request, context):
-        """RPC: list available models (name, path, size, modified, active)."""
+        """RPC: list available models (name, path, size, modified, active, scores)."""
         out = []
         for m in self._models.list_models():
-            out.append(pb.ModelInfo(
+            info = pb.ModelInfo(
                 name=m.name, path=getattr(m, "path", ""), size=int(getattr(m, "size", 0) or 0),
                 modified=float(getattr(m, "modified", 0.0) or 0.0),
                 is_active=bool(getattr(m, "is_active", False)),
                 has_weights=bool(getattr(m, "has_weights", False)),
                 task=str(getattr(m, "task", "detect") or "detect"),
-            ))
+            )
+            # Unset (not 0) when the model records no score.
+            for name in ("map50_95", "accuracy_top1"):
+                value = getattr(m, name, None)
+                if value is not None:
+                    setattr(info, name, float(value))
+            out.append(info)
         return pb.ModelList(models=out)
 
     def SelectModel(self, request, context):
@@ -852,13 +873,34 @@ class ManagementControlServicer(pb_grpc.ManagementControlServicer):
 
     # ── GPU handover (training-service) ───────────────────────────────────────
 
+    def FreeGpu(self, request, context):
+        """RPC: the shared GPU release (``ModelService.free_gpu``).
+
+        A refusal is a result, not an error: ``busy`` names the holder
+        (detection or a conversion) so the gateway can word the 409.
+        """
+        try:
+            was_released = self._app.model_service.free_gpu(
+                stop_detection=request.stop_detection,
+                begin_handover=request.begin_handover)
+        except GpuBusy as exc:
+            return pb.FreeGpuResult(success=False, message=str(exc),
+                                    busy=_GPU_HOLDERS.get(exc.holder, pb.GPU_HOLDER_NONE))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Freeing the GPU failed")
+            return pb.FreeGpuResult(success=False, message=str(exc))
+        if was_released != request.begin_handover:
+            self._app.event_service.publish(
+                "runtime_changed", keys=["status"],
+                data={"runtime_released": request.begin_handover})
+        return pb.FreeGpuResult(success=True, message="GPU freed")
+
     def ReleaseRuntime(self, request, context):
         """RPC: release the GPU runtime so the training-service can use it.
 
         Refuses while a model conversion is in progress; otherwise stops
         detection, releases the TensorRT workers, and publishes a status event.
-        Until the handover ends (ResumeRuntime or an explicit Start) the
-        application type cannot change.
+        The handover ends with ResumeRuntime, an explicit Start or FreeGpu.
         """
         try:
             ok, message = self._app.model_service.release_runtime()

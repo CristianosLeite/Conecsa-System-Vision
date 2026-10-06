@@ -5,7 +5,9 @@
 """Per-frame media fan-out — POSIX SHM, never gRPC.
 
 Two rings, both shared with the gateway via the `ipc:` namespace:
-  - camera ring (produced by the Rust webcam-server) → raw MJPEG feed;
+  - camera ring (produced by the Rust webcam-server) → raw MJPEG feed; with the
+    IP camera source, the per-camera rings composed into the mosaic instead
+    (`conecsa_shm.mosaic.CameraFrameSource`);
   - processed ring (produced by inference-service's encode stage) → detection-overlaid
     MJPEG feed.
 
@@ -20,6 +22,7 @@ import time
 import cv2
 import numpy as np
 from conecsa_shm.camera_ring import CameraRingReader
+from conecsa_shm.mosaic import CameraFrameSource
 from conecsa_shm.processed_ring import ProcessedFrameReader
 from conecsa_shm.stereo import combine_stereo
 
@@ -37,7 +40,8 @@ def format_mjpeg_frame(jpg: bytes) -> bytes:
 # Module-level readers (the mmaps are shared/lock-free, safe across threads).
 # CameraRingReader.get_latest() returns a ready-to-stream JPEG (RAW frames are
 # encoded); read-only since the gateway never pushes camera config.
-_camera = CameraRingReader(settings.CAMERA_SHM_NAME, writable=False)
+_camera = CameraFrameSource(
+    settings.CAMERA_SHM_NAME, CameraRingReader(settings.CAMERA_SHM_NAME, writable=False))
 _processed = ProcessedFrameReader(settings.PROCESSED_SHM_NAME)
 
 # Idle poll interval — keep CPU usage reasonable under many concurrent clients.
@@ -139,7 +143,8 @@ def generate_training_preview():
         if frame is None:
             continue
         enabled, alpha, offset, offset_y = get_live_stereo()
-        if enabled:
+        # A mosaic of IP cameras is never a side-by-side stereo pair.
+        if enabled and _camera.ip_camera_count() == 0:
             frame = combine_stereo(
                 frame, alpha=alpha, offset=offset, offset_y=offset_y
             )
