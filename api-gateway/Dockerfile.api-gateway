@@ -44,6 +44,12 @@ WORKDIR /app/api-gateway
 # waitress is thread-per-connection: every MJPEG feed and SSE stream pins one
 # thread, so the pool must sit above the worst-case concurrent stream count.
 # --channel-timeout frees a thread quickly when a tab closes without a clean FIN
-# (the 15s SSE keepalive keeps live streams within the window). `exec` keeps
-# python as PID 1 so docker stop reaches it.
-CMD ["sh", "-c", "exec python3 -m waitress --host=0.0.0.0 --port=${GATEWAY_PORT:-5000} --threads=${WAITRESS_THREADS:-32} --channel-timeout=30 main:app"]
+# (the 15s SSE keepalive keeps live streams within the window).
+# --outbuf-high-watermark is how much waitress queues per connection before it
+# pauses the response generator. The MJPEG generators are latest-wins, but that
+# only kicks in once they are paused: with the 16 MB default a viewer on a slow
+# link (hub over a VPN) was shown frames 15-25 s old. 256 KiB is about two
+# processed frames, so a slow viewer gets the newest frame at the link's rate.
+# The compose `sysctls` cap the kernel socket buffers for the same reason.
+# `exec` keeps python as PID 1 so docker stop reaches it.
+CMD ["sh", "-c", "exec python3 -m waitress --host=0.0.0.0 --port=${GATEWAY_PORT:-5000} --threads=${WAITRESS_THREADS:-32} --channel-timeout=30 --outbuf-high-watermark=${WAITRESS_OUTBUF_HIGH_WATERMARK:-262144} main:app"]

@@ -170,6 +170,9 @@ services:
       - PROCESSED_SHM_NAME=conecsa_processed_shm
       - GATEWAY_PORT=5000
       - WAITRESS_THREADS=32
+      # ~2 processed frames: keeps the latest-wins MJPEG feeds current for a
+      # slow viewer (same as production; see docker-compose.yml).
+      - WAITRESS_OUTBUF_HIGH_WATERMARK=262144
       # Device enrollment: key/CSR under CONECSA_CERT_DIR + /enroll/*. Tokenless
       # pairing by default; set DEVICE_PAIR_TOKEN only to require a shared secret.
       - CONECSA_CERT_DIR=/etc/conecsa/certs
@@ -181,6 +184,10 @@ services:
       - AUDIT_DIR=/data/audit
     ports:
       - "5000:5000"
+    # Socket send-buffer cap, same as production (bounds the MJPEG queue ahead
+    # of a slow viewer; see docker-compose.yml).
+    sysctls:
+      net.ipv4.tcp_wmem: "4096 16384 262144"
     volumes:
       - conecsa-certs:/etc/conecsa/certs
       - audit-data:/data/audit
@@ -256,6 +263,10 @@ services:
     ports:
       - "${SYSTEM_VISION_PORT:-80}:80"
       - "${SYSTEM_VISION_TLS_PORT:-443}:443"
+    # Socket buffer caps, same as production (see docker-compose.yml).
+    sysctls:
+      net.ipv4.tcp_wmem: "4096 16384 262144"
+      net.ipv4.tcp_rmem: "4096 131072 262144"
     volumes:
       - conecsa-certs:/etc/conecsa/certs
     depends_on:

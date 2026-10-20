@@ -113,6 +113,7 @@ the code (what applies when the variable is unset); where the production
 | `TRUSTED_PROXY_HOST` | `system-vision` | — | Host name of the nginx mTLS terminator — the only peer whose `X-Conecsa-Client-Verify` header is honored |
 | `TRAINING_ORPHAN_TIMEOUT_SEC` | `120` | `1800` | Client silence (s) after which training mode is exited automatically, so a dead hub or closed page cannot leave inference stopped; `0` disables |
 | `WAITRESS_THREADS` | `32` | — | Waitress task threads (MJPEG/SSE pin one each) |
+| `WAITRESS_OUTBUF_HIGH_WATERMARK` | `262144` (256 KiB) | `262144` | Bytes waitress queues per connection before pausing the response generator. Kept at about two processed frames so the latest-wins MJPEG feeds show a slow viewer (hub over a VPN) the newest frame instead of one buffered seconds earlier; the compose `sysctls` cap the kernel socket buffers to match (see [troubleshooting](troubleshooting.md)) |
 | `GATEWAY_GRPC_TIMEOUT` | `12` | — | Deadline (s) for every unary gRPC call to a backend that passes no explicit timeout; a call that exceeds it answers `504` |
 | `GATEWAY_GRPC_LONG_TIMEOUT` | `120` | — | Deadline (s) for the slow unary calls (model select/reload, detection start, runtime release/resume, training start/cancel/finish, dataset delete, capture, SAM unload) |
 | `GATEWAY_GRPC_UPLOAD_TIMEOUT` | `600` | — | Deadline (s) for client-streaming uploads (model, dataset, weights) without an explicit timeout |

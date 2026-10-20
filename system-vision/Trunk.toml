@@ -4,7 +4,7 @@
 
 [package]
 name = "conecsa-system-vision"
-version = "2026.7.0"
+version = "2026.7.1"
 description = "Conecsa System Vision device UI"
 license = "AGPL-3.0-only"
 authors = ["Conecsa Automação"]

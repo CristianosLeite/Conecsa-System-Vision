@@ -4,7 +4,7 @@
 
 [package]
 name = "conecsa-ui-view"
-version = "2026.7.0"
+version = "2026.7.1"
 description = "Conecsa UI: zoomable image view (transform math, pointer and wheel gestures, viewport glue) and the page-zoom guard, shared by the device UI and the hub"
 license = "Apache-2.0"
 authors = ["Conecsa Automação"]

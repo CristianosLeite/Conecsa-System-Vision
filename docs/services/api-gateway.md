@@ -43,6 +43,20 @@ proto stubs on top of `conecsa-os-base:base`.
     task thread each. Size `WAITRESS_THREADS` above the worst-case number of
     concurrent streams.
 
+!!! note "Slow viewers get the newest frame, not a backlog"
+    Each MJPEG client has its own generator (`gateway/media.py`) that copies
+    the newest frame from the SHM ring whenever it is allowed to run, so a
+    viewer that drains slower than the detector publishes skips frames instead
+    of queueing them. That only works once waitress pauses the generator, which
+    it does when `WAITRESS_OUTBUF_HIGH_WATERMARK` bytes are pending on the
+    connection — hence the small default (about two processed frames) instead
+    of waitress's 16 MB. The compose files also cap the kernel TCP buffers of
+    this container and of the nginx terminator (`sysctls`), since every MB
+    queued between the generator and the viewer is a second of stale video on
+    a 1 MB/s link. Inference is unaffected either way: the processed ring is a
+    seqlock the writer never waits on, and a stalled viewer only stalls its
+    own task thread.
+
 !!! note "Every backend call has a deadline"
     The gRPC channels are wrapped by an interceptor that gives every unary and client-streaming call a deadline when the call
     site passes none — `GATEWAY_GRPC_TIMEOUT` for control calls,

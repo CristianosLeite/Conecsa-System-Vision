@@ -39,6 +39,23 @@
   build. Wait for it (`GET /api/v1/training/train/status`,
   `GET /api/v1/model/conversion`) or cancel the training; Start re-enables
   by itself when the job ends
+- **Live video lags or looks frozen from a remote hub (VPN / slow link)**
+  while the same device streams normally on the LAN: the processed feed is
+  ~40–50 fps of ~130 KB JPEGs (around 45 Mbit/s), far more than a VPN
+  carries, and anything queued between the gateway's MJPEG generator and the
+  viewer is shown late — a 16 MB queue on a 1 MB/s link is video from 16 s
+  ago, and a dip in the link looks like a freeze. The generator is
+  latest-wins, so the cure is to keep that queue short: the gateway runs with
+  `WAITRESS_OUTBUF_HIGH_WATERMARK` at ~2 frames and the compose `sysctls` cap
+  `net.ipv4.tcp_wmem`/`tcp_rmem` on `api-gateway` and `system-vision`. To
+  check a device, read the stream sockets' queues inside the containers
+  (`cat /proc/net/tcp`, hex `tx_queue:rx_queue` on the `:5000` and `:443`
+  connections — they should stay well under 512 KiB) and read the
+  `video_feed_processed` line the nginx access log writes when a stream
+  closes: it ends with the bytes sent and the request time in seconds, so
+  bytes ÷ seconds is the rate that viewer got and that ÷ frame size (about
+  130 KB) its frame rate. Inference and detection records are not affected:
+  frames reach the gateway over a shared-memory ring the writer never waits on
 - **Video drops out after a few seconds**: usually insufficient USB power — the
   camera resets off the bus under streaming load
   (`dmesg | grep -i "usb disconnect"`). Use a powered USB hub / shorter cable.

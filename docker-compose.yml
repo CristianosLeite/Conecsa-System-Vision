@@ -318,6 +318,11 @@ services:
       # Thread-per-connection: above the worst-case concurrent MJPEG + SSE
       # streams (per web tab: processed video + unified SSE; plus Node-RED).
       - WAITRESS_THREADS=32
+      # Bytes waitress queues per connection before pausing the response
+      # generator. Small (~2 processed frames) so the latest-wins MJPEG feeds
+      # keep a slow viewer (hub over a VPN) on the newest frame instead of
+      # 16 MB behind; see `sysctls` below for the kernel side of the queue.
+      - WAITRESS_OUTBUF_HIGH_WATERMARK=262144
       # Auto-exit training mode after this much client silence (a dead hub
       # must not leave the device with inference stopped). 0 disables.
       - TRAINING_ORPHAN_TIMEOUT_SEC=1800
@@ -344,6 +349,13 @@ services:
     # No published ports: the gateway is reached only via the device's nginx on
     # the Docker network, and externally only through the hub over mTLS on :443.
     # It still listens on :5000 inside the container (nginx upstream + healthcheck).
+    # Cap the TCP send buffer (autotuning otherwise grows it to 4 MB per socket):
+    # with a slow viewer the MJPEG stream's queue ahead of the viewer is the
+    # waitress watermark plus the socket buffers on the way to it, and every MB
+    # queued is a second of stale video on a 1 MB/s VPN. 256 KiB still allows
+    # ~256 KiB/RTT per connection (5 MB/s at 50 ms), plenty for the LAN and VPN.
+    sysctls:
+      net.ipv4.tcp_wmem: "4096 16384 262144"
     volumes:
       # Device key/CSR + hub-signed cert/CA, shared with the nginx TLS terminator.
       - conecsa-certs:/etc/conecsa/certs
@@ -494,6 +506,15 @@ services:
       # solely through the hub. nginx still listens on :80 inside the container
       # for the healthcheck.
       - "${SYSTEM_VISION_TLS_PORT:-443}:443"
+    # Cap the TCP buffers of the mTLS terminator (see api-gateway `sysctls`):
+    # nginx relays the MJPEG feeds unbuffered, so the only queues ahead of a
+    # slow viewer are its receive buffer on the gateway socket and its send
+    # buffer on the hub socket. Both grew to several MB (seconds of stale
+    # video over a VPN) before being capped. Inbound uploads from the hub are
+    # bounded the same way (~256 KiB/RTT), which is ample for either link.
+    sysctls:
+      net.ipv4.tcp_wmem: "4096 16384 262144"
+      net.ipv4.tcp_rmem: "4096 131072 262144"
     volumes:
       # Shared with api-gateway: device key/CSR (written by the gateway during
       # enrollment) and the hub-signed cert + CA (read by nginx for mTLS).
